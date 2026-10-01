@@ -46,11 +46,14 @@ import { correctWithReversed, MIN_NEAR_STREAMLINES, sortByDistance, streamlineDi
 import { tractColor, UNNAMED } from "./tractcloud/tract-colors.ts";
 import { seedsInSphere, trackFromSeeds, type Streamline, type TrackingOptions } from "./tracking.ts";
 import { DIFFUSION_REFERENCES } from "./references.ts";
+import { estimateResponses, kernelFromResponses } from "./responses.ts";
+import { csdVolume, type FodVolume } from "./csd-volume.ts";
+import { trackPttParallel } from "./ptt.ts";
 
 /** A diffusion scan in the scene: a sequence whose frames carry diffusion values. */
 interface Scan { browserId: string; name: string; frameIds: string[]; bValues: number[]; study?: string; patient?: string }
 /** What has been computed for a scan, kept while the scan is in the scene. */
-interface Computed { dwi: DiffusionSeries; fit: TensorFit; maxB: number; corrected: string; partnerId: string; faId?: string; colorFaId?: string; ukf?: UkfData }
+interface Computed { dwi: DiffusionSeries; fit: TensorFit; maxB: number; corrected: string; partnerId: string; faId?: string; colorFaId?: string; ukf?: UkfData; fod?: FodVolume }
 /** A reversed phase-encoding scan for a diffusion scan: b = 0 images on the same grid, same study. */
 interface Partner { id: string; name: string; frameIds: string[] }
 /** A group of tracts. */
@@ -62,7 +65,11 @@ interface TractGroup {
 }
 /** How tracts are followed: one tensor per voxel (fast, the classic), or the two-tensor free-water UKF (ukf.ts; crossing
  *  fibers, and free water -- edema -- modeled; the method SlicerDMRI uses for tumor planning). */
-type Method = "ukf" | "single";
+/** "ptt": fiber distributions from multi-shell CSD (csd.ts, responses from the scan) and parallel transport tracking
+ *  (ptt.ts), on the processor's workers -- the smoother method Lauren O'Donnell recommended; about three times as long
+ *  as UKF and no better on the development cases' meningiomas, so an option (Ron, 2026-10-01: "if both are close to
+ *  equal in quality, we go with the faster and offer the other as option"). */
+type Method = "ukf" | "single" | "ptt";
 type Show = "signal" | "fa" | "colorfa";
 
 const FIELD_KEY = "diffusion-tracts";
@@ -450,9 +457,20 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     c.ukf ??= prepareUkfData(c.dwi, c.fit.mask);
     return await trackUkfSeeds(device, c.ukf, seedsRAS, adv.minFA, (f) => { busy = `Making tracts… ${Math.round(100 * f)}%`; render(); });
   }
+  /** PARALLEL TRANSPORT TRACKING on fiber distributions, in workers bundled with the extension (extension.json "workers").
+   *  The distributions are kept with the scan's computations, so a second run tracks at once. */
+  async function trackPtt(c: Computed, seedsRAS: number[][]): Promise<Float32Array[]> {
+    if (!c.fod) {
+      busy = "Fiber distributions… 0%"; render();
+      const k = kernelFromResponses(estimateResponses(c.dwi));
+      c.fod = await csdVolume(c.dwi, c.fit.mask, k, { workerUrl: assetUrl("diffusion", "workers/csd-worker.js"), onProgress: (f) => { busy = `Fiber distributions… ${Math.round(100 * f)}%`; render(); } });
+    }
+    return await trackPttParallel(c.fod, seedsRAS, { workerUrl: assetUrl("diffusion", "workers/ptt-worker.js"), onProgress: (f) => { busy = `Making tracts… ${Math.round(100 * f)}%`; render(); } });
+  }
   /** The tracts from these seeds, by the method chosen. */
   async function follow(c: Computed, seeds: number[][]): Promise<Float32Array[]> {
     if (method === "ukf") return await trackUkf(c, seeds);
+    if (method === "ptt") return await trackPtt(c, seeds);
     return (await track(c.fit, seeds)).map((x) => x.points);
   }
 
@@ -467,7 +485,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
   }
 
   function addGroup(name: string, scan: Scan, strands: Float32Array[]) {
-    groups.push({ id: ++groupSeq, name: `${name}${method === "ukf" ? "" : " (single tensor)"}`, scan: scan.browserId, strands, visible: true, method });
+    groups.push({ id: ++groupSeq, name: `${name}${method === "ukf" ? "" : method === "ptt" ? " (smooth curves)" : " (single tensor)"}`, scan: scan.browserId, strands, visible: true, method });
     redraw3d();
   }
 
@@ -477,7 +495,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     if (!scan || !target || busy) return;
     if (moved(target.seg)) { say(`"${target.seg.name}" has a transform (Transforms module); tracts are not started near a moved segmentation yet — harden or remove the transform first.`); render(); return; }
     busy = "Making tracts…"; render();
-    if (method === "ukf") { await makeNamedTracts(scan, target); return; }
+    if (method === "ukf" || method === "ptt") { await makeNamedTracts(scan, target); return; }
     try {
       const c = await ensureFit(scan);
       say(`Finding white matter within ${withinMm} mm of ${target.label}…`);
@@ -504,7 +522,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       const t0 = performance.now();
       const seeds = wholeBrainSeeds(c.fit);
       say(`Following tracts through the whole brain from ${seeds.length.toLocaleString()} starting points…`);
-      const sl = await trackUkf(c, seeds);
+      const sl = method === "ptt" ? await trackPtt(c, seeds) : await trackUkf(c, seeds);
       const t1 = performance.now();
       busy = "Naming tracts…"; render();
       const model = await tractCloud();
@@ -685,9 +703,9 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     go.className = "sl-primary";
     go.style.cssText = "width:100%;margin:4px 0";
     go.textContent = busy && !busy.startsWith("Grow") && !busy.startsWith("Comput") ? busy : "Show the fiber tracts near the tumor";
-    go.title = `Finds the brain's main nerve fiber tracts, names them, and shows every one that runs within ${withinMm} mm of the tumor — whole, in its own color, with how close it comes. About half a minute.`;
+    go.title = `Finds the brain's main nerve fiber tracts, names them, and shows every one that runs within ${withinMm} mm of the tumor — whole, in its own color, with how close it comes. ${method === "ptt" ? "About three minutes (Smooth curves, chosen under Advanced)." : "About half a minute."}`;
     go.disabled = !!busy || !scan || !near || seeding || !!outline;
-    go.onclick = () => { method = "ukf"; void makeTracts(); };
+    go.onclick = () => { if (method === "single") method = "ukf"; void makeTracts(); };   // the face names tracts: two-tensor or smooth curves
     face.append(go);
     if (!scan || !near) { const p = document.createElement("p"); p.className = "sl-hint"; p.textContent = "Waits until the case has all three."; face.append(p); }
     if (note) { const p = document.createElement("p"); p.className = "sl-hint"; p.style.margin = "4px 0 0"; p.textContent = note; face.append(p); }
@@ -759,7 +777,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     shell.row(tr, "Within").append(mmWrap);
     const meth = document.createElement("div");
     meth.style.cssText = "display:flex;gap:3px";
-    for (const [k, label, tip] of [["ukf", "Two-tensor", "Follows two crossing fiber directions and the free water around them (edema): the method used for tumor planning."], ["single", "Single tensor", "One direction per voxel: fast, but stops or turns where fibers cross."]] as const) {
+    for (const [k, label, tip] of [["ukf", "Two-tensor", "Follows two crossing fiber directions and the free water around them (edema): the method used for tumor planning. The default: about half a minute."], ["ptt", "Smooth curves", "Follows fiber directions as smooth curves, from a model of all the directions in each voxel (CSD and parallel transport tracking). About three minutes; on the development cases no better near meningiomas than two-tensor."], ["single", "Single tensor", "One direction per voxel: fast, but stops or turns where fibers cross."]] as const) {
       const b = document.createElement("button"); b.textContent = label; b.title = tip; b.disabled = !!busy;
       b.className = "sl-sh-look-b" + (method === k ? " sl-on" : ""); b.setAttribute("aria-pressed", String(method === k));
       b.onclick = () => { method = k; render(); };

@@ -28,6 +28,10 @@
       "LICENSE-UKF.txt"
     ]
   },
+  "workers": [
+    "csd-worker.ts",
+    "ptt-worker.ts"
+  ],
   "tests": {
     "flags": [
       "--unstable-webgpu"
