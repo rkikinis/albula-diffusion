@@ -399,7 +399,11 @@ export function trackUkf(data: UkfData, seeds: number[][], opts: UkfOptions = {}
     for (let q = 0; q < G; q++) if (!(z[q] >= 0) || !Number.isFinite(z[q])) { rejected++; return; }
     const t = seedTensor(data, z);
     if (!t) { rejected++; return; }
-    const l2 = (t.l[1] + t.l[2]) / 2, fa = l2fa(t.l[0], t.l[1], t.l[2]);
+    // THE SEED'S FA, as the original computes it for the simple model: from the major eigenvalue and the MEAN of the
+    // two minor ones (tractography.cc 523-529, 541, 552). From the three as they are it came out higher, and the port
+    // tracked 77 seeds of PAT16's 2,000 the original rejects (50 of them fibers of 10+ points; investigation,
+    // 2026-10-01). With this, the port makes the original's 838 fibers.
+    const l2 = (t.l[1] + t.l[2]) / 2, fa = l2fa(t.l[0], l2, l2);
     if (!(fa > seedFA)) { rejected++; return; }
     used++;
     const halves = [1, -1].map((sgn) => {

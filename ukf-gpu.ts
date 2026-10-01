@@ -457,9 +457,11 @@ export async function trackUkfGpu(device: GPUDevice, data: UkfData, seeds: numbe
     signalAt(data, sd, sigma, z);
     for (let q = 0; q < G; q++) if (!(z[q] >= 0) || !Number.isFinite(z[q])) { rejected++; return; }
     const t = seedTensor(data, z);
-    if (!t || !(l2fa3(t.l[0], t.l[1], t.l[2]) > seedFA)) { rejected++; return; }
+    // The seed's FA from the major eigenvalue and the mean of the minor two, as the original (ukf.ts, the same rule).
+    const lm = t ? (t.l[1] + t.l[2]) / 2 : 0;
+    if (!t || !(l2fa3(t.l[0], lm, lm) > seedFA)) { rejected++; return; }
     used++;
-    const la = t.l[0] * 1e-3, lp = ((t.l[1] + t.l[2]) / 2) * 1e-3, fa = l2fa3(t.l[0], t.l[1], t.l[2]);
+    const la = t.l[0] * 1e-3, lp = lm * 1e-3, fa = l2fa3(t.l[0], lm, lm);
     for (const sgn of [1, -1]) {
       const s = new Float32Array(STRIDE), m = t.m.map((v) => sgn * v);
       s.set([m[0], m[1], m[2], la, lp, t.m[0], t.m[1], t.m[2], la, lp, 1], 0);

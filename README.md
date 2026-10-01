@@ -22,8 +22,10 @@ This extension adds diffusion MRI, from the scanner's files to the tracts near a
   correlating 0.97; the test requires 2 mm and 0.95), on a synthetic
   crossing, and for anatomical plausibility on PAT16. Against the original UKFTractography (v2.1, built from source;
   `Contents/tools/ukf-reference.ts` in the workspace) from the same starting points on PAT16, paired by seed point: all
-  838 of the original's fibers pair up, and 815 (97%) end within 0.1 mm of the port's. The port also makes 50 fibers
-  from seeds where the original makes none; that difference is not yet explained. Single-tensor tracking too.
+  838 of the original's fibers pair up, and 815 (97%) end within 0.1 mm of the port's (the rest part by ordinary
+  round-off, mostly where the filter's limits are in force); the port makes no fiber the original does not, since it
+  computes a seed's FA as the original does for the simple model (the mean of the two minor eigenvalues). Single-tensor
+  tracking too.
 - **Tract names**: TractCloud (Xue, Zhang, O'Donnell et al., MICCAI 2023) written from the paper as a WebGPU network;
   on the reference case (5,120 UKF streamlines of PAT16) every layer agrees with the original running in PyTorch within
   4e-6, and all 5,120 streamlines get the same cluster as the original (the test allows 0.2%).
