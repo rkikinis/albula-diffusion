@@ -1,0 +1,16 @@
+{
+  "name": "diffusion",
+  "repository": "albula-diffusion",
+  "version": "0.1.0",
+  "sdk": 1,
+  "about": "Diffusion MRI for brain tumor planning: reading diffusion data from every major scanner, FA and Color FA, distortion correction, UKF two-tensor free-water tractography on the graphics card, tract names from TractCloud, the tracts near a tumor.",
+  "entries": {
+    "hooks": "hooks.ts",
+    "module": "module.ts"
+  },
+  "assets": {
+    "tractcloud": ["tractcloud/model/weights.f32", "tractcloud/model/model.json", "tractcloud/model/LICENSE.txt"],
+    "dcm2niix": ["vendor/dcm2niix/index.js", "vendor/dcm2niix/worker.js", "vendor/dcm2niix/dcm2niix.js", "vendor/dcm2niix/dcm2niix.wasm", "vendor/dcm2niix/LICENSE.txt"]
+  },
+  "tests": "deno test -A --no-check --unstable-webgpu --config ../../src/SlicerLive/deno.jsonc ."
+}

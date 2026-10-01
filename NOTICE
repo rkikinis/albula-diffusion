@@ -1,0 +1,23 @@
+albula-diffusion — the diffusion MRI extension of Albula
+Copyright 2026 Ron Kikinis. Written with Claude (Anthropic), an AI assistant, under Ron Kikinis's direction.
+
+Albula's own code in this repository is licensed under the Apache License, Version 2.0 (LICENSE).
+These parts are under their own licenses, which apply to them instead:
+
+1. ukf.ts and ukf-gpu.ts — a port of UKFTractography (github.com/pnlbwh/ukftractography), translated to TypeScript and
+   WGSL and restructured. All or portions of this licensed product have been obtained under license from The Brigham
+   and Women's Hospital, Inc. and are subject to the UKF Tractography Contribution and Software License Agreement
+   (LICENSE-UKF.txt, UKFTractography's own, at its commit 2d2b66153970). For research use; not reviewed or approved by the FDA or any other agency; clinical
+   applications are neither recommended nor advised.
+   Methods: Malcolm, Shenton, Rathi, IEEE TMI 29:1664 (2010); Reddy & Rathi, Front Neurosci 10:166 (2016);
+   Baumgartner et al., CDMRI (2012).
+
+2. tractcloud/model/ — the trained TractCloud network (SlicerDMRI/TractCloud release v1.0.0), converted to plain files
+   by tractcloud/model/make-model.py; 3D Slicer's license (tractcloud/model/LICENSE.txt). The network itself
+   (tractcloud/tractcloud.ts, tractcloud-gpu.ts) is written here from the paper: Xue, Zhang, O'Donnell et al.,
+   MICCAI 2023.
+
+3. vendor/dcm2niix/ — Chris Rorden's dcm2niix, WebAssembly build (@niivue/dcm2niix 1.3.20260724), BSD-style license
+   (vendor/dcm2niix/LICENSE.txt). Used as a second opinion on how a diffusion scan is read; never fetched at run time.
+
+The papers each part rests on are listed in references.ts.
