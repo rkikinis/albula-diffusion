@@ -175,6 +175,94 @@ export function nnls(m: number, ncols: number, col: (j: number) => Float64Array,
   return x;
 }
 
+/**
+ * THE SAME NNLS, FASTER: the Cholesky factor of the passive columns' Gram matrix is grown one column at a time (O(k·m)
+ * per added column instead of rebuilding the normal equations), and rebuilt only when a column leaves. The Gram matrix
+ * of all columns (G = A Aᵀ by columns, ncols²) is precomputed once per model. `warm`: a passive set to start from (a
+ * neighboring voxel's), checked and dropped where it does not hold. Exact like `nnls`.
+ */
+export function nnlsFast(m: number, ncols: number, A: Float64Array, gram: Float64Array, b: Float64Array, warm?: number[], maxIter = 2000): { x: Float64Array; passive: number[]; iterations: number } {
+  const x = new Float64Array(ncols), r = Float64Array.from(b), inP = new Uint8Array(ncols), blocked = new Uint8Array(ncols);
+  const P: number[] = [], R = new Float64Array(m * m), y = new Float64Array(m), z = new Float64Array(m), Atb = new Float64Array(ncols);
+  for (let j = 0; j < ncols; j++) { let t = 0; for (let i = 0; i < m; i++) t += A[j * m + i] * b[i]; Atb[j] = t; }
+  const grow = (j: number): boolean => {                       // add column j as row k of R (lower triangular)
+    const k = P.length; let yy = 0;
+    for (let a = 0; a < k; a++) {
+      let t = gram[P[a] * ncols + j];
+      for (let c = 0; c < a; c++) t -= R[a * m + c] * y[c];
+      y[a] = t / R[a * m + a]; yy += y[a] * y[a];
+    }
+    const d = gram[j * ncols + j] - yy;
+    if (d <= 1e-10 * gram[j * ncols + j]) return false;
+    for (let a = 0; a < k; a++) R[k * m + a] = y[a];
+    R[k * m + k] = Math.sqrt(d); P.push(j); inP[j] = 1;
+    return true;
+  };
+  const solve = () => {                                          // z_P: (R Rᵀ) z = A_Pᵀ b
+    const k = P.length;
+    for (let a = 0; a < k; a++) { let t = Atb[P[a]]; for (let c = 0; c < a; c++) t -= R[a * m + c] * y[c]; y[a] = t / R[a * m + a]; }
+    for (let a = k - 1; a >= 0; a--) { let t = y[a]; for (let c = a + 1; c < k; c++) t -= R[c * m + a] * z[c]; z[a] = t / R[a * m + a]; }
+  };
+  const rebuild = () => { const old = P.splice(0); for (const j of old) inP[j] = 0; for (const j of old) if (!grow(j)) x[j] = 0; };
+  const residual = () => { r.set(b); for (const j of P) { const v = x[j]; if (v) for (let i = 0; i < m; i++) r[i] -= A[j * m + i] * v; } };
+  // the inner loop: from the current x on P, toward the least-squares solution on P, dropping what turns non-positive
+  const inner = () => {
+    for (;;) {
+      if (!P.length) return;
+      solve();
+      let ok = true; for (let a = 0; a < P.length; a++) if (z[a] <= 0) { ok = false; break; }
+      if (ok) { P.forEach((j, a) => { x[j] = z[a]; }); return; }
+      let alpha = Infinity;
+      P.forEach((j, a) => { if (z[a] <= 0) alpha = Math.min(alpha, x[j] / (x[j] - z[a])); });
+      P.forEach((j, a) => { x[j] += alpha * (z[a] - x[j]); });
+      const keep = P.filter((j) => x[j] > 1e-14);
+      for (const j of P) if (x[j] <= 1e-14) { x[j] = 0; }
+      if (keep.length !== P.length) { for (const j of P) inP[j] = 0; P.length = 0; for (const j of keep) grow(j); blocked.fill(0); }
+    }
+  };
+  if (warm?.length) {                                             // start from a neighbor's passive set
+    for (const j of warm) if (!inP[j]) grow(j);
+    for (const j of P) x[j] = 1e-12;                              // tiny positive start: the inner loop steps from here
+    inner(); residual();
+  }
+  let it = 0;
+  for (; it < maxIter; it++) {
+    let best = -1, bw = 1e-10;
+    for (let j = 0; j < ncols; j++) {
+      if (inP[j] || blocked[j]) continue;
+      let t = 0; for (let i = 0; i < m; i++) t += A[j * m + i] * r[i];
+      if (t > bw) { bw = t; best = j; }
+    }
+    if (best < 0 || P.length >= m) break;
+    if (!grow(best)) { blocked[best] = 1; continue; }
+    solve();
+    if (z[P.length - 1] <= 0) { P.pop(); inP[best] = 0; blocked[best] = 1; rebuild(); continue; }
+    inner();
+    residual();
+  }
+  return { x, passive: [...P], iterations: it };
+}
+
+/** The Gram matrix of the model's constraint rows (G[i][j] = Mᵢ·Mⱼ), for nnlsFast. */
+export function csdGram(model: CsdModel): Float64Array {
+  const { M, nx, constraints: n } = model, G = new Float64Array(n * n);
+  for (let i = 0; i < n; i++) for (let j = 0; j <= i; j++) { let s = 0; for (let a = 0; a < nx; a++) s += M[i * nx + a] * M[j * nx + a]; G[i * n + j] = G[j * n + i] = s; }
+  return G;
+}
+
+/** The fit of one voxel with the faster solver; `warm` a neighbor's passive set (returned for the next voxel). */
+export function csdFitFast(model: CsdModel, gram: Float64Array, signal: ArrayLike<number>, warm?: number[]): { x: Float64Array; passive: number[] } {
+  const { nx, rows, X, L, M, constraints } = model;
+  const c = new Float64Array(nx);
+  for (let a = 0; a < nx; a++) { let s = 0; for (let r = 0; r < rows; r++) s += X[r * nx + a] * signal[r]; for (let b = 0; b < a; b++) s -= L[a * nx + b] * c[b]; c[a] = s / L[a * nx + a]; }
+  const { x: lam, passive } = nnlsFast(nx, constraints, M, gram, c.map((v) => -v), warm);
+  const z = Float64Array.from(c);
+  for (const j of passive) { const l = lam[j]; for (let a = 0; a < nx; a++) z[a] += l * M[j * nx + a]; }
+  const x = new Float64Array(nx);
+  for (let a = nx - 1; a >= 0; a--) { let t = z[a]; for (let b = a + 1; b < nx; b++) t -= L[b * nx + a] * x[b]; x[a] = t / L[a * nx + a]; }
+  return { x, passive };
+}
+
 /** The fit of one voxel: x = [fractions…, FOD coefficients…] (nx numbers). */
 export function csdFit(model: CsdModel, signal: ArrayLike<number>): Float64Array {
   const { nx, rows, X, L, M, constraints } = model;
