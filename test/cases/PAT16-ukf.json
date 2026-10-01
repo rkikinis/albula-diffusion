@@ -1,5 +1,5 @@
 {
- "about": "PAT16 of OpenNeuro ds001226 (CC0), two-tensor UKF, the case library's stored result (Contents/data/tractcloud/cases/PAT16.json, 2026-10-01). The regression test (cases.regression.test.ts) reruns the case and compares; a deliberate change that moves these numbers rewrites this file in the same commit, with the reason. Rewritten 2026-10-01 night: the seed's FA computed as the original UKFTractography does for the simple model (the mean of the two minor eigenvalues; ukf.ts), which tracks fewer seeds -- the port now makes exactly the original's fibers from the same seeds.",
+ "about": "PAT16 of OpenNeuro ds001226 (CC0), two-tensor UKF, the case library's stored result (Contents/data/tractcloud/cases/PAT16.json, 2026-10-01). The regression test (cases.regression.test.ts) reruns the case and compares; a deliberate change that moves these numbers rewrites this file in the same commit, with the reason. Rewritten 2026-10-01 night: the seed's FA computed as the original UKFTractography does for the simple model (the mean of the two minor eigenvalues; ukf.ts), which tracks fewer seeds -- from the same seeds the port now tracks the same seeds as the original (838 fibers each).",
  "id": "PAT16",
  "method": "ukf",
  "streamlines": 10705,
