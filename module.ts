@@ -40,6 +40,7 @@ import { DCM2NIIX_VERSION, secondOpinion, type SecondOpinion } from "./second-op
 import { assetUrl, seriesDicomFiles, startPlacing } from "albula";
 import { createSegmentation, growIntoSegmentation, openDicomDatabase, openLoadFromDisk, paintInto, runAction, saveSegmentationToDicom } from "albula";
 import { readMore, tnaLine, tractLabel } from "./tract-info.ts";
+import { faceNear as nearOnFace, isTumorName, patientOf, pickAnatomy, withoutLastRun } from "./face.ts";
 import { loadModel, type ModelJson, type TractCloudModel } from "./tractcloud/tractcloud.ts";
 import { nameTracts } from "./tractcloud/name-tracts.ts";
 import { correctWithReversed, MIN_NEAR_STREAMLINES, sortByDistance, streamlineDistances, tractName, trackUkfSeeds, wholeBrainSeeds } from "./planning.ts";
@@ -229,10 +230,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
    * parcellation -- ticked "Tumor outline" and the tracts were measured from its first structure). A segment counts when
    * its name says so, or when it is the outline made in this module; the face measures only from these.
    */
-  const TUMOR = /tumou?r|neoplas|lesion|glioma|glioblastoma|meningioma|metasta|cancer|carcinoma|lymphoma|schwannoma/i;
-  const tumorChoices = (scan: Scan | undefined) => segmentChoices(scan).filter((c) => TUMOR.test(c.label) || c.seg.id === kept?.segId);
-  /** The patient a scan belongs to, as its name says it (the part before "·"). */
-  const patientOf = (name: string) => name.includes("·") ? name.slice(0, name.indexOf("·")).trim() : "";
+  const tumorChoices = (scan: Scan | undefined) => segmentChoices(scan).filter((c) => isTumorName(c.label) || c.seg.id === kept?.segId);
   /**
    * THE MRI OF THE ANATOMY for a scan: an image of the same study (or patient) that is not a diffusion volume, a
    * reversed-phase volume, a computed map or a label map; a T1 by name first (the scan the tumor is outlined on).
@@ -247,8 +245,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       if ((o.diffusion as unknown) !== undefined) return false;
       return (!!scan.study && o.studyInstanceUID === scan.study) || (!!scan.patient && o.patientID === scan.patient);
     });
-    // "T1" in the SERIES part of the name, not the patient's (critic, finding 15: an ID like PAT10 matched).
-    return cands.find((n) => /\bt1/i.test(String(n.name ?? "").replace(/^.*?·/, ""))) ?? cands[0];
+    return pickAnatomy(cands);   // face.ts: "T1" in the series part of the name (critic, finding 15)
   };
   const removeNode = (id: string) => {
     const n = live.nodes.get(id);
@@ -561,7 +558,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       const dist = await streamlineDistances({ dims: target.seg.dims as number[], ijkToRAS: target.seg.ijkToRAS as number[], inside: (v) => Number(lab[v]) === target.labelValue }, sl, withinMm + 2);
       const sorted = sortByDistance(model, named, dist, withinMm), nearTracts = sorted.near;
       // A NEW RUN REPLACES THE LAST ONE for this scan (critic, finding 5: a second press doubled every tract).
-      for (let i = groups.length - 1; i >= 0; i--) if (groups[i].scan === scan.browserId && groups[i].run) groups.splice(i, 1);
+      groups.splice(0, groups.length, ...withoutLastRun(groups, scan.browserId));   // face.ts
       const pick = (idx: number[]) => idx.map((i) => sl[i]);
       for (const e of nearTracts) {
         const t = model.json.tracts[e.tract];
@@ -665,7 +662,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     if (outline && (!live.nodes.get(outline.seedsId) || !live.nodes.get(outline.imageId))) outline = undefined;   // finding 9
     const tumors = tumorChoices(scan);
     // The face measures from a tumor only; Advanced may still measure from any structure (its own "Near").
-    const faceNear = tumors.find((t) => t.key === near)?.key ?? tumors[0]?.key ?? "";
+    const faceNear = nearOnFace(tumors.map((t) => t.key), near);   // face.ts
     root.innerHTML = "";
     // THE FACE (mockup diffusion-workflow-v4; Ron, 2026-10-01: the user is a neurosurgery resident who knows neither the
     // lingo nor the concepts -- "One button as initial, everything else under advanced", tooltips "with lay person
