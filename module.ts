@@ -40,6 +40,7 @@ import { DCM2NIIX_VERSION, secondOpinion, type SecondOpinion } from "./second-op
 import { assetUrl, seriesDicomFiles, startPlacing } from "albula";
 import { createSegmentation, growIntoSegmentation, openDicomDatabase, openLoadFromDisk, paintInto, registerProbeRows, runAction, saveSegmentationToDicom, showHideAllState } from "albula";
 import { buildTractIndex, tractsNear, type TractIndex } from "./tract-index.ts";
+import { sliceCrossings } from "./tract-slice.ts";
 import { readMore, tnaLine, tractInfo, tractLabel } from "./tract-info.ts";
 import { faceNear as nearOnFace, isTumorName, matchesSearch, patientOf, pickAnatomy, tractGroupKey, TRACT_GROUPS, withoutLastRun } from "./face.ts";
 import { loadModel, type ModelJson, type TractCloudModel } from "./tractcloud/tractcloud.ts";
@@ -576,6 +577,8 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       groups.splice(0, groups.length, ...withoutLastRun(groups, scan.browserId));   // face.ts
       const pick = (idx: number[]) => idx.map((i) => sl[i]);
       runs.set(scan.browserId, { sl, named, sorted, structure, label: target.label, withinMm, method });
+      // The anatomy behind the slices, where the tracts' crossings are drawn (Yogesh Rathi via Ron, 2026-10-01).
+      const anat = anatomyFor(scan); if (anat) putBackground(anat.id);
       // The near tracts shown; the faint ones (within reach, fewer than the minimum) listed after them, hidden.
       for (const [e, faint] of [...nearTracts.map((e) => [e, false] as const), ...sorted.faint.map((e) => [e, true] as const)]) {
         const t = model.json.tracts[e.tract];
@@ -716,11 +719,46 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       else if (colorBy === "tract" && g.unnamed) id = GRAY_ID;
       return g.strands.map((p) => id ? { points: p, bundle: id } : { points: p, bundle: directionId(p), pointBundles: pointIds(p) });
     });
+    drawSliceCrossings();
     const old = field; field = undefined;
     if (!strands.length) view.removeField(FIELD_KEY);
     else { field = new FiberField(device, strands, { radius: RADIUS[drawAs], bundleColors: pal }); view.setField(FIELD_KEY, field); }
     old?.destroy?.();
   }
+
+  /**
+   * THE TRACTS ON THE SLICES (Yogesh Rathi via Ron, 2026-10-01: "on the cross sections show the T1 image and
+   * intersections of the tubes on the slices"): a dot wherever a shown streamline crosses a slice view's plane, in the
+   * color it has in 3D (tract-slice.ts). Each view's plane is read from its slice node; a view that moves draws again.
+   */
+  const CROSSINGS_LAYER = "diffusion-tracts", MAX_CROSSINGS = 30000;
+  let crossingsQueued = false;
+  function drawSliceCrossings() {
+    const shown = groups.filter((g) => g.visible && g.strands.length);
+    const view = live.view as { setOverlay?: (cell: string, layer: string, items: unknown[]) => void } | undefined;
+    if (!view?.setOverlay) return;
+    if (!shown.length) { view.setOverlay("*", CROSSINGS_LAYER, []); return; }
+    const color = (g: TractGroup, dir: number[]): number[] => {
+      if (colorBy === "tract" && g.tract !== undefined) { const c = tractColor(g.tract, tractCount); return [c[0], c[1], c[2]]; }
+      if (colorBy === "tract" && g.unnamed) return [UNNAMED[0], UNNAMED[1], UNNAMED[2]];
+      return [Math.abs(dir[0]), Math.abs(dir[1]), Math.abs(dir[2])];    // by direction, as in 3D: red left-right ...
+    };
+    const items: unknown[] = [];
+    for (const n of live.nodes.values()) {
+      if (n.type !== "view" || n.kind !== "slice" || !Array.isArray(n.sliceToRAS)) continue;
+      const m = n.sliceToRAS as number[], L = Math.hypot(m[2], m[6], m[10]) || 1, nrm: [number, number, number] = [m[2] / L, m[6] / L, m[10] / L];
+      const d = typeof n.offset === "number" ? n.offset : m[3] * nrm[0] + m[7] * nrm[1] + m[11] * nrm[2];
+      const cs = sliceCrossings(shown.map((g) => g.strands), { origin: [nrm[0] * d, nrm[1] * d, nrm[2] * d], normal: nrm });
+      const step = Math.max(1, Math.ceil(cs.length / MAX_CROSSINGS));      // a very dense slice is thinned evenly
+      for (let i = 0; i < cs.length; i += step) items.push({ kind: "point", ras: cs[i].p, color: color(shown[cs[i].set], cs[i].dir), radiusPx: 1.6, inPlaneOnly: true });
+    }
+    view.setOverlay("*", CROSSINGS_LAYER, items);
+  }
+  live.subscribe((c) => {
+    if (c.type !== "view" || !String(c.id ?? "").startsWith("nativeSlice-") || crossingsQueued || !groups.some((g) => g.visible)) return;
+    crossingsQueued = true;
+    requestAnimationFrame(() => { crossingsQueued = false; drawSliceCrossings(); });
+  });
 
   /** What left the scene takes its computations and tracts with it (critic, finding 9; CONSTRAINTS: a copy is held only
    *  while something reads it). */
