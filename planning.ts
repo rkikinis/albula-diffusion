@@ -85,15 +85,23 @@ export function wholeBrainSeeds(fit: TensorFit): number[][] {
 
 /** UKF ON THE GRAPHICS CARD (ukf-gpu.ts) from RAS seeds, in batches of 2,000 (short command buffers; the page answers
  *  between them). Streamlines in RAS mm. */
-export async function trackUkfSeeds(device: GPUDevice, data: UkfData, seedsRAS: number[][], stoppingFA: number, onBatch?: (done: number) => void | Promise<void>): Promise<Float32Array[]> {
+/** Where tracking's time goes, ms, summed over the batches (2026-10-01: Ron's WebKit window took 39.8 s where Chrome
+ *  took 18.6 s on the same case; this says which part): `prepare` the seeds on the processor, `gpu` the card's steps
+ *  and reading them back, `assemble` the fibers on the processor, `between` the page's own work between batches
+ *  (drawing, the progress shown). */
+export interface TrackTiming { prepare: number; gpu: number; assemble: number; between: number }
+
+export async function trackUkfSeeds(device: GPUDevice, data: UkfData, seedsRAS: number[][], stoppingFA: number, onBatch?: (done: number) => void | Promise<void>, timing?: TrackTiming): Promise<Float32Array[]> {
   const R = invAffine(data.ijkToRAS);
   const ijk = seedsRAS.map(([x, y, z]) => [R[0] * x + R[1] * y + R[2] * z + R[3], R[4] * x + R[5] * y + R[6] * z + R[7], R[8] * x + R[9] * y + R[10] * z + R[11]]);
   const out: Float32Array[] = [], BATCH = 2000;
   for (let s = 0; s < ijk.length; s += BATCH) {
     const r = await trackUkfGpu(device, data, ijk.slice(s, s + BATCH), { stoppingFA });
     for (const fb of r.fibers) out.push(fb.points);
+    const t = performance.now();
     await onBatch?.(Math.min(1, (s + BATCH) / ijk.length));
     await yieldNow();
+    if (timing) { timing.prepare += r.ms.prepare; timing.gpu += r.ms.gpu; timing.assemble += r.ms.total - r.ms.prepare - r.ms.gpu; timing.between += performance.now() - t; }
   }
   return out;
 }

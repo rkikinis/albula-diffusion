@@ -46,7 +46,7 @@ import { readMore, tnaLine, tractInfo, tractLabel, tractNote } from "./tract-inf
 import { faceNear as nearOnFace, isTumorName, matchesSearch, patientOf, pickAnatomy, tractGroupKey, TRACT_GROUPS, withoutLastRun } from "./face.ts";
 import { loadModel, type ModelJson, type TractCloudModel } from "./tractcloud/tractcloud.ts";
 import { nameAgainst, nameTracts, type Named } from "./tractcloud/name-tracts.ts";
-import { correctWithReversed, denseSeeds, MIN_NEAR_STREAMLINES, otherSide, sortByDistance, streamlineDistances, tractName, trackUkfSeeds, wholeBrainSeeds, type Sorted, type Structure } from "./planning.ts";
+import { correctWithReversed, denseSeeds, MIN_NEAR_STREAMLINES, otherSide, sortByDistance, streamlineDistances, tractName, trackUkfSeeds, wholeBrainSeeds, type Sorted, type Structure, type TrackTiming } from "./planning.ts";
 import { tractColor, UNNAMED } from "./tractcloud/tract-colors.ts";
 import { seedsInSphere, trackFromSeeds, type Streamline, type TrackingOptions } from "./tracking.ts";
 import { DIFFUSION_REFERENCES } from "./references.ts";
@@ -521,10 +521,17 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
    * now within 0.06 mm, the README's numbers)
    * (dmri-review-2026-09-28.md). 12x faster (3.2 s against 40.7 s).
    */
+  /** The last tracking's breakdown, for the status line (planning.ts TrackTiming, plus the signal's preparation). */
+  let lastTiming: (TrackTiming & { data: number }) | undefined;
   async function trackUkf(c: Computed, seedsRAS: number[][]): Promise<Float32Array[]> {
+    const t0 = performance.now();
     c.ukf ??= prepareUkfData(c.dwi, c.fit.mask);
-    return await trackUkfSeeds(device, c.ukf, seedsRAS, adv.minFA, (f) => { busy = `Making tracts… ${Math.round(100 * f)}%`; render(); });
+    const timing: TrackTiming & { data: number } = { prepare: 0, gpu: 0, assemble: 0, between: 0, data: performance.now() - t0 };
+    const out = await trackUkfSeeds(device, c.ukf, seedsRAS, adv.minFA, (f) => { busy = `${adding ? "Adding lines" : "Making tracts"}… ${Math.round(100 * f)}%`; render(); }, timing);
+    lastTiming = timing;
+    return out;
   }
+  const timingText = () => lastTiming ? ` (tracking: signal ${(lastTiming.data / 1000).toFixed(1)} s, seeds ${(lastTiming.prepare / 1000).toFixed(1)} s, card ${(lastTiming.gpu / 1000).toFixed(1)} s, fibers ${(lastTiming.assemble / 1000).toFixed(1)} s, page ${(lastTiming.between / 1000).toFixed(1)} s)` : "";
   /** PARALLEL TRANSPORT TRACKING on fiber distributions, in workers bundled with the extension (extension.json "workers").
    *  The distributions are kept with the scan's computations, so a second run tracks at once. */
   async function trackPtt(c: Computed, seedsRAS: number[][]): Promise<Float32Array[]> {
@@ -628,7 +635,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       redraw3d();
       const t2 = performance.now();
       say(`${nearTracts.length} named tracts come within ${withinMm} mm of ${target.label} (at least ${MIN_NEAR_STREAMLINES} streamlines each)${sorted.faint.length ? `; ${sorted.faint.length} more come that close with fewer (listed in gray, hidden)` : ""}${unnamedNear.length ? `, and ${unnamedNear.length.toLocaleString()} streamlines no name fits` : ""}. ` +
-        `${sl.length.toLocaleString()} streamlines through the whole brain in ${((t1 - t0) / 1000).toFixed(1)} s, named in ${named.seconds.toFixed(1)} s (TractCloud), ${((t2 - t0) / 1000).toFixed(1)} s in all.`);
+        `${sl.length.toLocaleString()} streamlines through the whole brain in ${((t1 - t0) / 1000).toFixed(1)} s, named in ${named.seconds.toFixed(1)} s (TractCloud), ${((t2 - t0) / 1000).toFixed(1)} s in all${method === "ukf" ? timingText() : ""}.`);
     } catch (e) { say(`Tracts could not be made: ${(e as Error).message}`); }
     finally { busy = ""; render(); }
   }
