@@ -10,7 +10,15 @@
 // nothing more; the abbreviations are TractCloud's. The `function` and `reference` columns are EMPTY on purpose: they
 // are clinical claims, Ron writes or checks them, and the face shows nothing rather than an unchecked claim.
 
-export const TRACT_INFO_VERSION = 1;
+// VERSION 2 (2026-10-01 evening): a NOTE per tract, for what the atlas itself does that a reader should know (Ron: "Yes"
+// to the corticospinal one, from Lauren O'Donnell's mail: the atlas draws it wide in the brainstem on purpose).
+export const TRACT_INFO_VERSION = 2;
+
+/** What the atlas does with a tract that a reader should know, in plain words; shown in the tract's tooltip. */
+export const TRACT_NOTES: Record<string, string> = {
+  CST: "The atlas behind these names takes in more than this tract low in the brainstem, on purpose, so that it reaches the fibers for the face and hand (O'Donnell group; He et al., Neuroradiology 2025).",
+};
+export const tractNote = (abbr: string): string => TRACT_NOTES[abbr] ?? "";
 
 export interface TractInfo {
   /** TractCloud's abbreviation, the key (shown in parentheses after the name). */

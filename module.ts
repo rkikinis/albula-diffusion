@@ -42,7 +42,7 @@ import { assetUrl, seriesDicomFiles, startPlacing } from "albula";
 import { createSegmentation, growIntoSegmentation, openDicomDatabase, openLoadFromDisk, paintInto, registerProbeRows, registerRayHits, runAction, saveSegmentationToDicom, showHideAllState } from "albula";
 import { buildTractIndex, tractsNear, type TractIndex } from "./tract-index.ts";
 import { sliceCrossings, trimEnds } from "./tract-slice.ts";
-import { readMore, tnaLine, tractInfo, tractLabel } from "./tract-info.ts";
+import { readMore, tnaLine, tractInfo, tractLabel, tractNote } from "./tract-info.ts";
 import { faceNear as nearOnFace, isTumorName, matchesSearch, patientOf, pickAnatomy, tractGroupKey, TRACT_GROUPS, withoutLastRun } from "./face.ts";
 import { loadModel, type ModelJson, type TractCloudModel } from "./tractcloud/tractcloud.ts";
 import { nameAgainst, nameTracts, type Named } from "./tractcloud/name-tracts.ts";
@@ -1122,7 +1122,8 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
         if (g.tract !== undefined && abbr) {
           const ref = readMore(abbr);
           const tna = tnaLine(abbr);
-          name.title = `${g.name}${tna ? `\n${tna}` : ""}\nRead more (click): ${ref.cite}`;
+          const note = tractNote(abbr);
+          name.title = `${g.name}${tna ? `\n${tna}` : ""}${note ? `\n${note}` : ""}\nRead more (click): ${ref.cite}`;
           name.onclick = () => { void fetch(`/_open?url=${encodeURIComponent(ref.link)}`).then((r) => { if (!r.ok) throw new Error(); }).catch(() => { globalThis.open?.(ref.link, "_blank"); }); };
         }
         name.style.cssText = `flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap${name.onclick ? ";cursor:pointer;text-decoration:underline dotted" : ""}`;

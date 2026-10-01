@@ -40,3 +40,10 @@ Deno.test("the tooltip's Terminologia Neuroanatomica line says how close the ter
   assertEquals(tnaLine("SF"), "", "no entry, no line");
   for (const t of TRACT_INFO) if (t.tna) assertEquals(/^TAH:U\d+$/.test(t.tna.id), true, t.abbr);
 });
+
+Deno.test("notes: the corticospinal tract's, in plain words; none for a tract without one", async () => {
+  const { tractNote } = await import("./tract-info.ts");
+  const n = tractNote("CST");
+  if (!/brainstem/.test(n) || !/on purpose/.test(n)) throw new Error(n);
+  if (tractNote("AF") !== "") throw new Error("AF has no note");
+});
