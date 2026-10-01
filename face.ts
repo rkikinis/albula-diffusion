@@ -30,3 +30,27 @@ export const faceNear = (tumorKeys: string[], chosen: string): string => tumorKe
 export function withoutLastRun<G extends { scan: string; run?: boolean }>(groups: G[], scan: string): G[] {
   return groups.filter((g) => !(g.scan === scan && g.run));
 }
+
+/**
+ * THE GROUPS OF THE TRACT LIST, Segmentations as the template (Ron, 2026-10-01: "we need to group the tract. All corpus
+ * callosum together. Use segmentations as a concept template"): the atlas's own categories, the commissural one named
+ * for what it is. Streamlines with no name are their own group, last.
+ */
+export const TRACT_GROUPS: { key: string; label: string; category?: string }[] = [
+  { key: "cc", label: "Corpus callosum", category: "Commissural" },
+  { key: "association", label: "Association tracts", category: "Association" },
+  { key: "projection", label: "Projection tracts", category: "Projection" },
+  { key: "cerebellar", label: "Cerebellar tracts", category: "Cerebellar" },
+  { key: "superficial", label: "Superficial (short) fibers", category: "Superficial" },
+  { key: "unnamed", label: "Not named" },
+];
+export function tractGroupKey(category: string | undefined, unnamed: boolean): string {
+  if (unnamed || !category) return "unnamed";
+  return TRACT_GROUPS.find((g) => g.category === category)?.key ?? "unnamed";
+}
+
+/** The search over the tract list: the shown name (abbreviation included) and the anatomical term, case-insensitive. */
+export function matchesSearch(query: string, ...texts: (string | undefined)[]): boolean {
+  const q = query.trim().toLowerCase();
+  return !q || texts.some((t) => !!t && t.toLowerCase().includes(q));
+}

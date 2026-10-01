@@ -38,9 +38,9 @@ import { colorFA, fitTensors, type TensorFit } from "./tensor.ts";
 import { prepareUkfData, type UkfData } from "./ukf.ts";
 import { DCM2NIIX_VERSION, secondOpinion, type SecondOpinion } from "./second-opinion.ts";
 import { assetUrl, seriesDicomFiles, startPlacing } from "albula";
-import { createSegmentation, growIntoSegmentation, openDicomDatabase, openLoadFromDisk, paintInto, runAction, saveSegmentationToDicom } from "albula";
-import { readMore, tnaLine, tractLabel } from "./tract-info.ts";
-import { faceNear as nearOnFace, isTumorName, patientOf, pickAnatomy, withoutLastRun } from "./face.ts";
+import { createSegmentation, growIntoSegmentation, openDicomDatabase, openLoadFromDisk, paintInto, runAction, saveSegmentationToDicom, showHideAllState } from "albula";
+import { readMore, tnaLine, tractInfo, tractLabel } from "./tract-info.ts";
+import { faceNear as nearOnFace, isTumorName, matchesSearch, patientOf, pickAnatomy, tractGroupKey, TRACT_GROUPS, withoutLastRun } from "./face.ts";
 import { loadModel, type ModelJson, type TractCloudModel } from "./tractcloud/tractcloud.ts";
 import { nameTracts } from "./tractcloud/name-tracts.ts";
 import { correctWithReversed, MIN_NEAR_STREAMLINES, sortByDistance, streamlineDistances, tractName, trackUkfSeeds, wholeBrainSeeds } from "./planning.ts";
@@ -152,7 +152,10 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
   const adv: Required<Pick<TrackingOptions, "minFA" | "maxAngleDeg" | "stepVoxels">> & { maxB: number } = { minFA: 0.15, maxAngleDeg: 45, stepVoxels: 0.5, maxB: 1500 };
   let root: HTMLElement | undefined;
   let advOpen = false;
-  let moreOpen = false;                                      // the face's Advanced (mockup v4: everything but the one button)
+  let moreOpen = false;
+  /** The tract list's search and its folded groups (Ron, 2026-10-01: Segmentations as the template). */
+  let tractSearch = "";
+  const foldedGroups = new Set<string>();                                      // the face's Advanced (mockup v4: everything but the one button)
   /**
    * THE TUMOR OUTLINE BEING MADE (mockup diffusion-workflow-v4; Ron, 2026-10-01: grow from seeds "would do the job"):
    * strokes in a segmentation of their own (1 Tumor, 2 Not tumor) on the anatomical MRI; the grown outline in another,
@@ -862,10 +865,44 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     make.disabled = !!busy || !near || seeding;
     make.onclick = () => { void makeTracts(); };
     bar.append(seedBtn, make);
-    // THE TRACTS, under the face's button (what was made, whatever made it)
+    // THE TRACTS, under the face's button (what was made, whatever made it): a search, Show / Hide all, and the tracts in
+    // groups -- the corpus callosum together -- each group with its eye and its fold (Ron, 2026-10-01: "we need a select
+    // all/none button like in segmentations. we need to group the tract. All corpus callosum together"; "and a search").
     if (groups.length) {
-      const sc = listBox;
-      for (const g of groups) {
+      const abbrOf = (g: TractGroup) => /\(([^)]+)\)$/.exec(g.name)?.[1];
+      const shownGroups = groups.filter((g) => { const a = abbrOf(g); return matchesSearch(tractSearch, g.name, a ? tractInfo(a)?.tna?.latin : undefined); });
+      const tools = document.createElement("div");
+      tools.style.cssText = "display:flex;gap:6px;align-items:center;margin:4px 0";
+      const find = document.createElement("input");
+      find.type = "search"; find.placeholder = "Find a tract…"; find.value = tractSearch; find.className = "sl-tract-find";
+      find.title = "Shows only the tracts whose name, abbreviation or anatomical term contains this.";
+      find.style.cssText = "flex:1;min-width:0";
+      find.oninput = () => { tractSearch = find.value; const at = find.selectionStart; render(); const f2 = root?.querySelector<HTMLInputElement>(".sl-tract-find"); f2?.focus(); if (at !== null) f2?.setSelectionRange(at, at); };
+      const st = showHideAllState(shownGroups.map((g) => ({ labelValue: g.id, visible: g.visible })), !!tractSearch.trim());
+      const all = document.createElement("button"); all.textContent = st.label; all.title = st.show ? "Show every tract in the list below" : "Hide every tract in the list below"; all.disabled = !shownGroups.length;
+      all.onclick = () => { for (const g of shownGroups) g.visible = st.show; redraw3d(); render(); };
+      tools.append(find, all);
+      listBox.append(tools);
+      const searching = !!tractSearch.trim();
+      for (const grp of TRACT_GROUPS) {
+        const members = shownGroups.filter((g) => tractGroupKey(g.tract !== undefined ? tractInfo(abbrOf(g) ?? "")?.category : undefined, g.tract === undefined) === grp.key);
+        if (!members.length) continue;
+        const folded = foldedGroups.has(grp.key) && !searching;     // a search opens every group, as in Segmentations
+        const head = document.createElement("div");
+        head.style.cssText = "display:flex;align-items:center;gap:6px;margin:4px 0 1px;font-weight:600;cursor:pointer";
+        const caret = document.createElement("span"); caret.textContent = folded ? "▸" : "▾"; caret.style.cssText = "flex:0 0 10px;opacity:0.7";
+        const hl = document.createElement("span"); hl.textContent = `${grp.label} (${members.length})`; hl.style.cssText = "flex:1;min-width:0";
+        const anyOn = members.some((g) => g.visible);
+        const geye = document.createElement("button");
+        geye.style.cssText = "background:none;border:none;padding:0 2px;cursor:pointer;color:inherit;font-size:13px;flex:0 0 auto";
+        geye.textContent = anyOn ? "👁" : "🚫"; geye.title = anyOn ? `Hide every tract in ${grp.label}` : `Show every tract in ${grp.label}`;
+        geye.onclick = (e) => { e.stopPropagation(); for (const g of members) g.visible = !anyOn; redraw3d(); render(); };
+        head.onclick = () => { if (foldedGroups.has(grp.key)) foldedGroups.delete(grp.key); else foldedGroups.add(grp.key); render(); };
+        head.title = folded ? "Show the tracts in this group" : "Fold this group";
+        head.append(caret, hl, geye);
+        listBox.append(head);
+        if (folded) continue;
+        for (const g of members) {
         const row = document.createElement("div");
         row.style.cssText = "display:flex;align-items:center;gap:8px;min-width:0;padding:1px 0";
         const name = document.createElement("span"); name.textContent = g.name; name.title = g.name;
@@ -899,8 +936,10 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
         eye.onclick = () => { g.visible = !g.visible; redraw3d(); render(); };
         const x = document.createElement("button"); x.style.cssText = icon; x.textContent = "✕"; x.title = "Remove these tracts";
         x.onclick = () => { groups.splice(groups.indexOf(g), 1); redraw3d(); render(); };
+        row.style.paddingLeft = "14px";
         row.append(name, dist, n, eye, x);
-        sc.append(row);
+        listBox.append(row);
+        }
       }
       const as = document.createElement("div");
       as.style.cssText = "display:flex;gap:3px";
