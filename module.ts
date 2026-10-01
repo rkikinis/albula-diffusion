@@ -280,7 +280,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
         ] });
         outline = { imageId: anat.id, seedsId: segId, tool: 0 };
       }
-      putBackground(anat.id);          // strokes are drawn on the anatomy, not on Color FA
+      putBackground(anat.id, null);    // strokes are drawn on the anatomy, not on Color FA
       const to = outline.tool === which ? 0 : which;
       if (!paintInto(outline.seedsId, to || null, 5)) { say("Drawing is not available in this app."); return; }
       outline.tool = to;
@@ -338,10 +338,11 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
   /** What the slice views show as background now, in this module's terms. */
   const shownNow = (scan: Scan | undefined): Show | "" => {
     if (!scan) return "";
-    const bg = ((([...live.nodes.values()].find((n) => n.type === "sliceComposite")?.refs as Record<string, string[]> | undefined)?.background) ?? [])[0];
+    const refs = ([...live.nodes.values()].find((n) => n.type === "sliceComposite")?.refs as Record<string, string[]> | undefined) ?? {};
+    const bg = (refs.background ?? [])[0], fg = (refs.foreground ?? [])[0];
     const c = computed.get(scan.browserId);
-    if (bg && c?.colorFaId === bg) return "colorfa";
-    if (bg && c?.faId === bg) return "fa";
+    if (c?.colorFaId && (bg === c.colorFaId || fg === c.colorFaId)) return "colorfa";
+    if (c?.faId && (bg === c.faId || fg === c.faId)) return "fa";
     if (bg && scan.frameIds.includes(bg)) return "signal";
     return "";
   };
@@ -416,7 +417,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     try {
       if (what === "signal") {
         const { frames, selected } = browserFrames(live, scan.browserId);
-        putBackground(frames[selected]?.node ?? scan.frameIds[0]);
+        putBackground(frames[selected]?.node ?? scan.frameIds[0], null);
         return;
       }
       const c = await ensureFit(scan);
@@ -427,7 +428,8 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
           c.faId = r.imageId;
           live.write({ op: "patch", id: r.displayId, path: "#/window", value: 1 });
           live.write({ op: "patch", id: r.displayId, path: "#/level", value: 0.5 });
-        } else putBackground(c.faId);
+        }
+        putMap(scan, c.faId);
       } else {
         if (!c.colorFaId || !live.nodes.get(c.colorFaId)) {
           // FA times the principal direction's absolute components, one byte per color (tensor.ts colorFA), packed into
@@ -436,14 +438,31 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
           for (let v = 0; v < n; v++) packed[v] = packRGB24(q(rgb[3 * v]), q(rgb[3 * v + 1]), q(rgb[3 * v + 2]));
           const r = await loadVolumeIntoScene(live, store, { dims: c.fit.dims, ijkToRAS: c.fit.ijkToRAS, data: packed, dtype: "<f4", name: `${scan.name} Color FA` }, { name: `${scan.name} Color FA`, extra: { rgb24: true, autoVolumeRendering: false } });
           c.colorFaId = r.imageId;
-        } else putBackground(c.colorFaId);
+        }
+        putMap(scan, c.colorFaId);
       }
     } catch (e) {
       say(`${what === "fa" ? "FA" : what === "colorfa" ? "Color FA" : "The scan"} could not be shown: ${(e as Error).message}`);
     } finally { busy = ""; render(); }
   }
-  const putBackground = (imageId: string) => {
-    for (const cmp of [...live.nodes.values()].filter((n) => n.type === "sliceComposite")) live.write({ op: "patch", id: cmp.id, path: "#/refs/background", value: [imageId] });
+  /** The slice views' background; `foreground` undefined leaves the layer over it as it is, null takes it away. */
+  const putBackground = (imageId: string, foreground?: string | null, opacity?: number) => {
+    for (const cmp of [...live.nodes.values()].filter((n) => n.type === "sliceComposite")) {
+      live.write({ op: "patch", id: cmp.id, path: "#/refs/background", value: [imageId] });
+      if (foreground !== undefined) live.write({ op: "patch", id: cmp.id, path: "#/refs/foreground", value: foreground ? [foreground] : [] });
+      if (opacity !== undefined) live.write({ op: "patch", id: cmp.id, path: "#/foregroundOpacity", value: opacity });
+    }
+  };
+  /**
+   * A MAP (FA, Color FA) OVER THE ANATOMY (Ron, 2026-10-01: "when I click color fa, the slices revert to b0. can you
+   * overlay them on the t1 instead?"): with the case's anatomical MRI loaded, the map is the layer over it at half
+   * opacity (a slider the user moved stays where it is); without one, the map is the background, as before.
+   */
+  const putMap = (scan: Scan, mapId: string) => {
+    const anat = anatomyFor(scan);
+    if (!anat) { putBackground(mapId, null); return; }
+    const cur = [...live.nodes.values()].find((n) => n.type === "sliceComposite")?.foregroundOpacity as number | undefined;
+    putBackground(anat.id, mapId, cur && cur > 0.05 ? undefined : 0.5);
   };
 
   /**
@@ -614,7 +633,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     // Every chosen tract, on both of its sides.
     const want = new Map<string, { tract: number; side: number }>();
     for (const g of picked) for (const sd of g.side ? [g.side, otherSide(g.side)] : [0]) want.set(`${g.tract}:${sd}`, { tract: g.tract!, side: sd });
-    busy = "Making tracts…"; render();
+    busy = "Making tracts…"; adding = true; render();
     try {
       const c = await ensureFit(scan), t0 = performance.now();
       const all = [...run.sorted.near, ...run.sorted.far];
@@ -627,6 +646,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       const model = await tractCloud();
       const r = await nameAgainst(device, model, run.sl, sl2);
       let total = 0;
+      busy = "Measuring distances…"; render();
       for (const { tract, side: sd } of want.values()) {
         const mine = [...sl2.keys()].filter((i) => r.added.tract[i] === tract && r.added.side[i] === sd).map((i) => sl2[i]);
         if (!mine.length) continue;
@@ -655,7 +675,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       redraw3d();
       say(`${total.toLocaleString()} lines added to ${what}, both sides, from ${seeds.length.toLocaleString()} starting points, in ${((performance.now() - t0) / 1000).toFixed(1)} s.`);
     } catch (e) { say(`Lines could not be added: ${(e as Error).message}`); }
-    finally { busy = ""; render(); }
+    finally { busy = ""; adding = false; render(); }
   }
 
   /**
@@ -705,6 +725,8 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
    * voxels of the scan's grid at each end (tract-slice.ts trimEnds). The streamlines kept, measured and saved are whole.
    */
   let trimVoxels = 2;
+  /** "Add lines" is running: its button shows the step (tracking with a percentage, naming, measuring). */
+  let adding = false;
   const trimCache = new WeakMap<TractGroup, { key: string; strands: Float32Array[] }>();
   const voxelMm = (scanId: string) => { const M = computed.get(scanId)?.fit.ijkToRAS; return M ? Math.min(...[0, 1, 2].map((c) => Math.hypot(M[c], M[4 + c], M[8 + c]))) : 2; };
   function drawn(g: TractGroup): Float32Array[] {
@@ -1017,7 +1039,8 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       all.onclick = () => { for (const g of shownGroups) g.visible = st.show; redraw3d(); render(); };
       // ADD LINES to the tracts shown (Ron, 2026-10-01).
       const chosenNow = groups.filter((g) => g.visible && g.run && g.tract !== undefined && runs.has(g.scan));
-      const addL = document.createElement("button"); addL.textContent = busy.startsWith("Making") && !seeding ? busy : "Add lines"; addL.className = "sl-tract-add";
+      // While it runs it says which step it is on (Ron, 2026-10-01: "add progress when the add lines button is clicked").
+      const addL = document.createElement("button"); addL.textContent = adding && busy ? busy.replace("Making tracts", "Adding lines") : "Add lines"; addL.className = "sl-tract-add";
       addL.title = chosenNow.length ? `Follow many more lines in the ${chosenNow.length === 1 ? "tract" : `${chosenNow.length} tracts`} shown, on both sides, to see ${chosenNow.length === 1 ? "it" : "them"} better and compare the sides. About as long as the first run.` : "Show the tracts you want to see better, then press this.";
       addL.disabled = !!busy || seeding || !chosenNow.length;
       addL.onclick = () => { void addLines(chosenNow); };
