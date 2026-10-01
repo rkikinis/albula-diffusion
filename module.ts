@@ -39,7 +39,7 @@ import { colorFA, fitTensors, type TensorFit } from "./tensor.ts";
 import { prepareUkfData, type UkfData } from "./ukf.ts";
 import { DCM2NIIX_VERSION, secondOpinion, type SecondOpinion } from "./second-opinion.ts";
 import { assetUrl, seriesDicomFiles, startPlacing } from "albula";
-import { createSegmentation, growIntoSegmentation, openDicomDatabase, openLoadFromDisk, paintInto, registerProbeRows, runAction, saveSegmentationToDicom, showHideAllState } from "albula";
+import { createSegmentation, growIntoSegmentation, openDicomDatabase, openLoadFromDisk, paintInto, registerProbeRows, registerRayHits, runAction, saveSegmentationToDicom, showHideAllState } from "albula";
 import { buildTractIndex, tractsNear, type TractIndex } from "./tract-index.ts";
 import { sliceCrossings, trimEnds } from "./tract-slice.ts";
 import { readMore, tnaLine, tractInfo, tractLabel } from "./tract-info.ts";
@@ -81,7 +81,11 @@ interface Run { sl: Float32Array[]; named: Named; sorted: Sorted; structure: Str
   /** The tracts ("tract:side") Add lines has already added to: a second press would start from the same points and
    *  draw the same lines again, so they are skipped (Ron, 2026-10-01: he pressed it, then saw the corticospinal tract
    *  was not on). */
-  added: Set<string> }
+  added: Set<string>;
+  /** Each run streamline's distance to the structure (mm, measured out to the margin and 2 mm beyond). */
+  dist: Float64Array;
+  /** The fit it was tracked on (critic, 2026-10-01, finding 5): Add lines on a different fit is refused. */
+  maxB: number; partnerId: string }
 /** How tracts are followed: one tensor per voxel (fast, the classic), or the two-tensor free-water UKF (ukf.ts; crossing
  *  fibers, and free water -- edema -- modeled; the method SlicerDMRI uses for tumor planning). */
 /** "ptt": fiber distributions from multi-shell CSD (csd.ts, responses from the scan) and parallel transport tracking
@@ -429,7 +433,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       if (what === "fa") {
         if (!c.faId || !live.nodes.get(c.faId)) {
           // A computed map: it does not take the 3D view over from the scan (autoVolumeRendering: false).
-          const r = await loadVolumeIntoScene(live, store, { dims: c.fit.dims, ijkToRAS: c.fit.ijkToRAS, data: c.fit.fa, dtype: "<f4", name: `${scan.name} FA` }, { name: `${scan.name} FA`, extra: { autoVolumeRendering: false } });
+          const r = await loadVolumeIntoScene(live, store, { dims: c.fit.dims, ijkToRAS: c.fit.ijkToRAS, data: c.fit.fa, dtype: "<f4", name: `${scan.name} FA` }, { name: `${scan.name} FA`, extra: { autoVolumeRendering: false, recomputable: true } });
           c.faId = r.imageId;
           live.write({ op: "patch", id: r.displayId, path: "#/window", value: 1 });
           live.write({ op: "patch", id: r.displayId, path: "#/level", value: 0.5 });
@@ -441,7 +445,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
           // one sample that the slice views draw as color (render/fields.ts ImageFieldOpts.rgb24).
           const rgb = colorFA(c.fit), n = c.fit.fa.length, packed = new Float32Array(n), q = (x: number) => Math.max(0, Math.min(255, Math.round(x * 255)));
           for (let v = 0; v < n; v++) packed[v] = packRGB24(q(rgb[3 * v]), q(rgb[3 * v + 1]), q(rgb[3 * v + 2]));
-          const r = await loadVolumeIntoScene(live, store, { dims: c.fit.dims, ijkToRAS: c.fit.ijkToRAS, data: packed, dtype: "<f4", name: `${scan.name} Color FA` }, { name: `${scan.name} Color FA`, extra: { rgb24: true, autoVolumeRendering: false } });
+          const r = await loadVolumeIntoScene(live, store, { dims: c.fit.dims, ijkToRAS: c.fit.ijkToRAS, data: packed, dtype: "<f4", name: `${scan.name} Color FA` }, { name: `${scan.name} Color FA`, extra: { rgb24: true, autoVolumeRendering: false, recomputable: true } });
           c.colorFaId = r.imageId;
         }
         putMap(scan, c.colorFaId);
@@ -597,19 +601,28 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       const structure: Structure = { dims: target.seg.dims as number[], ijkToRAS: target.seg.ijkToRAS as number[], inside: (v) => Number(lab[v]) === target.labelValue };
       const dist = await streamlineDistances(structure, sl, withinMm + 2);
       const sorted = sortByDistance(model, named, dist, withinMm), nearTracts = sorted.near;
+      // STILL WANTED? A scan removed while this ran leaves nothing behind (critic, 2026-10-01, finding 8; CONSTRAINTS).
+      if (!scans().some((s) => s.browserId === scan.browserId)) return;
       // A NEW RUN REPLACES THE LAST ONE for this scan (critic, finding 5: a second press doubled every tract).
       groups.splice(0, groups.length, ...withoutLastRun(groups, scan.browserId));   // face.ts
       const pick = (idx: number[]) => idx.map((i) => sl[i]);
-      runs.set(scan.browserId, { sl, named, sorted, structure, label: target.label, withinMm, method, added: new Set() });
-      // The anatomy behind the slices, where the tracts' crossings are drawn (Yogesh Rathi via Ron, 2026-10-01).
-      const anat = anatomyFor(scan); if (anat) putBackground(anat.id);
+      runs.set(scan.browserId, { sl, named, sorted, structure, label: target.label, withinMm, method, added: new Set(), dist, maxB: c.maxB, partnerId: c.partnerId });
+      // The anatomy behind the slices, where the tracts' crossings are drawn (Yogesh Rathi via Ron, 2026-10-01), and over
+      // it this scan's own map -- never another patient's left from before (critic, 2026-10-01, finding 3).
+      const anat = anatomyFor(scan);
+      if (anat) {
+        const fg = ((([...live.nodes.values()].find((n) => n.type === "sliceComposite")?.refs as Record<string, string[]> | undefined)?.foreground) ?? [])[0];
+        const mine = fg !== undefined && (fg === c.colorFaId || fg === c.faId);
+        putBackground(anat.id, mine ? undefined : (c.colorFaId && live.nodes.get(c.colorFaId) ? c.colorFaId : null));
+      }
       // The near tracts shown; the faint ones (within reach, fewer than the minimum) listed after them, hidden.
       for (const [e, faint] of [...nearTracts.map((e) => [e, false] as const), ...sorted.faint.map((e) => [e, true] as const)]) {
         const t = model.json.tracts[e.tract];
         groups.push({ id: ++groupSeq, name: t ? tractLabel(t.abbr, t.name, e.side) : tractName(model, e.tract, e.side), scan: scan.browserId, strands: pick(e.idx), visible: !faint, method,
           tract: e.tract, side: e.side, distanceMm: e.d, within: e.within, run: true, faint, otherSide: e.side ? sorted.total(e.tract, otherSide(e.side)) : undefined });
       }
-      const unnamedNear = sorted.unnamedNear, rest = [...sorted.unnamedFar, ...sorted.far.flatMap((e) => e.idx)];
+      // The rest: the unnamed far ones and the far tracts not listed as faint (a faint tract is its own row).
+      const unnamedNear = sorted.unnamedNear, faintSet = new Set(sorted.faint), rest = [...sorted.unnamedFar, ...sorted.far.filter((e) => !faintSet.has(e)).flatMap((e) => e.idx)];
       if (unnamedNear.length) groups.push({ id: ++groupSeq, name: `Not named, within ${withinMm} mm of ${target.label}`, scan: scan.browserId, strands: pick(unnamedNear), visible: true, method, unnamed: true, run: true });
       if (rest.length) groups.push({ id: ++groupSeq, name: "Rest of the brain", scan: scan.browserId, strands: pick(rest), visible: false, method, unnamed: true, run: true });
       redraw3d();
@@ -641,6 +654,10 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     busy = "Making tracts…"; adding = true; render();
     try {
       const c = await ensureFit(scan), t0 = performance.now();
+      if (c.maxB !== run.maxB || c.partnerId !== run.partnerId) {
+        say("The maps were made again since these tracts were found (Highest b, or the distortion correction, changed): press “Show the fiber tracts near the tumor” again first.");
+        return;
+      }
       const all = [...run.sorted.near, ...run.sorted.far];
       const foot = [...want.values()].flatMap(({ tract, side }) => all.find((e) => e.tract === tract && e.side === side)?.idx ?? []).map((i) => run.sl[i]);
       const seeds = denseSeeds(foot, { dims: c.fit.dims, ijkToRAS: c.fit.ijkToRAS });
@@ -650,6 +667,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       busy = "Naming tracts…"; render();
       const model = await tractCloud();
       const r = await nameAgainst(device, model, run.sl, sl2);
+      if (!scans().some((s) => s.browserId === scanId) || runs.get(scanId!) !== run) return;   // left, or run again, meanwhile
       let total = 0;
       busy = "Measuring distances…"; render();
       for (const { tract, side: sd } of want.values()) {
@@ -659,16 +677,23 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
         let h = groups.find((x) => x.scan === scanId && x.run && x.tract === tract && x.side === sd);
         if (!h) {
           // The other side was not listed (not within reach): it joins the list for comparison, hidden (Ron, 2026-10-01:
-          // "add lines turns on the left tracts even if they were not turned on").
+          // "add lines turns on the left tracts even if they were not turned on") -- WITH its streamlines from the run,
+          // taken out of "Rest of the brain", so both sides count run plus added (critic, 2026-10-01, finding 2).
           const t = model.json.tracts[tract];
-          h = { id: ++groupSeq, name: tractLabel(t.abbr, t.name, sd), scan: scanId!, strands: [], visible: false, method: run.method, tract, side: sd, distanceMm: Infinity, within: 0, run: true };
+          const idx = all.find((e) => e.tract === tract && e.side === sd)?.idx ?? [];
+          const own = idx.map((i) => run.sl[i]), ownSet = new Set(own);
+          const rest = groups.find((x) => x.scan === scanId && x.run && x.name === "Rest of the brain");
+          if (rest && own.length) rest.strands = rest.strands.filter((f) => !ownSet.has(f));
+          h = { id: ++groupSeq, name: tractLabel(t.abbr, t.name, sd), scan: scanId!, strands: own, visible: false, method: run.method, tract, side: sd,
+            distanceMm: idx.reduce((m, i) => Math.min(m, run.dist[i]), Infinity), within: idx.filter((i) => run.dist[i] <= run.withinMm).length, run: true };
           groups.push(h);
         }
         h.strands = [...h.strands, ...mine];
         h.more = (h.more ?? 0) + mine.length;
         h.within = (h.within ?? 0) + [...d].filter((x) => x <= run.withinMm).length;
         h.distanceMm = Math.min(h.distanceMm ?? Infinity, ...d);
-        if (h.faint && (h.within ?? 0) >= MIN_NEAR_STREAMLINES) h.faint = false;
+        // Faint by the module's own rule, every time (critic, 2026-10-01, finding 11): within reach, fewer than the minimum.
+        h.faint = (h.within ?? 0) > 0 && (h.within ?? 0) < MIN_NEAR_STREAMLINES;
         // Shown or hidden as it was: only what the person turned on is shown.
         total += mine.length;
       }
@@ -778,28 +803,42 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
   const CROSSINGS_LAYER = "diffusion-tracts", MAX_CROSSINGS = 30000;
   let crossingsQueued = false;
   function drawSliceCrossings() {
-    const shown = groups.filter((g) => g.visible && g.strands.length);
     const view = live.view as { setOverlay?: (cell: string, layer: string, items: unknown[]) => void } | undefined;
     if (!view?.setOverlay) return;
-    if (!shown.length) { view.setOverlay("*", CROSSINGS_LAYER, []); return; }
     const color = (g: TractGroup, dir: number[]): number[] => {
       if (colorBy === "tract" && g.tract !== undefined) { const c = tractColor(g.tract, tractCount); return [c[0], c[1], c[2]]; }
       if (colorBy === "tract" && g.unnamed) return [UNNAMED[0], UNNAMED[1], UNNAMED[2]];
       return [Math.abs(dir[0]), Math.abs(dir[1]), Math.abs(dir[2])];    // by direction, as in 3D: red left-right ...
     };
-    const items: unknown[] = [];
+    // WHOSE TRACTS ON WHICH VIEW (critic, 2026-10-01, finding 3): a view shows the tracts of the scan whose images it
+    // shows (its anatomy, its frames, its maps); with tracts for one scan only, that scan's, whatever is underneath.
+    const withTracts = [...new Set(groups.filter((g) => g.visible && g.strands.length).map((g) => g.scan))];
+    const imagesOf = (scanId: string) => {
+      const sc = scans().find((x) => x.browserId === scanId), c = computed.get(scanId);
+      return new Set([anatomyFor(sc)?.id, ...(sc?.frameIds ?? []), c?.faId, c?.colorFaId].filter((x): x is string => !!x));
+    };
     for (const n of live.nodes.values()) {
       if (n.type !== "view" || n.kind !== "slice" || !Array.isArray(n.sliceToRAS)) continue;
-      const m = n.sliceToRAS as number[], L = Math.hypot(m[2], m[6], m[10]) || 1, nrm: [number, number, number] = [m[2] / L, m[6] / L, m[10] / L];
-      const d = typeof n.offset === "number" ? n.offset : m[3] * nrm[0] + m[7] * nrm[1] + m[11] * nrm[2];
-      const cs = sliceCrossings(shown.map(drawn), { origin: [nrm[0] * d, nrm[1] * d, nrm[2] * d], normal: nrm });
-      const step = Math.max(1, Math.ceil(cs.length / MAX_CROSSINGS));      // a very dense slice is thinned evenly
-      for (let i = 0; i < cs.length; i += step) items.push({ kind: "point", ras: cs[i].p, color: color(shown[cs[i].set], cs[i].dir), radiusPx: 1.6, inPlaneOnly: true });
+      const cell = String(n.layoutName ?? n.name ?? "");
+      const comp = [...live.nodes.values()].find((x) => x.type === "sliceComposite" && x.layoutName === cell);
+      const bg = (((comp?.refs as Record<string, string[]> | undefined)?.background) ?? [])[0];
+      const scansHere = withTracts.length === 1 ? withTracts : withTracts.filter((id) => bg !== undefined && imagesOf(id).has(bg));
+      const shown = groups.filter((g) => g.visible && g.strands.length && scansHere.includes(g.scan));
+      const items: unknown[] = [];
+      if (shown.length) {
+        const m = n.sliceToRAS as number[], L = Math.hypot(m[2], m[6], m[10]) || 1, nrm: [number, number, number] = [m[2] / L, m[6] / L, m[10] / L];
+        const d = typeof n.offset === "number" ? n.offset : m[3] * nrm[0] + m[7] * nrm[1] + m[11] * nrm[2];
+        const cs = sliceCrossings(shown.map(drawn), { origin: [nrm[0] * d, nrm[1] * d, nrm[2] * d], normal: nrm });
+        const step = Math.max(1, Math.ceil(cs.length / MAX_CROSSINGS));      // a very dense slice is thinned evenly
+        for (let i = 0; i < cs.length; i += step) items.push({ kind: "point", ras: cs[i].p, color: color(shown[cs[i].set], cs[i].dir), radiusPx: 1.6, inPlaneOnly: true });
+      }
+      // THIS VIEW'S DOTS ONLY (critic, 2026-10-01, finding 13): in a layer for every view, another plane's crossings
+      // showed along the lines where the planes meet.
+      view.setOverlay(cell, CROSSINGS_LAYER, items);
     }
-    view.setOverlay("*", CROSSINGS_LAYER, items);
   }
   live.subscribe((c) => {
-    if (c.type !== "view" || !String(c.id ?? "").startsWith("nativeSlice-") || crossingsQueued || !groups.some((g) => g.visible)) return;
+    if (!((c.type === "view" && String(c.id ?? "").startsWith("nativeSlice-")) || c.type === "sliceComposite") || crossingsQueued || !groups.length) return;
     crossingsQueued = true;
     requestAnimationFrame(() => { crossingsQueued = false; drawSliceCrossings(); });
   });
@@ -906,11 +945,11 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       nearSel0.onchange = () => { near = nearSel0.value; render(); };
       shell.row(caseSec, "Tumor").append(nearSel0);
     }
-    const face = shell.section(root, "2 · Fiber tracts near the tumor", { band: "yellow", open: true, note: groups.some((g) => g.tract !== undefined) ? `${groups.filter((g) => g.tract !== undefined).length} found` : "" });
+    const face = shell.section(root, "2 · Fiber tracts near the tumor", { band: "yellow", open: true, note: groups.some((g) => g.tract !== undefined && g.run && !g.faint && (g.within ?? 0) >= MIN_NEAR_STREAMLINES) ? `${groups.filter((g) => g.tract !== undefined && g.run && !g.faint && (g.within ?? 0) >= MIN_NEAR_STREAMLINES).length} found` : "" });
     const go = document.createElement("button");
     go.className = "sl-primary";
     go.style.cssText = "width:100%;margin:4px 0";
-    go.textContent = busy && !busy.startsWith("Grow") && !busy.startsWith("Comput") ? busy : "Show the fiber tracts near the tumor";
+    go.textContent = busy && !adding && !busy.startsWith("Grow") && !busy.startsWith("Comput") ? busy : "Show the fiber tracts near the tumor";
     // Says the cut (critic, finding 4: "every" was not true): a named tract is listed when at least 5 of its fibers come
     // that close.
     go.title = `Finds the brain's main nerve fiber tracts, names them, and shows each named tract with at least ${MIN_NEAR_STREAMLINES} of its fibers within ${withinMm} mm of the tumor — whole, in its own color, with how close it comes. ${method === "ptt" ? "About three minutes (Smooth curves, chosen under Advanced)." : method === "single" ? "Uses Two-tensor: Single tensor (chosen under Advanced) does not name tracts. About half a minute." : "About half a minute."}`;
@@ -1049,7 +1088,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       const chosenNow = shownNamed.filter((g) => !runs.get(g.scan)!.added.has(`${g.tract}:${g.side ?? 0}`));
       // While it runs it says which step it is on (Ron, 2026-10-01: "add progress when the add lines button is clicked").
       const addL = document.createElement("button"); addL.textContent = adding && busy ? busy.replace("Making tracts", "Adding lines") : "Add lines"; addL.className = "sl-tract-add";
-      addL.title = chosenNow.length ? `Follow many more lines in the ${chosenNow.length === 1 ? "tract" : `${chosenNow.length} tracts`} shown that ${chosenNow.length === 1 ? "has" : "have"} none added yet, on both sides, to see ${chosenNow.length === 1 ? "it" : "them"} better and compare the sides. About as long as the first run.`
+      addL.title = chosenNow.length ? `Follow many more lines in the ${chosenNow.length === 1 ? "tract" : `${chosenNow.length} tracts`} shown that ${chosenNow.length === 1 ? "has" : "have"} none added yet, on both sides, to see ${chosenNow.length === 1 ? "it" : "them"} better and compare the sides. About as long as the first run. The more tracts shown, the thinner the extra lines are spread: for the most lines in a thin tract, show it alone.`
         : shownNamed.length ? "Lines are already added to every tract shown. Turn on another tract to add lines to it." : "Show the tracts you want to see better, then press this.";
       addL.disabled = !!busy || seeding || !chosenNow.length;
       addL.onclick = () => { void addLines(chosenNow); };
@@ -1151,7 +1190,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       const vmm = groups.length ? voxelMm(groups[0].scan) : 2;
       tl.textContent = `voxels at each end (≈ ${(trimVoxels * vmm).toFixed(1)} mm on this ${vmm.toFixed(1)} mm grid)`;
       ti.title = "Draws every tract a little shorter at both ends, where the fibers fan out. The tracts themselves stay whole. 0 draws them whole.";
-      ti.onchange = () => { const v = Number(ti.value); if (Number.isFinite(v) && v >= 0) { trimVoxels = Math.min(6, v); redraw3d(); render(); } };
+      ti.onchange = () => { const v = Number(ti.value); trimVoxels = Number.isFinite(v) ? Math.max(0, Math.min(6, v)) : trimVoxels; redraw3d(); render(); };
       tw.append(ti, tl);
       shell.row(more, "Shorten ends").append(tw);
       if (groups.some((g) => g.tract !== undefined)) {
@@ -1167,6 +1206,30 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       }
     }
   }
+
+  // THE TUBES IN FRONT, for the 3D probe (critic, 2026-10-01, finding 4): where along the mouse ray the first shown tube
+  // is -- the first step that comes within a tube's radius (plus half a millimeter) of a drawn streamline point.
+  registerRayHits((o, d) => {
+    if (!probeIndex) return null;
+    const r = (drawAs === "tubes" ? RADIUS.tubes : RADIUS.lines) + 0.5;
+    // Only the stretch of the ray inside the box around the shown streamlines (the slab method).
+    const { xyz } = probeIndex.ix;
+    let t0 = 0, t1 = Infinity;
+    for (let a = 0; a < 3; a++) {
+      let lo = Infinity, hi = -Infinity;
+      for (let i = a; i < xyz.length; i += 3) { if (xyz[i] < lo) lo = xyz[i]; if (xyz[i] > hi) hi = xyz[i]; }
+      lo -= r; hi += r;
+      if (Math.abs(d[a]) < 1e-12) { if (o[a] < lo || o[a] > hi) return null; continue; }
+      const ta = (lo - o[a]) / d[a], tb = (hi - o[a]) / d[a];
+      t0 = Math.max(t0, Math.min(ta, tb)); t1 = Math.min(t1, Math.max(ta, tb));
+    }
+    if (!(t1 >= t0)) return null;
+    for (let t = t0; t <= t1; t += 0.5) {
+      const p: [number, number, number] = [o[0] + d[0] * t, o[1] + d[1] * t, o[2] + d[2] * t];
+      if (tractsNear(probeIndex.ix, p, r).length) return t;
+    }
+    return null;
+  });
 
   // THE TRACTS IN THE DATA PROBE (Ron, 2026-10-01: "the tracts are not in the data probe"): every tract shown that passes
   // within 2 mm of the point under the pointer, with its color, how many of its fibers, and how close.
