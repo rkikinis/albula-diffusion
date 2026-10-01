@@ -1,4 +1,4 @@
-// NAMING ADDED STREAMLINES AGAINST A WHOLE-BRAIN RUN (nameAgainst; Ron, 2026-10-01: "More fibers" for chosen tracts).
+// NAMING ADDED STREAMLINES AGAINST A WHOLE-BRAIN RUN (nameAgainst; Ron, 2026-10-01: "Add lines" to chosen tracts).
 // The added streamlines must be named as the whole-brain run would name them: a copy of a run's own streamline gets that
 // streamline's name, and the run's own names do not change when streamlines are added. On PAT16's reference streamlines.
 //   deno test -A --no-check --unstable-webgpu extensions/diffusion/tractcloud/name-tracts.test.ts
