@@ -10,7 +10,9 @@
 // by its pages (Crossref gives no volume).
 // v5 (2026-10-01): CSD (Tournier 2007, Jeurissen 2014), its solver (Lawson & Hanson) and PTT (Aydogan & Shi 2021),
 // checked against Crossref.
-export const REFERENCES_VERSION = 5;
+// v6 (2026-10-01): the UKF-near-tumors studies Yogesh Rathi pointed to (Chen 2015; Zhang 2017 ISBI) and their companions
+// (Liao 2017, Gong 2018, O'Donnell 2017), checked against Crossref.
+export const REFERENCES_VERSION = 6;
 
 export interface Reference { cite: string; link?: string; usedFor: string; verified: boolean }
 
@@ -48,6 +50,11 @@ export const DIFFUSION_REFERENCES: Reference[] = [
   { cite: "Zhang F, Wu Y, Norton I, Rigolo L, Rathi Y, Makris N, O'Donnell LJ. An anatomically curated fiber clustering white matter atlas for consistent white matter tract parcellation across the lifespan. NeuroImage 179:429-447, 2018.", link: "https://doi.org/10.1016/j.neuroimage.2018.06.027", usedFor: "the atlas of 800 fiber clusters TractCloud's names come from", verified: true },
   // Data.
   { cite: "Aerts H, Schirner M, Jeurissen B, Van Roost D, Achten E, Ritter P, Marinazzo D. Modeling brain dynamics in brain tumor patients using The Virtual Brain. eNeuro 5(3):ENEURO.0083-18.2018, 2018. Data: OpenNeuro ds001226 (CC0).", link: "https://openneuro.org/datasets/ds001226", usedFor: "the development and test cases", verified: true },
+  { cite: "Chen Z, Tie Y, Olubiyi O, Rigolo L, Mehrtash A, Norton I, Pasternak O, Rathi Y, Golby AJ, O'Donnell LJ. Reconstruction of the arcuate fasciculus for surgical planning in the setting of peritumoral edema using two-tensor unscented Kalman filter tractography. NeuroImage: Clinical 7:815-822, 2015.", link: "https://doi.org/10.1016/j.nicl.2015.03.009", usedFor: "two-tensor UKF tracking through peritumoral edema (10 patients; the arcuate fasciculus traced where single-tensor tracking broke)", verified: true },
+  { cite: "Liao R, Ning L, Chen Z, Rigolo L, Gong S, Pasternak O, Golby AJ, Rathi Y, O'Donnell LJ. Performance of unscented Kalman filter tractography in edema: Analysis of the two-tensor model. NeuroImage: Clinical 15:819-831, 2017.", link: "https://doi.org/10.1016/j.nicl.2017.06.027", usedFor: "how UKF's seeding and stopping settings and the free-water model change tracking in edema", verified: true },
+  { cite: "Gong S, Zhang F, Norton I, Essayed WI, Unadkat P, Rigolo L, Pasternak O, Rathi Y, Hou L, Golby AJ, O'Donnell LJ. Free water modeling of peritumoral edema using multi-fiber tractography: Application to tracking the arcuate fasciculus for neurosurgical planning. PLOS ONE 13(5):e0197056, 2018.", link: "https://doi.org/10.1371/journal.pone.0197056", usedFor: "free water on by default near tumors (26 patients; larger arcuate fasciculus where it crosses edema)", verified: true },
+  { cite: "O'Donnell LJ, Suter Y, Rigolo L, Kahali P, Zhang F, Norton I, Albi A, Olubiyi O, Meola A, Essayed WI, Unadkat P, Ciris PA, Wells WM, Rathi Y, Westin CF, Golby AJ. Automated white matter fiber tract identification in patients with brain tumors. NeuroImage: Clinical 13:138-153, 2017.", link: "https://doi.org/10.1016/j.nicl.2016.11.023", usedFor: "naming tracts in tumor patients with an atlas learned from healthy brains (18 patients, checked against functional MRI)", verified: true },
+  { cite: "Zhang F, Kahali P, Suter Y, Norton I, Rigolo L, Savadjiev P, Song Y, Rathi Y, Cai W, Wells WM, Golby AJ, O'Donnell LJ. Automated connectivity-based groupwise cortical atlas generation: Application to data of neurosurgical patients with brain tumors for cortical parcellation prediction. IEEE ISBI 2017:774-777.", link: "https://doi.org/10.1109/ISBI.2017.7950633", usedFor: "background: where tracts end on the cortex in tumor patients (not used in the code yet)", verified: true },
 ];
 
 /** The list as plain text lines for a help panel. */
