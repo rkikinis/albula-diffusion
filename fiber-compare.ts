@@ -65,3 +65,39 @@ export function compareFibers(a: Float32Array[], b: Float32Array[], starts: numb
     // Flat maps have no variance: identical flat maps correlate 1, different ones 0 (no NaN).
     densityCorrelation: sxx && syy ? sxy / Math.sqrt(sxx * syy) : xs.every((x, i) => x === ys[i]) ? 1 : 0, densityOverlap: keys.size ? both / keys.size : 0 };
 }
+
+/**
+ * PAIRING BY SEED POINT (Mike Halle's method, 2026-10-01; the critic's finding 6 on this file's matching by nearest
+ * fiber): both programs record a fiber's seed as one of its points, so a start's fiber in each set is the one passing
+ * within `tolMm` (0.001 mm) of it. Fibers under `minPoints` points are left out on both sides, as the original writes
+ * none. Returns the pairs' end distances (the larger of the two ends, each end paired whichever way is closer), and
+ * the starts with a fiber on one side only.
+ */
+export function pairBySeed(a: Float32Array[], b: Float32Array[], starts: number[][], opts: { tolMm?: number; minPoints?: number } = {}): { pairs: number; onlyA: number; onlyB: number; ends: number[] } {
+  const tol = opts.tolMm ?? 0.001, min = (opts.minPoints ?? 10) * 3;
+  const keep = (s: Float32Array[]) => s.filter((f) => f.length >= min);
+  const A = keep(a), B = keep(b);
+  const at = (set: Float32Array[]) => {
+    const grid = new Map<string, number[]>(), key = (x: number, y: number, z: number) => `${Math.round(x)},${Math.round(y)},${Math.round(z)}`;
+    set.forEach((f, fi) => { for (let i = 0; i < f.length; i += 3) { const k = key(f[i], f[i + 1], f[i + 2]); const l = grid.get(k) ?? grid.set(k, []).get(k)!; l.push(fi * 1e6 + i); } });
+    return (p: number[]) => {
+      for (const fi6 of grid.get(key(p[0], p[1], p[2])) ?? []) {
+        const fi = Math.floor(fi6 / 1e6), i = fi6 % 1e6, f = set[fi];
+        if (Math.hypot(f[i] - p[0], f[i + 1] - p[1], f[i + 2] - p[2]) < tol) return f;
+      }
+      return undefined;
+    };
+  };
+  const findA = at(A), findB = at(B);
+  const e = (f: Float32Array, last: boolean) => last ? [f[f.length - 3], f[f.length - 2], f[f.length - 1]] : [f[0], f[1], f[2]];
+  const d = (p: number[], q: number[]) => Math.hypot(p[0] - q[0], p[1] - q[1], p[2] - q[2]);
+  let pairs = 0, onlyA = 0, onlyB = 0; const ends: number[] = [];
+  for (const s of starts) {
+    const fa = findA(s), fb = findB(s);
+    if (fa && !fb) onlyA++; if (fb && !fa) onlyB++;
+    if (!fa || !fb) continue;
+    pairs++;
+    ends.push(Math.max(Math.min(d(e(fa, false), e(fb, false)), d(e(fa, false), e(fb, true))), Math.min(d(e(fa, true), e(fb, true)), d(e(fa, true), e(fb, false)))));
+  }
+  return { pairs, onlyA, onlyB, ends };
+}
