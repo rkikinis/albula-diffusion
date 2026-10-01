@@ -38,7 +38,8 @@ import { colorFA, fitTensors, type TensorFit } from "./tensor.ts";
 import { prepareUkfData, type UkfData } from "./ukf.ts";
 import { DCM2NIIX_VERSION, secondOpinion, type SecondOpinion } from "./second-opinion.ts";
 import { assetUrl, seriesDicomFiles, startPlacing } from "albula";
-import { createSegmentation, growIntoSegmentation, openDicomDatabase, openLoadFromDisk, paintInto, runAction, saveSegmentationToDicom, showHideAllState } from "albula";
+import { createSegmentation, growIntoSegmentation, openDicomDatabase, openLoadFromDisk, paintInto, registerProbeRows, runAction, saveSegmentationToDicom, showHideAllState } from "albula";
+import { buildTractIndex, tractsNear, type TractIndex } from "./tract-index.ts";
 import { readMore, tnaLine, tractInfo, tractLabel } from "./tract-info.ts";
 import { faceNear as nearOnFace, isTumorName, matchesSearch, patientOf, pickAnatomy, tractGroupKey, TRACT_GROUPS, withoutLastRun } from "./face.ts";
 import { loadModel, type ModelJson, type TractCloudModel } from "./tractcloud/tractcloud.ts";
@@ -622,7 +623,11 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
 
   /** How many tracts the model names (Other included), once it is loaded; colors need it. */
   let tractCount = 43;
+  /** The tracts shown, indexed for the data probe (tract-index.ts); rebuilt with every redraw. */
+  let probeIndex: { ix: TractIndex; shown: TractGroup[] } | undefined;
   function redraw3d() {
+    const shownNow = groups.filter((g) => g.visible);
+    probeIndex = shownNow.length ? { ix: buildTractIndex(shownNow.map((g) => g.strands)), shown: shownNow } : undefined;
     const view = live.view;
     if (!view) return;
     // Colored by tract: each named group its tract's color (tract-colors.ts), unnamed ones gray; otherwise, and for
@@ -963,6 +968,18 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       }
     }
   }
+
+  // THE TRACTS IN THE DATA PROBE (Ron, 2026-10-01: "the tracts are not in the data probe"): every tract shown that passes
+  // within 2 mm of the point under the pointer, with its color, how many of its fibers, and how close.
+  registerProbeRows((ras) => {
+    if (!probeIndex) return [];
+    return tractsNear(probeIndex.ix, ras, 2).slice(0, 6).map((h) => {
+      const g = probeIndex!.shown[h.set];
+      const c = g.tract !== undefined ? tractColor(g.tract, tractCount) : g.unnamed ? UNNAMED : undefined;
+      return { color: c ? [c[0], c[1], c[2]] as [number, number, number] : undefined,
+        text: `${g.name} · ${h.streamlines} fiber${h.streamlines === 1 ? "" : "s"} within 2 mm${h.closestMm < 0.5 ? "" : `, closest ${h.closestMm.toFixed(1)} mm`}`, source: "fiber tracts (Diffusion)" };
+    });
+  });
 
   shell.registerPanel({
     id: "diffusion",
