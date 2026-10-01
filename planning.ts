@@ -170,8 +170,9 @@ export function sortByDistance(model: TractCloudModel, named: Named, dist: Float
 export const otherSide = (side: number) => -side;
 
 /** How many starting points a voxel gets in "More fibers": O'Donnell et al. 2017 seeded tumor patients at 20 a voxel
- *  (NeuroImage: Clinical 13:138). And the most one press may start, so it stays inside the time budget (measured, below). */
-export const MORE_PER_VOXEL = 20, MORE_MAX_SEEDS = 60000;
+ *  (NeuroImage: Clinical 13:138). At most as many in one press as the whole-brain run, so a press takes about as long
+ *  as the first one (PAT16 in Deno, 2026-10-01: 21,000 seeds tracked in 49 s, 57,000 in 144 s). */
+export const MORE_PER_VOXEL = 20, MORE_MAX_SEEDS = WHOLE_BRAIN_SEEDS;
 
 /**
  * MORE FIBERS IN CHOSEN TRACTS (Ron, 2026-10-01: "artificially prop up tracts like the right uncinate by doing a second run
