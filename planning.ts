@@ -138,7 +138,10 @@ export async function streamlineDistances(s: Structure, sl: Float32Array[], padM
 
 /** One named tract (a tract on one side): its streamlines, its closest distance, and how many come within the margin. */
 export interface NearTract { tract: number; side: number; idx: number[]; d: number; within: number }
-export interface Sorted { near: NearTract[]; far: NearTract[]; unnamedNear: number[]; unnamedFar: number[] }
+/** `faint`: the far tracts that DO come within the margin, with fewer than the minimum of streamlines (shown in gray,
+ *  hidden; Ron, 2026-10-01: the right uncinate came within reach with 4). `total`: a tract's streamlines on one side, for
+ *  comparing sides. */
+export interface Sorted { near: NearTract[]; far: NearTract[]; faint: NearTract[]; unnamedNear: number[]; unnamedFar: number[]; total: (tract: number, side: number) => number }
 
 /** How many of a tract's streamlines must come within the margin for it to count as near (Ron, 2026-10-01: "yes for
  *  now", on the case library's development half: 43% of the tracts listed with "any streamline" had fewer than 5). */
@@ -158,7 +161,51 @@ export function sortByDistance(model: TractCloudModel, named: Named, dist: Float
   }
   const all = [...by.values()];
   const isNear = (e: NearTract) => e.d <= withinMm && e.within >= minStreamlines;
-  return { near: all.filter(isNear).sort((a, b) => a.d - b.d || b.within - a.within), far: all.filter((e) => !isNear(e)), unnamedNear, unnamedFar };
+  const far = all.filter((e) => !isNear(e)), faint = far.filter((e) => e.d <= withinMm && e.within > 0).sort((a, b) => a.d - b.d || b.within - a.within);
+  return { near: all.filter(isNear).sort((a, b) => a.d - b.d || b.within - a.within), far, faint, unnamedNear, unnamedFar,
+    total: (tract, side) => by.get(`${tract}:${side}`)?.idx.length ?? 0 };
+}
+
+/** The other side of a tract: right for left, left for right; 0 (a tract across the midline) has none. */
+export const otherSide = (side: number) => -side;
+
+/** How many starting points a voxel gets in "More fibers": O'Donnell et al. 2017 seeded tumor patients at 20 a voxel
+ *  (NeuroImage: Clinical 13:138). And the most one press may start, so it stays inside the time budget (measured, below). */
+export const MORE_PER_VOXEL = 20, MORE_MAX_SEEDS = 60000;
+
+/**
+ * MORE FIBERS IN CHOSEN TRACTS (Ron, 2026-10-01: "artificially prop up tracts like the right uncinate by doing a second run
+ * with more seed points just in the tracts that were selected by the user"): every voxel the given streamlines pass
+ * through gets `perVoxel` starting points, placed at random inside it by a seeded generator. Over `max` in all, every
+ * voxel gets fewer (at least one), and past that a seeded sample of the voxels is kept. RAS mm.
+ */
+export function denseSeeds(strands: Float32Array[], grid: { dims: number[]; ijkToRAS: number[] }, perVoxel = MORE_PER_VOXEL, max = MORE_MAX_SEEDS, seed = 20261001): number[][] {
+  const M = grid.ijkToRAS, [nx, ny, nz] = grid.dims;
+  // RAS -> voxel: the inverse of the 3x3 part, then the offset.
+  const a = M[0], b = M[1], c = M[2], d = M[4], e = M[5], f = M[6], g = M[8], h = M[9], k = M[10];
+  const det = a * (e * k - f * h) - b * (d * k - f * g) + c * (d * h - e * g);
+  const R = [(e * k - f * h) / det, (c * h - b * k) / det, (b * f - c * e) / det, (f * g - d * k) / det, (a * k - c * g) / det, (c * d - a * f) / det, (d * h - e * g) / det, (b * g - a * h) / det, (a * e - b * d) / det];
+  const voxels = new Set<number>();
+  for (const s of strands) for (let i = 0; i < s.length; i += 3) {
+    const x = s[i] - M[3], y = s[i + 1] - M[7], z = s[i + 2] - M[11];
+    const vi = Math.round(R[0] * x + R[1] * y + R[2] * z), vj = Math.round(R[3] * x + R[4] * y + R[5] * z), vk = Math.round(R[6] * x + R[7] * y + R[8] * z);
+    if (vi >= 0 && vj >= 0 && vk >= 0 && vi < nx && vj < ny && vk < nz) voxels.add((vk * ny + vj) * nx + vi);
+  }
+  const r = rng(seed), list = [...voxels].sort((p, q) => p - q);
+  const each = Math.max(1, Math.min(perVoxel, Math.floor(max / Math.max(1, list.length))));
+  if (list.length * each > max) {
+    for (let i = 0; i < max; i++) { const j = i + Math.floor(r() * (list.length - i)); const t = list[i]; list[i] = list[j]; list[j] = t; }
+    list.length = max;
+  }
+  const out: number[][] = [];
+  for (const v of list) {
+    const vi = v % nx, vj = Math.floor(v / nx) % ny, vk = Math.floor(v / (nx * ny));
+    for (let n = 0; n < each; n++) {
+      const p = vi + r() - 0.5, q = vj + r() - 0.5, w = vk + r() - 0.5;
+      out.push([M[0] * p + M[1] * q + M[2] * w + M[3], M[4] * p + M[5] * q + M[6] * w + M[7], M[8] * p + M[9] * q + M[10] * w + M[11]]);
+    }
+  }
+  return out;
 }
 
 /** A tract's name in words, with its side. */

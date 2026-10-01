@@ -43,8 +43,8 @@ import { buildTractIndex, tractsNear, type TractIndex } from "./tract-index.ts";
 import { readMore, tnaLine, tractInfo, tractLabel } from "./tract-info.ts";
 import { faceNear as nearOnFace, isTumorName, matchesSearch, patientOf, pickAnatomy, tractGroupKey, TRACT_GROUPS, withoutLastRun } from "./face.ts";
 import { loadModel, type ModelJson, type TractCloudModel } from "./tractcloud/tractcloud.ts";
-import { nameTracts } from "./tractcloud/name-tracts.ts";
-import { correctWithReversed, MIN_NEAR_STREAMLINES, sortByDistance, streamlineDistances, tractName, trackUkfSeeds, wholeBrainSeeds } from "./planning.ts";
+import { nameAgainst, nameTracts, type Named } from "./tractcloud/name-tracts.ts";
+import { correctWithReversed, denseSeeds, MIN_NEAR_STREAMLINES, otherSide, sortByDistance, streamlineDistances, tractName, trackUkfSeeds, wholeBrainSeeds, type Sorted, type Structure } from "./planning.ts";
 import { tractColor, UNNAMED } from "./tractcloud/tract-colors.ts";
 import { seedsInSphere, trackFromSeeds, type Streamline, type TrackingOptions } from "./tracking.ts";
 import { DIFFUSION_REFERENCES } from "./references.ts";
@@ -66,7 +66,16 @@ interface TractGroup {
   tract?: number; side?: number; distanceMm?: number; within?: number; unnamed?: boolean;
   /** Made by "Show the fiber tracts near the tumor": the next run for the same scan replaces them (critic, finding 5). */
   run?: boolean;
+  /** Within reach of the structure, with fewer streamlines than the minimum: listed in gray, hidden (Ron, 2026-10-01). */
+  faint?: boolean;
+  /** The same tract's streamlines on the other side, for comparing sides (undefined for a tract across the midline). */
+  otherSide?: number;
+  /** Streamlines "More fibers" added to this group. */
+  more?: number;
 }
+/** The last whole-brain run for a scan, kept so "More fibers" can name new streamlines in its context and measure them
+ *  against the same structure. */
+interface Run { sl: Float32Array[]; named: Named; sorted: Sorted; structure: Structure; label: string; withinMm: number; method: Method }
 /** How tracts are followed: one tensor per voxel (fast, the classic), or the two-tensor free-water UKF (ukf.ts; crossing
  *  fibers, and free water -- edema -- modeled; the method SlicerDMRI uses for tumor planning). */
 /** "ptt": fiber distributions from multi-shell CSD (csd.ts, responses from the scan) and parallel transport tracking
@@ -135,6 +144,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
   const { shell, live, store, device, status } = ctx;
   const computed = new Map<string, Computed>();
   const groups: TractGroup[] = [];
+  const runs = new Map<string, Run>();
   const seenScans = new Set<string>();
   let groupSeq = 0;
   let drawAs: "tubes" | "lines" = "tubes";
@@ -559,24 +569,79 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       const named = await nameTracts(device, model, sl);
       busy = "Measuring distances…"; render();
       const z = await fetchZarrVolumeNative(live.blobBase(), target.seg.zarr as ZarrDesc), lab = z.data;
-      const dist = await streamlineDistances({ dims: target.seg.dims as number[], ijkToRAS: target.seg.ijkToRAS as number[], inside: (v) => Number(lab[v]) === target.labelValue }, sl, withinMm + 2);
+      const structure: Structure = { dims: target.seg.dims as number[], ijkToRAS: target.seg.ijkToRAS as number[], inside: (v) => Number(lab[v]) === target.labelValue };
+      const dist = await streamlineDistances(structure, sl, withinMm + 2);
       const sorted = sortByDistance(model, named, dist, withinMm), nearTracts = sorted.near;
       // A NEW RUN REPLACES THE LAST ONE for this scan (critic, finding 5: a second press doubled every tract).
       groups.splice(0, groups.length, ...withoutLastRun(groups, scan.browserId));   // face.ts
       const pick = (idx: number[]) => idx.map((i) => sl[i]);
-      for (const e of nearTracts) {
+      runs.set(scan.browserId, { sl, named, sorted, structure, label: target.label, withinMm, method });
+      // The near tracts shown; the faint ones (within reach, fewer than the minimum) listed after them, hidden.
+      for (const [e, faint] of [...nearTracts.map((e) => [e, false] as const), ...sorted.faint.map((e) => [e, true] as const)]) {
         const t = model.json.tracts[e.tract];
-        groups.push({ id: ++groupSeq, name: t ? tractLabel(t.abbr, t.name, e.side) : tractName(model, e.tract, e.side), scan: scan.browserId, strands: pick(e.idx), visible: true, method,
-          tract: e.tract, side: e.side, distanceMm: e.d, within: e.within, run: true });
+        groups.push({ id: ++groupSeq, name: t ? tractLabel(t.abbr, t.name, e.side) : tractName(model, e.tract, e.side), scan: scan.browserId, strands: pick(e.idx), visible: !faint, method,
+          tract: e.tract, side: e.side, distanceMm: e.d, within: e.within, run: true, faint, otherSide: e.side ? sorted.total(e.tract, otherSide(e.side)) : undefined });
       }
       const unnamedNear = sorted.unnamedNear, rest = [...sorted.unnamedFar, ...sorted.far.flatMap((e) => e.idx)];
       if (unnamedNear.length) groups.push({ id: ++groupSeq, name: `Not named, within ${withinMm} mm of ${target.label}`, scan: scan.browserId, strands: pick(unnamedNear), visible: true, method, unnamed: true, run: true });
       if (rest.length) groups.push({ id: ++groupSeq, name: "Rest of the brain", scan: scan.browserId, strands: pick(rest), visible: false, method, unnamed: true, run: true });
       redraw3d();
       const t2 = performance.now();
-      say(`${nearTracts.length} named tracts come within ${withinMm} mm of ${target.label} (at least ${MIN_NEAR_STREAMLINES} streamlines each)${unnamedNear.length ? `, and ${unnamedNear.length.toLocaleString()} streamlines no name fits` : ""}. ` +
+      say(`${nearTracts.length} named tracts come within ${withinMm} mm of ${target.label} (at least ${MIN_NEAR_STREAMLINES} streamlines each)${sorted.faint.length ? `; ${sorted.faint.length} more come that close with fewer (listed in gray, hidden)` : ""}${unnamedNear.length ? `, and ${unnamedNear.length.toLocaleString()} streamlines no name fits` : ""}. ` +
         `${sl.length.toLocaleString()} streamlines through the whole brain in ${((t1 - t0) / 1000).toFixed(1)} s, named in ${named.seconds.toFixed(1)} s (TractCloud), ${((t2 - t0) / 1000).toFixed(1)} s in all.`);
     } catch (e) { say(`Tracts could not be made: ${(e as Error).message}`); }
+    finally { busy = ""; render(); }
+  }
+
+  /**
+   * MORE FIBERS IN ONE TRACT, BOTH SIDES (Ron, 2026-10-01: "artificially prop up tracts like the right uncinate by doing a
+   * second run with more seed points just in the tracts that were selected by the user"; O'Donnell et al. 2017 seeded
+   * tumor patients at 20 a voxel and suggest tracking again "in the region of the detected fiber tracts"): starting
+   * points in every voxel the tract's streamlines pass through, on both sides so the sides stay comparable, followed by
+   * the run's method, named against the whole-brain run (nameAgainst), and the ones named as this tract added to it.
+   * Measured on PAT16 (Deno, 2026-10-01): the right uncinate 1 -> 18 streamlines; about 5-10% of the new streamlines
+   * belong to the tract (the rest cross it), so one press is held to the whole-brain run's 25,000 starting points.
+   */
+  async function moreFibers(g: TractGroup) {
+    const run = runs.get(g.scan), scan = scans().find((s) => s.browserId === g.scan);
+    if (!run || !scan || g.tract === undefined || busy) return;
+    const tract = g.tract, sides = g.side ? [g.side, otherSide(g.side)] : [0];
+    busy = "Making tracts…"; render();
+    try {
+      const c = await ensureFit(scan), t0 = performance.now();
+      const all = [...run.sorted.near, ...run.sorted.far];
+      const foot = sides.flatMap((sd) => all.find((e) => e.tract === tract && e.side === sd)?.idx ?? []).map((i) => run.sl[i]);
+      const seeds = denseSeeds(foot, { dims: c.fit.dims, ijkToRAS: c.fit.ijkToRAS });
+      say(`Following more fibers in ${g.name.replace(/, (right|left)/, "")} from ${seeds.length.toLocaleString()} starting points…`);
+      const sl2 = run.method === "ptt" ? await trackPtt(c, seeds) : await trackUkf(c, seeds);
+      busy = "Naming tracts…"; render();
+      const model = await tractCloud();
+      const r = await nameAgainst(device, model, run.sl, sl2);
+      const added: string[] = [];
+      for (const sd of sides) {
+        const mine = [...sl2.keys()].filter((i) => r.added.tract[i] === tract && r.added.side[i] === sd).map((i) => sl2[i]);
+        if (!mine.length) { added.push(`none ${sd > 0 ? "right" : sd < 0 ? "left" : ""}`.trim()); continue; }
+        const d = await streamlineDistances(run.structure, mine, run.withinMm + 2);
+        let h = groups.find((x) => x.scan === g.scan && x.run && x.tract === tract && x.side === sd);
+        if (!h) {
+          // The other side was not listed (not within reach): it joins the list for comparison.
+          const t = model.json.tracts[tract];
+          h = { id: ++groupSeq, name: tractLabel(t.abbr, t.name, sd), scan: g.scan, strands: [], visible: true, method: run.method, tract, side: sd, distanceMm: Infinity, within: 0, run: true };
+          groups.push(h);
+        }
+        h.strands = [...h.strands, ...mine];
+        h.more = (h.more ?? 0) + mine.length;
+        h.within = (h.within ?? 0) + [...d].filter((x) => x <= run.withinMm).length;
+        h.distanceMm = Math.min(h.distanceMm ?? Infinity, ...d);
+        if (h.faint && (h.within ?? 0) >= MIN_NEAR_STREAMLINES) h.faint = false;
+        h.visible = true;
+        added.push(`${mine.length.toLocaleString()} ${sd > 0 ? "right" : sd < 0 ? "left" : ""}`.trim());
+      }
+      // Each side's count of the other, as it now stands.
+      for (const sd of sides) { const h = groups.find((x) => x.scan === g.scan && x.run && x.tract === tract && x.side === sd); const o = groups.find((x) => x.scan === g.scan && x.run && x.tract === tract && x.side === otherSide(sd)); if (h && sd) h.otherSide = o ? o.strands.length : run.sorted.total(tract, otherSide(sd)); }
+      redraw3d();
+      say(`More fibers in ${g.name.replace(/, (right|left)/, "")}: ${added.join(", ")} added, from ${seeds.length.toLocaleString()} starting points, in ${((performance.now() - t0) / 1000).toFixed(1)} s.`);
+    } catch (e) { say(`More fibers could not be made: ${(e as Error).message}`); }
     finally { busy = ""; render(); }
   }
 
@@ -653,6 +718,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     const ids = new Set(scans().map((s) => s.browserId));
     let changed = false;
     for (const [id, c] of computed) if (!ids.has(id)) { computed.delete(id); dropMaps(c); changed = true; }
+    for (const id of [...runs.keys()]) if (!ids.has(id)) runs.delete(id);
     for (let i = groups.length - 1; i >= 0; i--) if (!ids.has(groups[i].scan)) { groups.splice(i, 1); changed = true; }
     for (const id of [...seenScans]) if (!ids.has(id)) seenScans.delete(id);
     if (changed) redraw3d();
@@ -923,6 +989,29 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
         const n = document.createElement("span"); n.style.opacity = "0.7";
         n.textContent = g.within !== undefined ? `${g.within.toLocaleString()}/${g.strands.length.toLocaleString()}` : g.strands.length.toLocaleString();
         n.title = g.within !== undefined ? `${g.within.toLocaleString()} of this tract's ${g.strands.length.toLocaleString()} streamlines come within the distance of the structure` : "streamlines in this group";
+        if (g.more) n.title += ` (${g.more.toLocaleString()} of them added by More)`;
+        // THE OTHER SIDE, for comparing (Ron, 2026-10-01; O'Donnell et al. 2017: surgeons compare the tumor's side with
+        // the healthy side).
+        const other = document.createElement("span");
+        if (g.otherSide !== undefined && g.side) {
+          const os = g.side > 0 ? "left" : "right";
+          other.textContent = `${os} ${g.otherSide.toLocaleString()}`;
+          other.title = `The same tract on the ${os} side has ${g.otherSide.toLocaleString()} streamlines, this side ${g.strands.length.toLocaleString()}.`;
+          other.style.cssText = "flex:0 0 auto;opacity:0.55;font-size:11px";
+        }
+        // MORE FIBERS in this tract, both sides (Ron, 2026-10-01).
+        const more = document.createElement("button");
+        if (g.tract !== undefined && g.run && runs.has(g.scan)) {
+          more.textContent = "More"; more.className = "sl-tract-more";
+          more.style.cssText = "flex:0 0 auto;padding:0 5px;font-size:11px";
+          more.title = g.side ? "Follow many more fibers in this tract, on both sides, to see it better and compare the sides. About as long as the first run." : "Follow many more fibers in this tract, to see it better. About as long as the first run.";
+          more.disabled = !!busy || seeding;
+          more.onclick = () => { void moreFibers(g); };
+        }
+        if (g.faint) {
+          name.style.opacity = "0.55"; n.style.opacity = "0.45";
+          name.title += `\nOnly ${g.within ?? 0} of its streamlines come within the distance — fewer than ${MIN_NEAR_STREAMLINES}, so it is listed but hidden. It may be thin here, or hidden by swelling. More can tell.`;
+        }
         if (g.tract !== undefined || g.unnamed) {
           // The tract's own color, as it is drawn (and as its card will show it).
           const c = g.tract !== undefined ? tractColor(g.tract, tractCount) : UNNAMED;
@@ -942,9 +1031,15 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
         const x = document.createElement("button"); x.style.cssText = icon; x.textContent = "✕"; x.title = "Remove these tracts";
         x.onclick = () => { groups.splice(groups.indexOf(g), 1); redraw3d(); render(); };
         row.style.paddingLeft = "14px";
-        row.append(name, dist, n, eye, x);
+        row.append(name, dist, n, other, ...(more.textContent ? [more] : []), eye, x);
         listBox.append(row);
         }
+      }
+      // THE CAVEAT (Ron, 2026-10-01; O'Donnell et al. 2017: a missing tract cannot be told destroyed from hidden by edema).
+      if (groups.some((g) => g.run && g.tract !== undefined)) {
+        const cav = document.createElement("p"); cav.className = "sl-hint";
+        cav.textContent = "A tract that looks thin or missing on the tumor's side may be destroyed by the tumor, or still there but hidden by swelling (edema). Compare it with the other side, and press More for a closer look.";
+        listBox.append(cav);
       }
       const as = document.createElement("div");
       as.style.cssText = "display:flex;gap:3px";
@@ -986,7 +1081,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     title: "Diffusion",
     groups: ["Display"],
     tip: "Which of the brain's fiber tracts run near a tumor, for planning an operation.",
-    help: "<p><b>For preparing a case.</b> The module needs three things, and ticks each off when it is there: the <b>diffusion MRI</b> (the scan that shows the brain's wiring; often named DTI, DWI or diffusion), the <b>MRI of the anatomy</b> (usually the T1 with contrast), and the <b>tumor's outline</b>. <b>Open a patient…</b> opens the DICOM database; <b>Scans on this computer…</b> opens Load / Save, where a folder from a CD, a USB stick or an export is added to the database. Without an outline, draw a few <b>Tumor</b> strokes inside it and a few <b>Not tumor</b> strokes around it, on a few slices, then <b>Grow the outline</b>, check it, correct with more strokes, and press <b>Done</b>. Then <b>Show the fiber tracts near the tumor</b>: each named tract with at least 5 of its fibers within 8 mm of the tumor (the distance can be changed under Advanced) is shown whole, in its own color, with how close it comes; pressing it again replaces the list. Only an outline named as a tumor (or made here) counts. Everything stays on this computer.</p><p><b>Advanced</b> holds the maps and the settings behind that button:</p><p>Shows what a diffusion MRI scan measures: <b>FA</b>, how strongly water moves along one direction (bright in white matter tracts), and <b>Color FA</b>, that direction as a color (red left-right, green front-back, blue up-down). A diffusion scan shows Color FA when it loads.</p><p><b>Tracts</b> follow the main direction of water movement from voxel to voxel. Under Advanced, <b>Make tracts</b> with <b>Single tensor</b> starts them in the white matter inside and around the chosen structure; with <b>Two-tensor</b> or <b>Smooth curves</b> it does what the face's button does, from the structure chosen there; <b>Seed where I click…</b> starts them at one point. <b>Smooth curves</b> follows fibers as gently bending lines from a model of every direction in each voxel (CSD and parallel transport tracking): about three minutes, an option. Tracts are drawn in 3D as tubes or lines; each group can be hidden or removed.</p><p><b>Two-tensor</b> (UKF, the default) follows two fiber directions and the free water around them; it runs on the graphics card and agrees with the reference computation on the processor (fiber ends within a fraction of a millimeter for 90% of fibers). <b>Single tensor</b> follows one direction per voxel; where tracts cross, that direction is an average, and a tract may stop or turn. With <b>Two-tensor</b>, <b>Make tracts</b> follows tracts through the whole brain and names them with TractCloud, a network trained on an atlas of 800 fiber clusters (Zhang, O'Donnell et al.); each named tract that comes within the distance of the chosen structure is shown whole, in its own color, with its closest distance to the structure. Streamlines no name fits and pass close are shown in gray; the rest of the brain is kept, hidden.</p><p><b>Licenses.</b> Research software: not reviewed or approved by the FDA or any other agency; clinical applications are neither recommended nor advised. The two-tensor tracking is a port of UKFTractography (authors: Yogesh Rathi, Stefan Lienhard, Yinpeng Li, Martin Styner, Ipek Oguz, Yundi Shi, Christian Baumgartner, Ryan Eckbo, Tashrif Billah and Dheshan Mohandass; github.com/pnlbwh/ukftractography). All or portions of this licensed product (such portions are the \"Software\") have been obtained under license from The Brigham and Women's Hospital, Inc. and are subject to the following terms and conditions: <a href=\"./vendor/diffusion/licenses/LICENSE-UKF.txt\" target=\"_blank\">the UKF Tractography Contribution and Software License Agreement</a> (this is a modified version: translated to TypeScript and WGSL). TractCloud's trained network is under <a href=\"./vendor/diffusion/tractcloud/LICENSE.txt\" target=\"_blank\">3D Slicer's license</a>; dcm2niix under <a href=\"./vendor/diffusion/dcm2niix/LICENSE.txt\" target=\"_blank\">its own (BSD)</a>; the rest of this extension under the <a href=\"./vendor/diffusion/licenses/LICENSE\" target=\"_blank\">Apache License 2.0</a> (<a href=\"./vendor/diffusion/licenses/NOTICE\" target=\"_blank\">NOTICE</a>).</p>",
+    help: "<p><b>For preparing a case.</b> The module needs three things, and ticks each off when it is there: the <b>diffusion MRI</b> (the scan that shows the brain's wiring; often named DTI, DWI or diffusion), the <b>MRI of the anatomy</b> (usually the T1 with contrast), and the <b>tumor's outline</b>. <b>Open a patient…</b> opens the DICOM database; <b>Scans on this computer…</b> opens Load / Save, where a folder from a CD, a USB stick or an export is added to the database. Without an outline, draw a few <b>Tumor</b> strokes inside it and a few <b>Not tumor</b> strokes around it, on a few slices, then <b>Grow the outline</b>, check it, correct with more strokes, and press <b>Done</b>. Then <b>Show the fiber tracts near the tumor</b>: each named tract with at least 5 of its fibers within 8 mm of the tumor (the distance can be changed under Advanced) is shown whole, in its own color, with how close it comes; pressing it again replaces the list. Tracts that come that close with fewer fibers are listed after them in gray, hidden. Each tract shows how many fibers the same tract has on the other side. <b>More</b> on a tract follows many more fibers in it, on both sides, to see a thin tract better and compare the sides (about as long as the first run). A tract that looks thin or missing on the tumor's side may be destroyed by the tumor, or still there but hidden by swelling (edema). Only an outline named as a tumor (or made here) counts. Everything stays on this computer.</p><p><b>Advanced</b> holds the maps and the settings behind that button:</p><p>Shows what a diffusion MRI scan measures: <b>FA</b>, how strongly water moves along one direction (bright in white matter tracts), and <b>Color FA</b>, that direction as a color (red left-right, green front-back, blue up-down). A diffusion scan shows Color FA when it loads.</p><p><b>Tracts</b> follow the main direction of water movement from voxel to voxel. Under Advanced, <b>Make tracts</b> with <b>Single tensor</b> starts them in the white matter inside and around the chosen structure; with <b>Two-tensor</b> or <b>Smooth curves</b> it does what the face's button does, from the structure chosen there; <b>Seed where I click…</b> starts them at one point. <b>Smooth curves</b> follows fibers as gently bending lines from a model of every direction in each voxel (CSD and parallel transport tracking): about three minutes, an option. Tracts are drawn in 3D as tubes or lines; each group can be hidden or removed.</p><p><b>Two-tensor</b> (UKF, the default) follows two fiber directions and the free water around them; it runs on the graphics card and agrees with the reference computation on the processor (fiber ends within a fraction of a millimeter for 90% of fibers). <b>Single tensor</b> follows one direction per voxel; where tracts cross, that direction is an average, and a tract may stop or turn. With <b>Two-tensor</b>, <b>Make tracts</b> follows tracts through the whole brain and names them with TractCloud, a network trained on an atlas of 800 fiber clusters (Zhang, O'Donnell et al.); each named tract that comes within the distance of the chosen structure is shown whole, in its own color, with its closest distance to the structure. Streamlines no name fits and pass close are shown in gray; the rest of the brain is kept, hidden.</p><p><b>Licenses.</b> Research software: not reviewed or approved by the FDA or any other agency; clinical applications are neither recommended nor advised. The two-tensor tracking is a port of UKFTractography (authors: Yogesh Rathi, Stefan Lienhard, Yinpeng Li, Martin Styner, Ipek Oguz, Yundi Shi, Christian Baumgartner, Ryan Eckbo, Tashrif Billah and Dheshan Mohandass; github.com/pnlbwh/ukftractography). All or portions of this licensed product (such portions are the \"Software\") have been obtained under license from The Brigham and Women's Hospital, Inc. and are subject to the following terms and conditions: <a href=\"./vendor/diffusion/licenses/LICENSE-UKF.txt\" target=\"_blank\">the UKF Tractography Contribution and Software License Agreement</a> (this is a modified version: translated to TypeScript and WGSL). TractCloud's trained network is under <a href=\"./vendor/diffusion/tractcloud/LICENSE.txt\" target=\"_blank\">3D Slicer's license</a>; dcm2niix under <a href=\"./vendor/diffusion/dcm2niix/LICENSE.txt\" target=\"_blank\">its own (BSD)</a>; the rest of this extension under the <a href=\"./vendor/diffusion/licenses/LICENSE\" target=\"_blank\">Apache License 2.0</a> (<a href=\"./vendor/diffusion/licenses/NOTICE\" target=\"_blank\">NOTICE</a>).</p>",
     acknowledgements: DIFFUSION_REFERENCES.map((r) => `${r.cite}${r.link ? ` ${r.link}` : ""} — ${r.usedFor}${r.verified ? "" : " (citation to be checked)"}`),
     mount(el) { root = el; render(); },
     onShow() { render(); },

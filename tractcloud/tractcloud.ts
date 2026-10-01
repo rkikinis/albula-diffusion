@@ -87,11 +87,13 @@ export function resample(pts: Float32Array | number[], n = 15): Float64Array {
 }
 
 /** All streamlines resampled and moved so their mean (per point) is the atlas's: feat, (N, P, 3) row-major. */
-export function prepare(streamlines: (Float32Array | number[])[], model: TractCloudModel): Float64Array {
+/** `centerOn`: the brain's center is the mean of the first `centerOn` streamlines only (default all) -- so streamlines
+ *  added to a whole-brain run are placed where the whole brain puts them (nameAgainst, name-tracts.ts). */
+export function prepare(streamlines: (Float32Array | number[])[], model: TractCloudModel, centerOn = streamlines.length): Float64Array {
   const P = model.P, N = streamlines.length, feat = new Float64Array(N * P * 3);
   streamlines.forEach((s, i) => feat.set(resample(s, P), i * P * 3));
   const mean = new Float64Array(P * 3);
-  for (let i = 0; i < N; i++) for (let j = 0; j < P * 3; j++) mean[j] += feat[i * P * 3 + j] / N;
+  for (let i = 0; i < centerOn; i++) for (let j = 0; j < P * 3; j++) mean[j] += feat[i * P * 3 + j] / centerOn;
   const mc = model.json.massCenter;
   for (let i = 0; i < N; i++) for (let p = 0; p < P; p++) for (let c = 0; c < 3; c++) feat[(i * P + p) * 3 + c] += mc[p][c] - mean[p * 3 + c];
   return feat;

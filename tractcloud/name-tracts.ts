@@ -17,16 +17,33 @@ const NO_SIDE = new Set(["MCP"]);
 const lengthOf = (s: Float32Array) => { let L = 0; for (let i = 3; i < s.length; i += 3) L += Math.hypot(s[i] - s[i - 3], s[i + 1] - s[i - 2], s[i + 2] - s[i - 1]); return L; };
 
 export async function nameTracts(device: GPUDevice, model: TractCloudModel, streamlines: Float32Array[], opts: { draws?: number; seed?: number } = {}): Promise<Named> {
+  return await nameAgainst(device, model, streamlines, [], opts).then((r) => r.context);
+}
+
+/**
+ * STREAMLINES ADDED TO A WHOLE-BRAIN RUN, NAMED AS THAT RUN WOULD NAME THEM (Ron, 2026-10-01: a second, denser run in
+ * the tracts the user picks). TractCloud names a streamline from its context -- its nearest streamlines and a random
+ * draw from the whole brain -- and centers the brain on the mean of what it is given; a run seeded densely in one
+ * region would be both mis-centered and its own context. So the added streamlines take the context run's center and
+ * draw their context from the context run only. Names for `context` come back too, and are exactly nameTracts' (the
+ * draws do not depend on `added`); an added copy of a context streamline gets that streamline's name (name-tracts.test.ts).
+ */
+export async function nameAgainst(device: GPUDevice, model: TractCloudModel, context: Float32Array[], added: Float32Array[], opts: { draws?: number; seed?: number } = {}): Promise<{ context: Named; added: Named }> {
   const t0 = performance.now(), draws = opts.draws ?? 1, seed = opts.seed ?? 20260930;
-  const keep = streamlines.map((s, i) => [s, i] as const).filter(([s]) => lengthOf(s) >= MIN_LENGTH_MM);
-  const tract = new Int32Array(streamlines.length).fill(SHORT), side = new Int8Array(streamlines.length);
-  if (keep.length < model.json.settings.k + 1) return { tract, side, draws, seconds: (performance.now() - t0) / 1000 };
-  const feat = prepare(keep.map(([s]) => s), model), feat32 = Float32Array.from(feat), N = keep.length;
+  const kept = (set: Float32Array[]) => set.map((s, i) => [s, i] as const).filter(([s]) => lengthOf(s) >= MIN_LENGTH_MM);
+  const keepC = kept(context), keepA = kept(added), Nc = keepC.length;
+  const out = (n: number) => ({ tract: new Int32Array(n).fill(SHORT), side: new Int8Array(n), draws, seconds: 0 });
+  const rc = out(context.length), ra = out(added.length);
+  const done = () => { rc.seconds = ra.seconds = (performance.now() - t0) / 1000; return { context: rc, added: ra }; };
+  if (Nc < model.json.settings.k + 1) return done();
+  // Context first, the added after it; every row's index in the result it belongs to.
+  const keep = [...keepC.map(([s, i]) => [s, i, rc] as const), ...keepA.map(([s, i]) => [s, i, ra] as const)];
+  const feat = prepare(keep.map(([s]) => s), model, Nc), feat32 = Float32Array.from(feat), N = keep.length;
   const T = model.json.tracts.length, votes = new Int32Array(N * T), first = new Int32Array(N);
   const gpu = tractCloudGpu(device, model);
   try {
     for (let d = 0; d < draws; d++) {
-      const { ds, glob } = draw(N, model, seed + d);
+      const { ds, glob } = draw(Nc, model, seed + d);
       const clusters = await gpu.classify(feat32, contexts(localNeighbors(feat, ds, model), ds, glob, model.json.settings.k));
       const t = tractsOf(model, clusters);
       for (let i = 0; i < N; i++) { votes[i * T + t[i]]++; if (d === 0) first[i] = t[i]; }
@@ -35,13 +52,14 @@ export async function nameTracts(device: GPUDevice, model: TractCloudModel, stre
   for (let i = 0; i < N; i++) {
     let best = first[i];                                  // a tie keeps the first draw's answer
     for (let c = 0; c < T; c++) if (votes[i * T + c] > votes[i * T + best]) best = c;
-    tract[keep[i][1]] = best;
+    const [, at, r] = keep[i];
+    r.tract[at] = best;
     // THE SIDE, from where the streamline lies once the brain is centered on the atlas (RAS: +x is the patient's right).
     const info = model.json.tracts[best];
     if (info.category !== "Commissural" && !NO_SIDE.has(info.abbr)) {
       let x = 0; for (let p = 0; p < model.P; p++) x += feat[(i * model.P + p) * 3];
-      side[keep[i][1]] = x > 0 ? 1 : -1;
+      r.side[at] = x > 0 ? 1 : -1;
     }
   }
-  return { tract, side, draws, seconds: (performance.now() - t0) / 1000 };
+  return done();
 }
