@@ -240,7 +240,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       const to = outline.tool === which ? 0 : which;
       if (!paintInto(outline.seedsId, to || null, 5)) { say("Drawing is not available in this app."); return; }
       outline.tool = to;
-      say(to === 1 ? "Draw a few strokes inside the tumor, on a few slices." : to === 2 ? "Draw a few strokes in the brain around the tumor, on a few slices." : "Drawing is off.");
+      say(to === 1 ? "Draw a stroke inside the tumor on several slices, from its first slice to its last." : to === 2 ? "Draw strokes in the brain around the tumor, on several slices, also just above and below it." : "Drawing is off.");
     } catch (e) { say(`The strokes could not be started: ${(e as Error).message}`); }
     render();
   }
@@ -253,7 +253,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       const S = live.nodes.get(outline.imageId)?.ijkToRAS as number[] | undefined;
       const vox = S ? Math.abs(S[0] * (S[5] * S[10] - S[6] * S[9]) - S[1] * (S[4] * S[10] - S[6] * S[8]) + S[2] * (S[4] * S[9] - S[5] * S[8])) : 1;
       outline.mm3 = r.voxels * vox;
-      say(`Outline grown in ${(r.ms / 1000).toFixed(1)} s: ${(outline.mm3 / 1000).toFixed(1)} mL. Check it on every slice it touches; add strokes where it is wrong and grow again.`);
+      say(`Outline grown${r.ms < 100 ? "" : ` in ${(r.ms / 1000).toFixed(1)} s`}: ${(outline.mm3 / 1000).toFixed(1)} mL. Check it on every slice it touches, and in the sagittal and coronal views; add strokes where it is wrong and grow again.`);
     } catch (e) { say((e as Error).message); }
     finally { busy = ""; render(); }
   }
@@ -634,8 +634,8 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
         const w = document.createElement("span"); w.className = "sl-hint"; w.textContent = words;
         r.append(k, b, w); steps.append(r);
       };
-      step("1", "Tumor", "Draw a few strokes inside the tumor, on a few slices (the brush paints where you drag in a slice view). Click again to stop drawing.", outline?.tool === 1, false, () => void strokes(anat, 1), "strokes inside the tumor");
-      step("2", "Not tumor", "Draw a few strokes in the brain around the tumor, on a few slices, so the outline knows where to stop.", outline?.tool === 2, false, () => void strokes(anat, 2), "strokes around it");
+      step("1", "Tumor", "Draw a stroke inside the tumor on several slices, from the slice where it starts to the slice where it ends (the brush paints where you drag in a slice view; a stroke along it in the sagittal or coronal view does the same). Click again to stop drawing.", outline?.tool === 1, false, () => void strokes(anat, 1), "strokes inside the tumor");
+      step("2", "Not tumor", "Draw strokes in the brain around the tumor, on several slices and also just above and below it, so the outline knows where to stop.", outline?.tool === 2, false, () => void strokes(anat, 2), "strokes around it");
       step("3", busy === "Growing…" ? "Growing…" : "Grow the outline", "Albula fills the tumor out from your strokes up to where the image changes. Check every slice it touches; add strokes where it is wrong and grow again.", false, !outline, () => void growOutline(), outline?.mm3 ? `${(outline.mm3 / 1000).toFixed(1)} mL` : "");
       step("4", "Done", "Keeps the outline and removes the strokes.", false, !outline?.resultId, () => outlineDone(), "");
       caseSec.append(steps);
