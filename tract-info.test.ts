@@ -27,7 +27,14 @@ Deno.test("Read more falls back to the atlas paper, the same entry the checked r
 });
 
 Deno.test("the tooltip's Terminologia Neuroanatomica line says how close the term is", () => {
-  assertEquals(tnaLine("AF"), "Terminologia Neuroanatomica (2017): fasciculus arcuatus — arcuate fasciculus, TAH:U6269");
+  assertEquals(tnaLine("AF"), "Anatomical term (FIPAT, Terminologia Anatomica Humana, provisional): fasciculus arcuatus — arcuate fasciculus, TAH:U6269");
+  // Pinned to the entry pages as read on 2026-10-01 (critic, finding 6: six were off).
+  const latin = Object.fromEntries(TRACT_INFO.filter((x) => x.tna).map((x) => [x.abbr, x.tna!.latin]));
+  assertEquals(latin["ILF"], "fasciculus longitudinalis inferior telencephali");
+  assertEquals(latin["SLF-II"], "fasciculus longitudinalis superior II telencephali");
+  assertEquals(latin["CPC"], "tractus corticopontini");
+  assertEquals(latin["Sup-F"], "fibrae associationis breves");
+  for (const x of TRACT_INFO) if (x.tna?.english) assertEquals(/fibres|centre/.test(x.tna.english), false, `${x.abbr}: US spelling`);
   assertEquals(tnaLine("TF").endsWith("(the nearest term; not the same definition)"), true);
   assertEquals(tnaLine("CR-F").endsWith("(the larger structure this tract is part of)"), true);
   assertEquals(tnaLine("SF"), "", "no entry, no line");

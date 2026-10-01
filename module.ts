@@ -62,6 +62,8 @@ interface TractGroup {
   /** Named by TractCloud: the tract (index into the model's list), its side (+1 right, -1 left, 0 none), and its
    *  closest distance to the structure it was measured against, in mm. `unnamed`: TractCloud gave no name. */
   tract?: number; side?: number; distanceMm?: number; within?: number; unnamed?: boolean;
+  /** Made by "Show the fiber tracts near the tumor": the next run for the same scan replaces them (critic, finding 5). */
+  run?: boolean;
 }
 /** How tracts are followed: one tensor per voxel (fast, the classic), or the two-tensor free-water UKF (ukf.ts; crossing
  *  fibers, and free water -- edema -- modeled; the method SlicerDMRI uses for tumor planning). */
@@ -158,13 +160,14 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
   let outline: { imageId: string; seedsId: string; resultId?: string; tool: 0 | 1 | 2; voxels?: number; mm3?: number } | undefined;
   /** The outline made here, after Done: offered for saving as an AI result is (Ron, 2026-10-01: "same behavior and
    *  appearance as with the haversack functionality"). */
-  let kept: { segId: string; mm3: number; saved: boolean } | undefined;
+  let kept: { segId: string; mm3: number; saved: boolean; saving?: boolean; savable: boolean } | undefined;
   const saveKept = async () => {
-    if (!kept) return;
+    if (!kept || kept.saving || kept.saved) return;     // one save at a time (critic, finding 12c: two SEG series)
     const k = kept;
+    k.saving = true;
     say("Saving the tumor outline to the DICOM database…");
-    const note = await saveSegmentationToDicom(k.segId).catch((e) => { say(`The tumor outline was not saved: ${(e as Error).message}`); throw e; });
-    k.saved = true;
+    const note = await saveSegmentationToDicom(k.segId).catch((e) => { k.saving = false; say(`The tumor outline was not saved: ${(e as Error).message}`); throw e; });
+    k.saved = true; k.saving = false;
     say(`Saved — ${note}`);
     render();
   };
@@ -222,6 +225,15 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     return segs.flatMap((s) => ((s.segments as { labelValue: number; name: string }[] | undefined) ?? []).map((g) => ({ key: `${s.id}#${g.labelValue}`, label: `${g.name}${segs.length > 1 ? ` (${own(String(s.name))})` : ""}`, seg: s, labelValue: g.labelValue })));
   };
   /**
+   * WHICH OUTLINES ARE A TUMOR (critic, 2026-10-01, finding 1: any segmentation of the patient -- an AI brain
+   * parcellation -- ticked "Tumor outline" and the tracts were measured from its first structure). A segment counts when
+   * its name says so, or when it is the outline made in this module; the face measures only from these.
+   */
+  const TUMOR = /tumou?r|neoplas|lesion|glioma|glioblastoma|meningioma|metasta|cancer|carcinoma|lymphoma|schwannoma/i;
+  const tumorChoices = (scan: Scan | undefined) => segmentChoices(scan).filter((c) => TUMOR.test(c.label) || c.seg.id === kept?.segId);
+  /** The patient a scan belongs to, as its name says it (the part before "·"). */
+  const patientOf = (name: string) => name.includes("·") ? name.slice(0, name.indexOf("·")).trim() : "";
+  /**
    * THE MRI OF THE ANATOMY for a scan: an image of the same study (or patient) that is not a diffusion volume, a
    * reversed-phase volume, a computed map or a label map; a T1 by name first (the scan the tumor is outlined on).
    */
@@ -235,7 +247,8 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       if ((o.diffusion as unknown) !== undefined) return false;
       return (!!scan.study && o.studyInstanceUID === scan.study) || (!!scan.patient && o.patientID === scan.patient);
     });
-    return cands.find((n) => /t1/i.test(String(n.name ?? ""))) ?? cands[0];
+    // "T1" in the SERIES part of the name, not the patient's (critic, finding 15: an ID like PAT10 matched).
+    return cands.find((n) => /\bt1/i.test(String(n.name ?? "").replace(/^.*?·/, ""))) ?? cands[0];
   };
   const removeNode = (id: string) => {
     const n = live.nodes.get(id);
@@ -276,20 +289,34 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     } catch (e) { say((e as Error).message); }
     finally { busy = ""; render(); }
   }
+  /** Leave the outline steps: strokes and a grown outline not kept are removed (critic, finding 9: no way out). */
+  function outlineCancel() {
+    if (!outline) return;
+    paintInto(outline.seedsId, null);
+    removeNode(outline.seedsId);
+    if (outline.resultId) removeNode(outline.resultId);
+    outline = undefined;
+    say("The outline was not kept.");
+    render();
+  }
   function outlineDone() {
     if (!outline?.resultId) return;
     paintInto(outline.seedsId, null);
     removeNode(outline.seedsId);
     near = `${outline.resultId}#1`;
-    kept = { segId: outline.resultId, mm3: outline.mm3 ?? 0, saved: false };
+    // Savable only when the MRI it was drawn on came from the DICOM database (critic, finding 12b), as an AI result is.
+    const anatOrigin = live.nodes.get(outline.imageId)?.origin as { seriesInstanceUID?: string; savedSeriesInstanceUID?: string } | undefined;
+    kept = { segId: outline.resultId, mm3: outline.mm3 ?? 0, saved: false, savable: !!(anatOrigin?.seriesInstanceUID || anatOrigin?.savedSeriesInstanceUID) };
     outline = undefined;
-    say(`The tumor outline is ready: ${(kept.mm3 / 1000).toFixed(1)} mL. It is in the scene now; not saved yet.`);
+    say(`The tumor outline is ready: ${(kept.mm3 / 1000).toFixed(1)} mL. It is in the scene now; ${kept.savable ? "not saved yet" : "it cannot be saved to the database, because the MRI it was drawn on is not from the database"}.`);
     render();
-    // TOLD ONCE, AS AN AI RESULT IS (render/demos/ai-seg-panel.ts): in the scene now, not saved; Save or Later.
-    shell.notify({
+    // TOLD ONCE, AS AN AI RESULT IS (render/demos/ai-seg-panel.ts): only when the resident is elsewhere -- here the module
+    // shows it (critic, finding 12a) -- and Save only when it can work.
+    if (kept.savable && (shell as unknown as { activePanel?: () => string }).activePanel?.() !== "diffusion") shell.notify({
       title: `Tumor outline: ${(kept.mm3 / 1000).toFixed(1)} mL`,
       body: "<p>It is in the scene now; not saved yet.</p>",
       actions: [
+        { label: "Show in Diffusion", onClick: () => { void shell.showPanel("diffusion"); } },
         { label: "Save to DICOM", primary: true, busyLabel: "Saving…", doneLabel: "Saved ✓", failedLabel: "Not saved", onClick: () => saveKept() },
         { label: "Later", onClick: () => {} },
       ],
@@ -450,7 +477,8 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
   /**
    * UKF ON THE GRAPHICS CARD (ukf-gpu.ts), in batches. Seeds are RAS here and voxels there. Checked against the
    * processor version (ukf.ts) on PAT16, 1,200 seeds: the same seeds give fibers, half of them identical, tract-density
-   * maps correlate 0.875 (overlap 0.885); one fiber in ten ends > 17 mm away -- a difference still being traced
+   * maps correlate 0.875 (overlap 0.885); one fiber in ten ended > 17 mm away -- found and fixed 2026-09-30 (90% of ends
+   * now within 0.06 mm, the README's numbers)
    * (dmri-review-2026-09-28.md). 12x faster (3.2 s against 40.7 s).
    */
   async function trackUkf(c: Computed, seedsRAS: number[][]): Promise<Float32Array[]> {
@@ -532,15 +560,17 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       const z = await fetchZarrVolumeNative(live.blobBase(), target.seg.zarr as ZarrDesc), lab = z.data;
       const dist = await streamlineDistances({ dims: target.seg.dims as number[], ijkToRAS: target.seg.ijkToRAS as number[], inside: (v) => Number(lab[v]) === target.labelValue }, sl, withinMm + 2);
       const sorted = sortByDistance(model, named, dist, withinMm), nearTracts = sorted.near;
+      // A NEW RUN REPLACES THE LAST ONE for this scan (critic, finding 5: a second press doubled every tract).
+      for (let i = groups.length - 1; i >= 0; i--) if (groups[i].scan === scan.browserId && groups[i].run) groups.splice(i, 1);
       const pick = (idx: number[]) => idx.map((i) => sl[i]);
       for (const e of nearTracts) {
         const t = model.json.tracts[e.tract];
         groups.push({ id: ++groupSeq, name: t ? tractLabel(t.abbr, t.name, e.side) : tractName(model, e.tract, e.side), scan: scan.browserId, strands: pick(e.idx), visible: true, method,
-          tract: e.tract, side: e.side, distanceMm: e.d, within: e.within });
+          tract: e.tract, side: e.side, distanceMm: e.d, within: e.within, run: true });
       }
       const unnamedNear = sorted.unnamedNear, rest = [...sorted.unnamedFar, ...sorted.far.flatMap((e) => e.idx)];
-      if (unnamedNear.length) groups.push({ id: ++groupSeq, name: `Not named, within ${withinMm} mm of ${target.label}`, scan: scan.browserId, strands: pick(unnamedNear), visible: true, method, unnamed: true });
-      if (rest.length) groups.push({ id: ++groupSeq, name: "Rest of the brain", scan: scan.browserId, strands: pick(rest), visible: false, method, unnamed: true });
+      if (unnamedNear.length) groups.push({ id: ++groupSeq, name: `Not named, within ${withinMm} mm of ${target.label}`, scan: scan.browserId, strands: pick(unnamedNear), visible: true, method, unnamed: true, run: true });
+      if (rest.length) groups.push({ id: ++groupSeq, name: "Rest of the brain", scan: scan.browserId, strands: pick(rest), visible: false, method, unnamed: true, run: true });
       redraw3d();
       const t2 = performance.now();
       say(`${nearTracts.length} named tracts come within ${withinMm} mm of ${target.label} (at least ${MIN_NEAR_STREAMLINES} streamlines each)${unnamedNear.length ? `, and ${unnamedNear.length.toLocaleString()} streamlines no name fits` : ""}. ` +
@@ -632,12 +662,26 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     const scan = list.find((s) => s.browserId === chosen);
     const segs = segmentChoices(scan);
     if (!segs.find((s) => s.key === near)) near = segs[0]?.key ?? "";
+    if (outline && (!live.nodes.get(outline.seedsId) || !live.nodes.get(outline.imageId))) outline = undefined;   // finding 9
+    const tumors = tumorChoices(scan);
+    // The face measures from a tumor only; Advanced may still measure from any structure (its own "Near").
+    const faceNear = tumors.find((t) => t.key === near)?.key ?? tumors[0]?.key ?? "";
     root.innerHTML = "";
     // THE FACE (mockup diffusion-workflow-v4; Ron, 2026-10-01: the user is a neurosurgery resident who knows neither the
     // lingo nor the concepts -- "One button as initial, everything else under advanced", tooltips "with lay person
     // level"). 1 · what the case needs, each ticked when it is there; 2 · the one button and its answer; then Advanced.
     const anat = anatomyFor(scan);
-    const caseSec = shell.section(root, "1 · The patient's case", { band: "yellow", open: true, note: scan && anat && segs.length ? "✓" : `${[scan, anat, segs.length].filter(Boolean).length} of 3` });
+    const caseSec = shell.section(root, "1 · The patient's case", { band: "yellow", open: true, note: scan && anat && tumors.length ? "✓" : `${[scan, anat, tumors.length].filter(Boolean).length} of 3` });
+    // WHICH PATIENT (critic, finding 10): named on the face; with several, chosen on the face.
+    if (list.length > 1) {
+      const pp = document.createElement("select");
+      for (const s0 of list) pp.append(new Option(`${patientOf(s0.name) || "Patient"} — ${s0.name.replace(/^.*?·\s*(MR\s+)?/, "")}`, s0.browserId, false, s0.browserId === chosen));
+      pp.title = "More than one patient's diffusion MRI is loaded: the one the steps below are about.";
+      pp.onchange = () => { chosen = pp.value; render(); };
+      shell.row(caseSec, "Patient").append(pp);
+    } else if (scan && patientOf(scan.name)) {
+      const pl = document.createElement("div"); pl.className = "sl-hint"; pl.textContent = `Patient: ${patientOf(scan.name)}`; caseSec.append(pl);
+    }
     const need = (ok: boolean, what: string, detail: string, tip: string) => {
       const r = document.createElement("div");
       r.style.cssText = "display:grid;grid-template-columns:16px 1fr;gap:6px;margin:3px 0";
@@ -649,7 +693,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     };
     need(!!scan, "Diffusion MRI", scan ? scan.name.replace(/^.*?·\s*(MR\s+)?/, "") : "not loaded; it is often named DTI, DWI or diffusion", "The scan that shows the brain's wiring.");
     need(!!anat, "MRI of the anatomy", anat ? String(anat.name ?? "").replace(/^.*?·\s*(MR\s+)?/, "") : "not loaded; usually the T1 with contrast the tumor was seen on", "The scan the tumor is outlined on.");
-    need(segs.length > 0, "Tumor outline", segs.length ? (segs.length > 1 ? `${segs.length} to choose from (below)` : segs[0].label) : anat ? "none yet: make it below" : "none yet", "The tumor's outline, drawn on the anatomical MRI. The fiber tracts are measured from its edge.");
+    need(tumors.length > 0, "Tumor outline", tumors.length ? (tumors.length > 1 ? `${tumors.length} to choose from (below)` : tumors[0].label) : anat ? `none yet: make it below${segs.length ? " (the outlines loaded are not named as a tumor)" : ""}` : "none yet", "The tumor's outline, drawn on the anatomical MRI. The fiber tracts are measured from its edge. An outline counts when its name says tumor (or glioma, meningioma, lesion, …), or when it was made here.");
     if (!scan || !anat) {
       const bar0 = shell.actions(caseSec);
       const open = document.createElement("button"); open.className = "sl-primary"; open.textContent = "Open a patient…";
@@ -661,7 +705,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       bar0.append(disk, open);
       const p = document.createElement("p"); p.className = "sl-hint"; p.style.margin = "4px 0 0"; p.textContent = "Everything stays on this computer: nothing is sent anywhere.";
       caseSec.append(p);
-    } else if (!segs.length || outline) {
+    } else if (!tumors.length || outline) {
       // OUTLINE THE TUMOR: strokes in, strokes around, grow, correct, done.
       const steps = document.createElement("div");
       steps.style.cssText = "display:flex;flex-direction:column;gap:4px;margin:6px 0 2px";
@@ -678,10 +722,11 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       step("2", "Not tumor", "Draw strokes in the brain around the tumor, on several slices and also just above and below it, so the outline knows where to stop.", outline?.tool === 2, false, () => void strokes(anat, 2), "strokes around it");
       step("3", busy === "Growing…" ? "Growing…" : "Grow the outline", "Albula fills the tumor out from your strokes up to where the image changes. Check every slice it touches; add strokes where it is wrong and grow again.", false, !outline, () => void growOutline(), outline?.mm3 ? `${(outline.mm3 / 1000).toFixed(1)} mL` : "");
       step("4", "Done", "Keeps the outline and removes the strokes.", false, !outline?.resultId, () => outlineDone(), "");
+      if (outline) step("", "Cancel", "Removes the strokes and the outline grown from them; nothing is kept.", false, false, () => outlineCancel(), "");
       caseSec.append(steps);
     }
     // THE OUTLINE MADE HERE, NOT SAVED YET: the yellow Save to DICOM, as AI Segmentations' Result section has it.
-    if (kept && live.nodes.get(kept.segId) && !outline) {
+    if (kept && kept.savable && live.nodes.get(kept.segId) && !outline) {
       const bar1 = shell.actions(caseSec);
       const sv = document.createElement("button");
       sv.className = kept.saved ? "" : "sl-primary";
@@ -691,9 +736,9 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       sv.onclick = () => { void runAction(sv, () => saveKept(), { busyLabel: "Saving…", doneLabel: "Saved ✓", failedLabel: "Not saved" }).catch(() => {}); };
       bar1.append(sv);
     }
-    if (segs.length > 1) {
+    if (tumors.length > 1) {
       const nearSel0 = document.createElement("select");
-      for (const s0 of segs) nearSel0.append(new Option(s0.label, s0.key, false, s0.key === near));
+      for (const s0 of tumors) nearSel0.append(new Option(s0.label, s0.key, false, s0.key === faceNear));
       nearSel0.title = "Which outline the fiber tracts are measured from.";
       nearSel0.onchange = () => { near = nearSel0.value; render(); };
       shell.row(caseSec, "Tumor").append(nearSel0);
@@ -703,11 +748,13 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     go.className = "sl-primary";
     go.style.cssText = "width:100%;margin:4px 0";
     go.textContent = busy && !busy.startsWith("Grow") && !busy.startsWith("Comput") ? busy : "Show the fiber tracts near the tumor";
-    go.title = `Finds the brain's main nerve fiber tracts, names them, and shows every one that runs within ${withinMm} mm of the tumor — whole, in its own color, with how close it comes. ${method === "ptt" ? "About three minutes (Smooth curves, chosen under Advanced)." : "About half a minute."}`;
-    go.disabled = !!busy || !scan || !near || seeding || !!outline;
-    go.onclick = () => { if (method === "single") method = "ukf"; void makeTracts(); };   // the face names tracts: two-tensor or smooth curves
+    // Says the cut (critic, finding 4: "every" was not true): a named tract is listed when at least 5 of its fibers come
+    // that close.
+    go.title = `Finds the brain's main nerve fiber tracts, names them, and shows each named tract with at least ${MIN_NEAR_STREAMLINES} of its fibers within ${withinMm} mm of the tumor — whole, in its own color, with how close it comes. ${method === "ptt" ? "About three minutes (Smooth curves, chosen under Advanced)." : method === "single" ? "Uses Two-tensor: Single tensor (chosen under Advanced) does not name tracts. About half a minute." : "About half a minute."}`;
+    go.disabled = !!busy || !scan || !faceNear || seeding || !!outline;
+    go.onclick = () => { if (method === "single") method = "ukf"; near = faceNear; void makeTracts(); };   // the face names tracts, from a tumor
     face.append(go);
-    if (!scan || !near) { const p = document.createElement("p"); p.className = "sl-hint"; p.textContent = "Waits until the case has all three."; face.append(p); }
+    if (!scan || !faceNear) { const p = document.createElement("p"); p.className = "sl-hint"; p.textContent = "Waits until the case has all three."; face.append(p); }
     if (note) { const p = document.createElement("p"); p.className = "sl-hint"; p.style.margin = "4px 0 0"; p.textContent = note; face.append(p); }
     const listBox = document.createElement("div");
     face.append(listBox);
@@ -831,10 +878,9 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
           const ref = readMore(abbr);
           const tna = tnaLine(abbr);
           name.title = `${g.name}${tna ? `\n${tna}` : ""}\nRead more (click): ${ref.cite}`;
-          name.style.cursor = "pointer";
-          name.onclick = () => { void fetch(`/_open?url=${encodeURIComponent(ref.link)}`).catch(() => {}); };
+          name.onclick = () => { void fetch(`/_open?url=${encodeURIComponent(ref.link)}`).then((r) => { if (!r.ok) throw new Error(); }).catch(() => { globalThis.open?.(ref.link, "_blank"); }); };
         }
-        name.style.cssText = "flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap";
+        name.style.cssText = `flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap${name.onclick ? ";cursor:pointer;text-decoration:underline dotted" : ""}`;
         const n = document.createElement("span"); n.style.opacity = "0.7";
         n.textContent = g.within !== undefined ? `${g.within.toLocaleString()}/${g.strands.length.toLocaleString()}` : g.strands.length.toLocaleString();
         n.title = g.within !== undefined ? `${g.within.toLocaleString()} of this tract's ${g.strands.length.toLocaleString()} streamlines come within the distance of the structure` : "streamlines in this group";
@@ -887,7 +933,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     title: "Diffusion",
     groups: ["Display"],
     tip: "Which of the brain's fiber tracts run near a tumor, for planning an operation.",
-    help: "<p><b>For preparing a case.</b> The module needs three things, and ticks each off when it is there: the <b>diffusion MRI</b> (the scan that shows the brain's wiring; often named DTI, DWI or diffusion), the <b>MRI of the anatomy</b> (usually the T1 with contrast), and the <b>tumor's outline</b>. <b>Open a patient…</b> opens the DICOM database; <b>Scans on this computer…</b> opens Load / Save, where a folder from a CD, a USB stick or an export is added to the database. Without an outline, draw a few <b>Tumor</b> strokes inside it and a few <b>Not tumor</b> strokes around it, on a few slices, then <b>Grow the outline</b>, check it, correct with more strokes, and press <b>Done</b>. Then <b>Show the fiber tracts near the tumor</b>: each named tract that comes within 8 mm is shown whole, in its own color, with how close it comes. Everything stays on this computer.</p><p><b>Advanced</b> holds the maps and the settings behind that button:</p><p>Shows what a diffusion MRI scan measures: <b>FA</b>, how strongly water moves along one direction (bright in white matter tracts), and <b>Color FA</b>, that direction as a color (red left-right, green front-back, blue up-down). A diffusion scan shows Color FA when it loads.</p><p><b>Tracts</b> follow the main direction of water movement from voxel to voxel. <b>Make tracts</b> starts them in the white matter inside and around the chosen structure, such as a tumor; <b>Seed where I click…</b> starts them at one point. Tracts are drawn in 3D as tubes or lines; each group can be hidden or removed.</p><p><b>Two-tensor</b> (UKF, the default) follows two fiber directions and the free water around them; it runs on the graphics card and agrees with the reference computation on the processor (fiber ends within a fraction of a millimeter for 90% of fibers). <b>Single tensor</b> follows one direction per voxel; where tracts cross, that direction is an average, and a tract may stop or turn. With <b>Two-tensor</b>, <b>Make tracts</b> follows tracts through the whole brain and names them with TractCloud, a network trained on an atlas of 800 fiber clusters (Zhang, O'Donnell et al.); each named tract that comes within the distance of the chosen structure is shown whole, in its own color, with its closest distance to the structure. Streamlines no name fits and pass close are shown in gray; the rest of the brain is kept, hidden.</p><p><b>Licenses.</b> Research software: not reviewed or approved by the FDA or any other agency; clinical applications are neither recommended nor advised. The two-tensor tracking is a port of UKFTractography (authors: Yogesh Rathi, Stefan Lienhard, Yinpeng Li, Martin Styner, Ipek Oguz, Yundi Shi, Christian Baumgartner, Ryan Eckbo, Tashrif Billah and Dheshan Mohandass; github.com/pnlbwh/ukftractography). All or portions of this licensed product (such portions are the \"Software\") have been obtained under license from The Brigham and Women's Hospital, Inc. and are subject to the following terms and conditions: <a href=\"./vendor/diffusion/licenses/LICENSE-UKF.txt\" target=\"_blank\">the UKF Tractography Contribution and Software License Agreement</a> (this is a modified version: translated to TypeScript and WGSL). TractCloud's trained network is under <a href=\"./vendor/diffusion/tractcloud/LICENSE.txt\" target=\"_blank\">3D Slicer's license</a>; dcm2niix under <a href=\"./vendor/diffusion/dcm2niix/LICENSE.txt\" target=\"_blank\">its own (BSD)</a>; the rest of this extension under the <a href=\"./vendor/diffusion/licenses/LICENSE\" target=\"_blank\">Apache License 2.0</a> (<a href=\"./vendor/diffusion/licenses/NOTICE\" target=\"_blank\">NOTICE</a>).</p>",
+    help: "<p><b>For preparing a case.</b> The module needs three things, and ticks each off when it is there: the <b>diffusion MRI</b> (the scan that shows the brain's wiring; often named DTI, DWI or diffusion), the <b>MRI of the anatomy</b> (usually the T1 with contrast), and the <b>tumor's outline</b>. <b>Open a patient…</b> opens the DICOM database; <b>Scans on this computer…</b> opens Load / Save, where a folder from a CD, a USB stick or an export is added to the database. Without an outline, draw a few <b>Tumor</b> strokes inside it and a few <b>Not tumor</b> strokes around it, on a few slices, then <b>Grow the outline</b>, check it, correct with more strokes, and press <b>Done</b>. Then <b>Show the fiber tracts near the tumor</b>: each named tract with at least 5 of its fibers within 8 mm of the tumor (the distance can be changed under Advanced) is shown whole, in its own color, with how close it comes; pressing it again replaces the list. Only an outline named as a tumor (or made here) counts. Everything stays on this computer.</p><p><b>Advanced</b> holds the maps and the settings behind that button:</p><p>Shows what a diffusion MRI scan measures: <b>FA</b>, how strongly water moves along one direction (bright in white matter tracts), and <b>Color FA</b>, that direction as a color (red left-right, green front-back, blue up-down). A diffusion scan shows Color FA when it loads.</p><p><b>Tracts</b> follow the main direction of water movement from voxel to voxel. Under Advanced, <b>Make tracts</b> with <b>Single tensor</b> starts them in the white matter inside and around the chosen structure; with <b>Two-tensor</b> or <b>Smooth curves</b> it does what the face's button does, from the structure chosen there; <b>Seed where I click…</b> starts them at one point. <b>Smooth curves</b> follows fibers as gently bending lines from a model of every direction in each voxel (CSD and parallel transport tracking): about three minutes, an option. Tracts are drawn in 3D as tubes or lines; each group can be hidden or removed.</p><p><b>Two-tensor</b> (UKF, the default) follows two fiber directions and the free water around them; it runs on the graphics card and agrees with the reference computation on the processor (fiber ends within a fraction of a millimeter for 90% of fibers). <b>Single tensor</b> follows one direction per voxel; where tracts cross, that direction is an average, and a tract may stop or turn. With <b>Two-tensor</b>, <b>Make tracts</b> follows tracts through the whole brain and names them with TractCloud, a network trained on an atlas of 800 fiber clusters (Zhang, O'Donnell et al.); each named tract that comes within the distance of the chosen structure is shown whole, in its own color, with its closest distance to the structure. Streamlines no name fits and pass close are shown in gray; the rest of the brain is kept, hidden.</p><p><b>Licenses.</b> Research software: not reviewed or approved by the FDA or any other agency; clinical applications are neither recommended nor advised. The two-tensor tracking is a port of UKFTractography (authors: Yogesh Rathi, Stefan Lienhard, Yinpeng Li, Martin Styner, Ipek Oguz, Yundi Shi, Christian Baumgartner, Ryan Eckbo, Tashrif Billah and Dheshan Mohandass; github.com/pnlbwh/ukftractography). All or portions of this licensed product (such portions are the \"Software\") have been obtained under license from The Brigham and Women's Hospital, Inc. and are subject to the following terms and conditions: <a href=\"./vendor/diffusion/licenses/LICENSE-UKF.txt\" target=\"_blank\">the UKF Tractography Contribution and Software License Agreement</a> (this is a modified version: translated to TypeScript and WGSL). TractCloud's trained network is under <a href=\"./vendor/diffusion/tractcloud/LICENSE.txt\" target=\"_blank\">3D Slicer's license</a>; dcm2niix under <a href=\"./vendor/diffusion/dcm2niix/LICENSE.txt\" target=\"_blank\">its own (BSD)</a>; the rest of this extension under the <a href=\"./vendor/diffusion/licenses/LICENSE\" target=\"_blank\">Apache License 2.0</a> (<a href=\"./vendor/diffusion/licenses/NOTICE\" target=\"_blank\">NOTICE</a>).</p>",
     acknowledgements: DIFFUSION_REFERENCES.map((r) => `${r.cite}${r.link ? ` ${r.link}` : ""} — ${r.usedFor}${r.verified ? "" : " (citation to be checked)"}`),
     mount(el) { root = el; render(); },
     onShow() { render(); },
