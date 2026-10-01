@@ -6,19 +6,24 @@
 // Checked by a round trip through fromNrrdDwi (dwi-nrrd-write.test.ts).
 import type { DiffusionSeries } from "./dwi.ts";
 
-export function writeNrrdDwi(s: DiffusionSeries): Uint8Array {
+/**
+ * `space: "LPS"` writes Slicer's own convention (left-posterior-superior: x and y flipped in the directions, the origin and
+ * the gradients), which is what UKFTractography is tested on; "RAS" (the default) is the same data in RAS.
+ */
+export function writeNrrdDwi(s: DiffusionSeries, opts: { space?: "RAS" | "LPS" } = {}): Uint8Array {
   const [nx, ny, nz] = s.volumes[0].dims, N = s.volumes.length, n3 = nx * ny * nz;
-  const M = s.ijkToRAS;
+  const lps = opts.space === "LPS", f = lps ? [-1, -1, 1] : [1, 1, 1];
+  const M = s.ijkToRAS.map((v, i) => (i < 12 ? v * f[Math.floor(i / 4)] : v));
   const col = (c: number) => `(${M[c]},${M[4 + c]},${M[8 + c]})`;
   const bmax = Math.max(...s.bValues);
   const lines = [
-    "NRRD0005", "# written by albula-diffusion dwi-nrrd-write.ts", "type: float", "dimension: 4", "space: right-anterior-superior",
+    "NRRD0005", "# written by albula-diffusion dwi-nrrd-write.ts", "type: float", "dimension: 4", `space: ${lps ? "left-posterior-superior" : "right-anterior-superior"}`,
     `sizes: ${N} ${nx} ${ny} ${nz}`, `space directions: none ${col(0)} ${col(1)} ${col(2)}`, "kinds: list space space space",
     "endian: little", "encoding: raw", `space origin: (${M[3]},${M[7]},${M[11]})`, "measurement frame: (1,0,0) (0,1,0) (0,0,1)",
     "modality:=DWMRI", `DWMRI_b-value:=${bmax}`,
     ...s.gradients.map((g, i) => {
       const k = s.bValues[i] > 0 && bmax > 0 ? Math.sqrt(s.bValues[i] / bmax) : 0;
-      return `DWMRI_gradient_${String(i).padStart(4, "0")}:=${(g[0] * k).toFixed(8)} ${(g[1] * k).toFixed(8)} ${(g[2] * k).toFixed(8)}`;
+      return `DWMRI_gradient_${String(i).padStart(4, "0")}:=${(g[0] * k * f[0]).toFixed(8)} ${(g[1] * k * f[1]).toFixed(8)} ${(g[2] * k * f[2]).toFixed(8)}`;
     }),
   ];
   const head = new TextEncoder().encode(lines.join("\n") + "\n\n");
