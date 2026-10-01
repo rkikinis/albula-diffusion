@@ -31,3 +31,27 @@ export function sliceCrossings(sets: Float32Array[][], plane: Plane): Crossing[]
   });
   return out;
 }
+
+/**
+ * A STREAMLINE WITH ITS ENDS SHORTENED, for drawing (Ron, 2026-10-01, after Add lines: "the ends of the tracts are
+ * 'frazzled' any way make them slightly shorter?"). `mm` of arc length off each end, the cut points interpolated.
+ * The streamline itself is not changed (leave the data, modulate the appearance). One too short to keep anything
+ * gives null.
+ */
+export function trimEnds(f: Float32Array, mm: number): Float32Array | null {
+  const n = f.length / 3;
+  if (mm <= 0 || n < 2) return f;
+  const cum = new Float64Array(n);
+  for (let i = 1; i < n; i++) cum[i] = cum[i - 1] + Math.hypot(f[3 * i] - f[3 * i - 3], f[3 * i + 1] - f[3 * i - 2], f[3 * i + 2] - f[3 * i - 1]);
+  const a = mm, b = cum[n - 1] - mm;
+  if (b - a <= 1e-6) return null;
+  const at = (t: number): number[] => {
+    let i = 1; while (i < n - 1 && cum[i] < t) i++;
+    const s = (t - cum[i - 1]) / Math.max(1e-12, cum[i] - cum[i - 1]);
+    return [0, 1, 2].map((c) => f[3 * (i - 1) + c] + s * (f[3 * i + c] - f[3 * (i - 1) + c]));
+  };
+  const out: number[] = [...at(a)];
+  for (let i = 0; i < n; i++) if (cum[i] > a && cum[i] < b) out.push(f[3 * i], f[3 * i + 1], f[3 * i + 2]);
+  out.push(...at(b));
+  return Float32Array.from(out);
+}

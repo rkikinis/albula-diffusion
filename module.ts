@@ -40,7 +40,7 @@ import { DCM2NIIX_VERSION, secondOpinion, type SecondOpinion } from "./second-op
 import { assetUrl, seriesDicomFiles, startPlacing } from "albula";
 import { createSegmentation, growIntoSegmentation, openDicomDatabase, openLoadFromDisk, paintInto, registerProbeRows, runAction, saveSegmentationToDicom, showHideAllState } from "albula";
 import { buildTractIndex, tractsNear, type TractIndex } from "./tract-index.ts";
-import { sliceCrossings } from "./tract-slice.ts";
+import { sliceCrossings, trimEnds } from "./tract-slice.ts";
 import { readMore, tnaLine, tractInfo, tractLabel } from "./tract-info.ts";
 import { faceNear as nearOnFace, isTumorName, matchesSearch, patientOf, pickAnatomy, tractGroupKey, TRACT_GROUPS, withoutLastRun } from "./face.ts";
 import { loadModel, type ModelJson, type TractCloudModel } from "./tractcloud/tractcloud.ts";
@@ -699,13 +699,28 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     });
   }
 
+  /**
+   * SHORTER ENDS, FOR DRAWING (Ron, 2026-10-01, after Add lines: "the ends of the tracts are 'frazzled' any way make them
+   * slightly shorter?"): every streamline drawn -- in 3D, as dots on the slices, and for the probe -- loses `trimVoxels`
+   * voxels of the scan's grid at each end (tract-slice.ts trimEnds). The streamlines kept, measured and saved are whole.
+   */
+  let trimVoxels = 2;
+  const trimCache = new WeakMap<TractGroup, { key: string; strands: Float32Array[] }>();
+  const voxelMm = (scanId: string) => { const M = computed.get(scanId)?.fit.ijkToRAS; return M ? Math.min(...[0, 1, 2].map((c) => Math.hypot(M[c], M[4 + c], M[8 + c]))) : 2; };
+  function drawn(g: TractGroup): Float32Array[] {
+    const mm = trimVoxels * voxelMm(g.scan), key = `${mm}:${g.strands.length}`;
+    const hit = trimCache.get(g); if (hit && hit.key === key) return hit.strands;
+    const strands = mm > 0 ? g.strands.map((f) => trimEnds(f, mm)).filter((f): f is Float32Array => !!f && f.length >= 6) : g.strands;
+    trimCache.set(g, { key, strands });
+    return strands;
+  }
   /** How many tracts the model names (Other included), once it is loaded; colors need it. */
   let tractCount = 43;
   /** The tracts shown, indexed for the data probe (tract-index.ts); rebuilt with every redraw. */
   let probeIndex: { ix: TractIndex; shown: TractGroup[] } | undefined;
   function redraw3d() {
     const shownNow = groups.filter((g) => g.visible);
-    probeIndex = shownNow.length ? { ix: buildTractIndex(shownNow.map((g) => g.strands)), shown: shownNow } : undefined;
+    probeIndex = shownNow.length ? { ix: buildTractIndex(shownNow.map(drawn)), shown: shownNow } : undefined;
     const view = live.view;
     if (!view) return;
     // Colored by tract: each named group its tract's color (tract-colors.ts), unnamed ones gray; otherwise, and for
@@ -717,7 +732,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       let id = 0;
       if (colorBy === "tract" && g.tract !== undefined && slot <= 255) { id = slot++; pal[id] = tractColor(g.tract, count); }
       else if (colorBy === "tract" && g.unnamed) id = GRAY_ID;
-      return g.strands.map((p) => id ? { points: p, bundle: id } : { points: p, bundle: directionId(p), pointBundles: pointIds(p) });
+      return drawn(g).map((p) => id ? { points: p, bundle: id } : { points: p, bundle: directionId(p), pointBundles: pointIds(p) });
     });
     drawSliceCrossings();
     const old = field; field = undefined;
@@ -748,7 +763,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       if (n.type !== "view" || n.kind !== "slice" || !Array.isArray(n.sliceToRAS)) continue;
       const m = n.sliceToRAS as number[], L = Math.hypot(m[2], m[6], m[10]) || 1, nrm: [number, number, number] = [m[2] / L, m[6] / L, m[10] / L];
       const d = typeof n.offset === "number" ? n.offset : m[3] * nrm[0] + m[7] * nrm[1] + m[11] * nrm[2];
-      const cs = sliceCrossings(shown.map((g) => g.strands), { origin: [nrm[0] * d, nrm[1] * d, nrm[2] * d], normal: nrm });
+      const cs = sliceCrossings(shown.map(drawn), { origin: [nrm[0] * d, nrm[1] * d, nrm[2] * d], normal: nrm });
       const step = Math.max(1, Math.ceil(cs.length / MAX_CROSSINGS));      // a very dense slice is thinned evenly
       for (let i = 0; i < cs.length; i += step) items.push({ kind: "point", ras: cs[i].p, color: color(shown[cs[i].set], cs[i].dir), radiusPx: 1.6, inPlaneOnly: true });
     }
@@ -1066,7 +1081,9 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
         }
         const dist = document.createElement("span");
         if (g.distanceMm !== undefined) {
-          dist.textContent = g.distanceMm < 0.05 ? "touches" : `${g.distanceMm.toFixed(1)} mm`;
+          // Measured out to the margin and 2 mm beyond (streamlineDistances); farther is "far" (Ron's screenshot,
+          // 2026-10-01: the other side, added by Add lines, read "Infinity mm").
+          dist.textContent = g.distanceMm < 0.05 ? "touches" : Number.isFinite(g.distanceMm) ? `${g.distanceMm.toFixed(1)} mm` : "far";
           dist.title = g.distanceMm < 0.05 ? "This tract reaches into the structure." : "This tract's closest distance to the structure.";
           dist.style.cssText = "flex:0 0 auto;opacity:0.85";
         }
@@ -1095,6 +1112,16 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
         as.append(b);
       }
       shell.row(more, "Draw as").append(as);
+      // Shorter ends (drawing only).
+      const tw = document.createElement("span"); tw.style.cssText = "display:flex;gap:6px;align-items:center";
+      const ti = document.createElement("input"); ti.type = "number"; ti.min = "0"; ti.max = "6"; ti.step = "0.5"; ti.value = String(trimVoxels); ti.style.width = "4em";
+      const tl = document.createElement("span"); tl.style.opacity = "0.7";
+      const vmm = groups.length ? voxelMm(groups[0].scan) : 2;
+      tl.textContent = `voxels at each end (≈ ${(trimVoxels * vmm).toFixed(1)} mm on this ${vmm.toFixed(1)} mm grid)`;
+      ti.title = "Draws every tract a little shorter at both ends, where the fibers fan out. The tracts themselves stay whole. 0 draws them whole.";
+      ti.onchange = () => { const v = Number(ti.value); if (Number.isFinite(v) && v >= 0) { trimVoxels = Math.min(6, v); redraw3d(); render(); } };
+      tw.append(ti, tl);
+      shell.row(more, "Shorten ends").append(tw);
       if (groups.some((g) => g.tract !== undefined)) {
         const cb = document.createElement("div");
         cb.style.cssText = "display:flex;gap:3px";
