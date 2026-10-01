@@ -58,6 +58,17 @@ runs its tests and copies its files. Its tests alone:
 
     deno test -A --no-check --unstable-webgpu --config <workspace>/Contents/src/SlicerLive/deno.jsonc .
 
+From scratch (Deno 2 is the only tool needed):
+
+    mkdir -p albula/Contents/src albula/Contents/extensions && cd albula
+    git clone -b albula https://github.com/rkikinis/SlicerLive.git Contents/src/SlicerLive
+    git clone https://github.com/rkikinis/albula-diffusion.git Contents/extensions/diffusion
+    cd Contents/extensions/diffusion
+    deno test -A --no-check --unstable-webgpu --config ../../src/SlicerLive/deno.jsonc .
+
+The UKF code alone (`ukf.ts`, `ukf-gpu.ts`, and `dwi.ts`, `tensor.ts` they read with) needs only `albula` for two
+reader functions; its test against the processor version (`ukf-gpu.test.ts`) runs on OpenNeuro ds001226's PAT16.
+
 Tests that need data are skipped when it is not on disk. Public: OpenNeuro ds001226 and the dcm2niix test sets. Made
 from public data by Albula's own tools: the TractCloud reference (`tractcloud-reference.py`, from PAT16's streamlines)
 and the CSD reference. Albula's `Contents/data/test-data.json` lists each collection and how to make it.
