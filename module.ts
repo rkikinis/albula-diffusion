@@ -33,7 +33,7 @@ import { DCM2NIIX_VERSION, secondOpinion, type SecondOpinion } from "./second-op
 import { assetUrl, seriesDicomFiles, startPlacing } from "albula";
 import { loadModel, type ModelJson, type TractCloudModel } from "./tractcloud/tractcloud.ts";
 import { nameTracts } from "./tractcloud/name-tracts.ts";
-import { correctWithReversed, sortByDistance, streamlineDistances, tractName, trackUkfSeeds, wholeBrainSeeds } from "./planning.ts";
+import { correctWithReversed, MIN_NEAR_STREAMLINES, sortByDistance, streamlineDistances, tractName, trackUkfSeeds, wholeBrainSeeds } from "./planning.ts";
 import { tractColor, UNNAMED } from "./tractcloud/tract-colors.ts";
 import { seedsInSphere, trackFromSeeds, type Streamline, type TrackingOptions } from "./tracking.ts";
 import { DIFFUSION_REFERENCES } from "./references.ts";
@@ -421,7 +421,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       if (rest.length) groups.push({ id: ++groupSeq, name: "Rest of the brain", scan: scan.browserId, strands: pick(rest), visible: false, method, unnamed: true });
       redraw3d();
       const t2 = performance.now();
-      say(`${nearTracts.length} named tracts come within ${withinMm} mm of ${target.label}${unnamedNear.length ? `, and ${unnamedNear.length.toLocaleString()} streamlines no name fits` : ""}. ` +
+      say(`${nearTracts.length} named tracts come within ${withinMm} mm of ${target.label} (at least ${MIN_NEAR_STREAMLINES} streamlines each)${unnamedNear.length ? `, and ${unnamedNear.length.toLocaleString()} streamlines no name fits` : ""}. ` +
         `${sl.length.toLocaleString()} streamlines through the whole brain in ${((t1 - t0) / 1000).toFixed(1)} s, named in ${named.seconds.toFixed(1)} s (TractCloud), ${((t2 - t0) / 1000).toFixed(1)} s in all.`);
     } catch (e) { say(`Tracts could not be made: ${(e as Error).message}`); }
     finally { busy = ""; render(); }

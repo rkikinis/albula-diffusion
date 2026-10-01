@@ -140,9 +140,14 @@ export async function streamlineDistances(s: Structure, sl: Float32Array[], padM
 export interface NearTract { tract: number; side: number; idx: number[]; d: number; within: number }
 export interface Sorted { near: NearTract[]; far: NearTract[]; unnamedNear: number[]; unnamedFar: number[] }
 
-/** Sort a named whole-brain tractography by distance to a structure: the named tracts that come within `withinMm`
- *  (closest first), the others, and the unnamed streamlines (TractCloud's Other, and those too short to name). */
-export function sortByDistance(model: TractCloudModel, named: Named, dist: Float64Array, withinMm: number): Sorted {
+/** How many of a tract's streamlines must come within the margin for it to count as near (Ron, 2026-10-01: "yes for
+ *  now", on the case library's development half: 43% of the tracts listed with "any streamline" had fewer than 5). */
+export const MIN_NEAR_STREAMLINES = 5;
+
+/** Sort a named whole-brain tractography by distance to a structure: the named tracts at least `minStreamlines` of
+ *  whose streamlines come within `withinMm` (closest first), the others, and the unnamed streamlines (TractCloud's
+ *  Other, and those too short to name). */
+export function sortByDistance(model: TractCloudModel, named: Named, dist: Float64Array, withinMm: number, minStreamlines = MIN_NEAR_STREAMLINES): Sorted {
   const OTHER = model.json.tracts.length - 1, by = new Map<string, NearTract>(), unnamedNear: number[] = [], unnamedFar: number[] = [];
   for (let i = 0; i < named.tract.length; i++) {
     const t = named.tract[i];
@@ -152,7 +157,8 @@ export function sortByDistance(model: TractCloudModel, named: Named, dist: Float
     e.idx.push(i); e.d = Math.min(e.d, dist[i]); if (dist[i] <= withinMm) e.within++;
   }
   const all = [...by.values()];
-  return { near: all.filter((e) => e.d <= withinMm).sort((a, b) => a.d - b.d || b.within - a.within), far: all.filter((e) => e.d > withinMm), unnamedNear, unnamedFar };
+  const isNear = (e: NearTract) => e.d <= withinMm && e.within >= minStreamlines;
+  return { near: all.filter(isNear).sort((a, b) => a.d - b.d || b.within - a.within), far: all.filter((e) => !isNear(e)), unnamedNear, unnamedFar };
 }
 
 /** A tract's name in words, with its side. */
