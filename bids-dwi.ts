@@ -1,6 +1,6 @@
 // DIFFUSION SCANS IN A BIDS SESSION -> one Enhanced MR Image object each, the b-value and direction on every frame
-// (export-dicom-dwi.ts). A kind of the BIDS import (bids-kinds.ts). TEMPORARILY in core (step 1 of
-// Contents/docs/EXTENSIONS.md); step 2 moves it into the diffusion extension, which registers it itself.
+// (export-dicom-dwi.ts). A kind of the BIDS import, registered by hooks.ts through the SDK (registerBidsKind): core
+// builds the anatomy and the masks of a session, this extension its dwi/ folder.
 import type { BuiltObject } from "albula";
 import type { BidsKind, BidsKindContext } from "albula";
 import { parseNiftiVolumes } from "albula";

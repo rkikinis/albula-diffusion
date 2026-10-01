@@ -23,6 +23,7 @@ export const VENDOR_RULE = 2;
 
 import { privateAt as at, bytesOf, dicomNumber as num, parseCsa, privateNumbers, type DicomJsonRaw as Raw } from "albula";
 import type { VolumeInterpreter, VolumeKey } from "albula";
+import { INTERPRETER_CODE } from "./interpreter-code.generated.ts";
 
 export interface DiffusionInfo {
   bValue: number;
@@ -196,6 +197,8 @@ function diffusionKey(b: number, dir: [number, number, number] | undefined, sour
  */
 export const diffusionInterpreter: VolumeInterpreter = {
   name: "diffusion",
+  // Its fingerprint, recorded in every working copy: a copy read by another version of these rules is not used.
+  code: `rule${VENDOR_RULE}-${INTERPRETER_CODE}`,
   instance(ds, raw) {
     const d = diffusionOf(ds, raw as Raw);
     return d ? diffusionKey(d.bValue, d.direction, d.source, d.weak) : undefined;

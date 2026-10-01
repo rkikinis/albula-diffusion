@@ -2,6 +2,8 @@
 // processor: the reference the graphics-card version (ukf-gpu.ts) is checked against. Ron, 2026-09-29: "go ahead with
 // UKF. GPU and parallelize as much as possible." Review: Contents/docs/ukf-review-2026-09-29.md (workspace).
 //
+// UKFTractography's authors (its README): Yogesh Rathi, Stefan Lienhard, Yinpeng Li, Martin Styner, Ipek Oguz, Yundi Shi,
+// Christian Baumgartner, Ryan Eckbo, Tashrif Billah, Dheshan Mohandass. Its license: LICENSE-UKF.txt beside this file.
 // PORTED FROM UKFTractography (github.com/pnlbwh/ukftractography, files ukf/filter_Simple2T_FW.cc,
 // unscented_kalman_filter.cc, tractography.cc Init / Follow2T / Step2T / UnpackTensor, NrrdData.cc Interp3Signal,
 // dwi_normalize.cc, cli.cc defaults), which is under the UKF Tractography Contribution and Software License Agreement:

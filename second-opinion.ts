@@ -4,10 +4,10 @@
 // scanner generation shows up as a DISAGREEMENT the day it appears, not as a silent wrong direction. Albula's reader
 // stays the reader (it keeps the DICOM record); this only checks it.
 //
-// dcm2niix's output (NIfTI + .bval/.bvec, FSL's convention) is read by Albula's own FSL reader (logic/diffusion/dwi.ts
+// dcm2niix's output (NIfTI + .bval/.bvec, FSL's convention) is read by Albula's own FSL reader (./dwi.ts
 // fromFsl, itself checked against dcm2niix and nibabel), so both sides are in one convention (DWI_CONVENTION 1: unit
 // gradients in patient RAS). Directions are compared without their sign (an axis has none).
-import { workerUrl } from "albula";
+import { assetUrl } from "albula";
 import { fromFsl, isotropicVolumes, type DiffusionSeries } from "./dwi.ts";
 import { parseNiftiVolumes } from "albula";
 
@@ -29,7 +29,7 @@ interface Dcm2niixClass { new(): { init(): Promise<void>; input(files: unknown):
 let lib: Promise<Dcm2niixClass> | undefined;
 async function dcm2niix(): Promise<Dcm2niixClass> {
   // The package's own loader, served beside the app; it starts its worker beside itself.
-  lib ??= import(workerUrl("./vendor/dcm2niix/index.js").href).then((m) => m.Dcm2niix as Dcm2niixClass);
+  lib ??= import(assetUrl("diffusion", "dcm2niix/index.js").href).then((m) => m.Dcm2niix as Dcm2niixClass);
   return await lib;
 }
 

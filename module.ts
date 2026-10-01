@@ -30,7 +30,7 @@ import { FiberField, type RGBA, type Strand } from "albula";
 import { colorFA, fitTensors, type TensorFit } from "./tensor.ts";
 import { prepareUkfData, type UkfData } from "./ukf.ts";
 import { DCM2NIIX_VERSION, secondOpinion, type SecondOpinion } from "./second-opinion.ts";
-import { workerUrl } from "albula";
+import { assetUrl, seriesDicomFiles, startPlacing } from "albula";
 import { loadModel, type ModelJson, type TractCloudModel } from "./tractcloud/tractcloud.ts";
 import { nameTracts } from "./tractcloud/name-tracts.ts";
 import { correctWithReversed, sortByDistance, streamlineDistances, tractName, trackUkfSeeds, wholeBrainSeeds } from "./planning.ts";
@@ -119,10 +119,10 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
   let groupSeq = 0;
   let drawAs: "tubes" | "lines" = "tubes";
   let colorBy: "tract" | "direction" = "tract";
-  /** TractCloud's network, loaded once from the files beside the bundle (vendor/tractcloud/, model/README.md). */
+  /** TractCloud's network, loaded once from the files beside the bundle (vendor/diffusion/tractcloud/, model/README.md). */
   let tcModel: Promise<TractCloudModel> | undefined;
   const tractCloud = () => tcModel ??= (async () => {
-    const get = async (f: string) => { const r = await fetch(workerUrl(`./vendor/tractcloud/${f}`)); if (!r.ok) throw new Error(`the tract-naming model is missing (${f}: ${r.status})`); return r; };
+    const get = async (f: string) => { const r = await fetch(assetUrl("diffusion", `tractcloud/${f}`)); if (!r.ok) throw new Error(`the tract-naming model is missing (${f}: ${r.status})`); return r; };
     const [w, j] = await Promise.all([get("weights.f32").then((r) => r.arrayBuffer()), get("model.json").then((r) => r.json())]);
     return loadModel(w, j as ModelJson);
   })().catch((e) => { tcModel = undefined; throw e; });
@@ -141,13 +141,13 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
   function check(scan: Scan, ours: DiffusionSeries) {
     if (checks.has(scan.browserId)) return;
     const uid = (live.nodes.get(scan.frameIds[0])?.origin as Record<string, unknown> | undefined)?.seriesInstanceUID as string | undefined;
-    const g = globalThis as unknown as { __dicomSourceInstances?: (uid: string) => Promise<ArrayBuffer[] | null> };
-    if (!uid || !g.__dicomSourceInstances) { checks.set(scan.browserId, { error: "not from the DICOM database: nothing for dcm2niix to read" }); return; }
+    if (!uid) { checks.set(scan.browserId, { error: "not from the DICOM database: nothing for dcm2niix to read" }); return; }
     checks.set(scan.browserId, { running: true }); render();
     void (async () => {
       try {
-        const files = await g.__dicomSourceInstances!(uid);
-        if (!files?.length) throw new Error("the scan's DICOM files could not be read");
+        const files = await seriesDicomFiles(uid);
+        if (files === null) throw new Error("not from the DICOM database: nothing for dcm2niix to read");
+        if (!files.length) throw new Error("the scan's DICOM files could not be read");
         const r = await secondOpinion(files, ours);
         checks.set(scan.browserId, { result: r });
         if (!r.agree) say(`${scan.name}: ${r.said}`);
@@ -432,15 +432,14 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
    * Leaving placement (Escape, another module) disarms it; a point placed later elsewhere is not taken (critic, finding 8).
    */
   function seedWhereIClick() {
-    const g = globalThis as unknown as { __startPlace?: (type: string, persistent: boolean) => void };
     const scan = scans().find((s) => s.browserId === chosen);
-    if (!scan || !g.__startPlace || busy) return;
+    if (!scan || busy) return;
     const pointsNow = () => new Map([...live.nodes.values()].filter((n) => n.type === "markup").map((n) => [n.id, ((n.controlPoints as unknown[] | undefined) ?? []).length]));
     const before = pointsNow();
     let sawPlace = false;
     seeding = true; render();
     say("Click in a view where the tracts should start (Escape cancels).");
-    g.__startPlace("fiducial", false);
+    if (!startPlacing("fiducial", false)) { seeding = false; render(); say("Placing points is not available in this app."); return; }
     // Placement is on from here (startPlace wrote it before anything below subscribed): leaving it without a point is
     // a cancel.
     sawPlace = live.nodes.get("local-interaction")?.mode === "place";
@@ -684,7 +683,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     title: "Diffusion",
     groups: ["Display"],
     tip: "Diffusion MRI: Color FA and FA maps, and tracts near a structure such as a tumor.",
-    help: "<p>Shows what a diffusion MRI scan measures: <b>FA</b>, how strongly water moves along one direction (bright in white matter tracts), and <b>Color FA</b>, that direction as a color (red left-right, green front-back, blue up-down). A diffusion scan shows Color FA when it loads.</p><p><b>Tracts</b> follow the main direction of water movement from voxel to voxel. <b>Make tracts</b> starts them in the white matter inside and around the chosen structure, such as a tumor; <b>Seed where I click…</b> starts them at one point. Tracts are drawn in 3D as tubes or lines; each group can be hidden or removed.</p><p><b>Two-tensor</b> (UKF, the default) follows two fiber directions and the free water around them; it runs on the graphics card and agrees with the reference computation on the processor (fiber ends within a fraction of a millimeter for 90% of fibers). <b>Single tensor</b> follows one direction per voxel; where tracts cross, that direction is an average, and a tract may stop or turn. With <b>Two-tensor</b>, <b>Make tracts</b> follows tracts through the whole brain and names them with TractCloud, a network trained on an atlas of 800 fiber clusters (Zhang, O'Donnell et al.); each named tract that comes within the distance of the chosen structure is shown whole, in its own color, with its closest distance to the structure. Streamlines no name fits and pass close are shown in gray; the rest of the brain is kept, hidden.</p>",
+    help: "<p>Shows what a diffusion MRI scan measures: <b>FA</b>, how strongly water moves along one direction (bright in white matter tracts), and <b>Color FA</b>, that direction as a color (red left-right, green front-back, blue up-down). A diffusion scan shows Color FA when it loads.</p><p><b>Tracts</b> follow the main direction of water movement from voxel to voxel. <b>Make tracts</b> starts them in the white matter inside and around the chosen structure, such as a tumor; <b>Seed where I click…</b> starts them at one point. Tracts are drawn in 3D as tubes or lines; each group can be hidden or removed.</p><p><b>Two-tensor</b> (UKF, the default) follows two fiber directions and the free water around them; it runs on the graphics card and agrees with the reference computation on the processor (fiber ends within a fraction of a millimeter for 90% of fibers). <b>Single tensor</b> follows one direction per voxel; where tracts cross, that direction is an average, and a tract may stop or turn. With <b>Two-tensor</b>, <b>Make tracts</b> follows tracts through the whole brain and names them with TractCloud, a network trained on an atlas of 800 fiber clusters (Zhang, O'Donnell et al.); each named tract that comes within the distance of the chosen structure is shown whole, in its own color, with its closest distance to the structure. Streamlines no name fits and pass close are shown in gray; the rest of the brain is kept, hidden.</p><p><b>Licenses.</b> Research software: not reviewed or approved by the FDA or any other agency; clinical applications are neither recommended nor advised. The two-tensor tracking is a port of UKFTractography (authors: Yogesh Rathi, Stefan Lienhard, Yinpeng Li, Martin Styner, Ipek Oguz, Yundi Shi, Christian Baumgartner, Ryan Eckbo, Tashrif Billah and Dheshan Mohandass; github.com/pnlbwh/ukftractography). All or portions of this licensed product (such portions are the \"Software\") have been obtained under license from The Brigham and Women's Hospital, Inc. and are subject to the following terms and conditions: <a href=\"./vendor/diffusion/licenses/LICENSE-UKF.txt\" target=\"_blank\">the UKF Tractography Contribution and Software License Agreement</a> (this is a modified version: translated to TypeScript and WGSL). TractCloud's trained network is under <a href=\"./vendor/diffusion/tractcloud/LICENSE.txt\" target=\"_blank\">3D Slicer's license</a>; dcm2niix under <a href=\"./vendor/diffusion/dcm2niix/LICENSE.txt\" target=\"_blank\">its own (BSD)</a>; the rest of this extension under the <a href=\"./vendor/diffusion/licenses/LICENSE\" target=\"_blank\">Apache License 2.0</a> (<a href=\"./vendor/diffusion/licenses/NOTICE\" target=\"_blank\">NOTICE</a>).</p>",
     acknowledgements: DIFFUSION_REFERENCES.map((r) => `${r.cite}${r.link ? ` ${r.link}` : ""} — ${r.usedFor}${r.verified ? "" : " (citation to be checked)"}`),
     mount(el) { root = el; render(); },
     onShow() { render(); },

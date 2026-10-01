@@ -2,15 +2,40 @@
   "name": "diffusion",
   "repository": "albula-diffusion",
   "version": "0.1.0",
-  "sdk": 1,
+  "sdk": 2,
   "about": "Diffusion MRI for brain tumor planning: reading diffusion data from every major scanner, FA and Color FA, distortion correction, UKF two-tensor free-water tractography on the graphics card, tract names from TractCloud, the tracts near a tumor.",
   "entries": {
     "hooks": "hooks.ts",
     "module": "module.ts"
   },
   "assets": {
-    "tractcloud": ["tractcloud/model/weights.f32", "tractcloud/model/model.json", "tractcloud/model/LICENSE.txt"],
-    "dcm2niix": ["vendor/dcm2niix/index.js", "vendor/dcm2niix/worker.js", "vendor/dcm2niix/dcm2niix.js", "vendor/dcm2niix/dcm2niix.wasm", "vendor/dcm2niix/LICENSE.txt"]
+    "tractcloud": [
+      "tractcloud/model/weights.f32",
+      "tractcloud/model/model.json",
+      "tractcloud/model/LICENSE.txt"
+    ],
+    "dcm2niix": [
+      "vendor/dcm2niix/index.js",
+      "vendor/dcm2niix/worker.js",
+      "vendor/dcm2niix/dcm2niix.js",
+      "vendor/dcm2niix/dcm2niix.wasm",
+      "vendor/dcm2niix/LICENSE.txt",
+      "vendor/dcm2niix/LICENSE-NanoJPEG.txt"
+    ],
+    "licenses": [
+      "LICENSE",
+      "NOTICE",
+      "LICENSE-UKF.txt"
+    ]
   },
-  "tests": "deno test -A --no-check --unstable-webgpu --config ../../src/SlicerLive/deno.jsonc ."
+  "tests": {
+    "flags": [
+      "--unstable-webgpu"
+    ]
+  },
+  "interpreter": {
+    "entry": "diffusion-vendors.ts",
+    "fingerprint": "interpreter-code.generated.ts"
+  },
+  "assetsNote": "Each group lands in the app at vendor/diffusion/<group>/ (the SDK's assetUrl). The licenses travel with the built app: the UKF license requires its terms in every copy, source and executable (LICENSE-UKF.txt, part B 1(b))."
 }
