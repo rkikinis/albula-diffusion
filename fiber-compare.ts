@@ -1,9 +1,9 @@
 // TWO SETS OF FIBERS FROM THE SAME STARTING POINTS, COMPARED -- our UKF port against the original UKFTractography
-// (ukf-reference.test.ts), and later against haversack's pipeline (Ron, 2026-10-01: the comparison is a test "forward
-// looking"). Each starting point's fiber in one set is matched to the fiber in the other set that passes closest to
-// that point; then, per matched pair: the length, and how far apart the two ends are (the ends paired whichever way is
-// closer); and for the sets as a whole, how much of the brain each fiber set passes through (a density map on a grid)
-// and how alike those maps are.
+// (the standing reference test, still to be written, on Contents/tools/ukf-reference.ts's data), and later against
+// haversack's pipeline (Ron, 2026-10-01: the comparison is a test "forward looking"). Each starting point's fiber in
+// one set is matched to the fiber in the other set that passes closest to that point; then, per matched pair: the
+// length, and how far apart the two ends are (the ends paired whichever way is closer); and for the sets as a whole,
+// how much of the brain each fiber set passes through (a density map on a grid) and how alike those maps are.
 
 export interface FiberComparison {
   starts: number;
