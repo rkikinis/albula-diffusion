@@ -8,7 +8,9 @@
 // v4 (2026-10-01, critic finding 11): dcm2niix's own citation; every entry checked against Crossref (Semantic Scholar
 // for the CDMRI workshop paper, which has no DOI) -- Baumgartner et al. 2012's author list corrected, TractCloud cited
 // by its pages (Crossref gives no volume).
-export const REFERENCES_VERSION = 4;
+// v5 (2026-10-01): CSD (Tournier 2007, Jeurissen 2014), its solver (Lawson & Hanson) and PTT (Aydogan & Shi 2021),
+// checked against Crossref.
+export const REFERENCES_VERSION = 5;
 
 export interface Reference { cite: string; link?: string; usedFor: string; verified: boolean }
 
@@ -35,6 +37,12 @@ export const DIFFUSION_REFERENCES: Reference[] = [
   { cite: "Macdonald J, Ruthotto L. Improved susceptibility artifact correction of echo-planar MRI using the alternating direction method of multipliers. Journal of Mathematical Imaging and Vision, 2018. arXiv:1607.00531.", link: "https://arxiv.org/abs/1607.00531", usedFor: "the full formulation, solver and parameters implemented (distortion.ts)", verified: true },
   // Reading the scan: the second opinion.
   { cite: "Li X, Morgan PS, Ashburner J, Smith J, Rorden C. The first step for neuroimaging data analysis: DICOM to NIfTI conversion. J Neurosci Methods 264:47-56, 2016.", link: "https://doi.org/10.1016/j.jneumeth.2016.03.001", usedFor: "dcm2niix, run on every diffusion scan from the database as a second opinion (vendor/dcm2niix/)", verified: true },
+  // Fiber distributions and parallel transport tracking (csd.ts, responses.ts, ptt.ts; checked in the case library, not
+  // yet in the module's buttons).
+  { cite: "Tournier JD, Calamante F, Connelly A. Robust determination of the fibre orientation distribution in diffusion MRI: non-negativity constrained super-resolved spherical deconvolution. NeuroImage 35(4):1459-1472, 2007.", link: "https://doi.org/10.1016/j.neuroimage.2007.02.016", usedFor: "constrained spherical deconvolution: the fiber distribution kept non-negative (csd.ts)", verified: true },
+  { cite: "Jeurissen B, Tournier JD, Dhollander T, Connelly A, Sijbers J. Multi-tissue constrained spherical deconvolution for improved analysis of multi-shell diffusion MRI data. NeuroImage 103:411-426, 2014.", link: "https://doi.org/10.1016/j.neuroimage.2014.07.061", usedFor: "multi-shell, multi-tissue CSD: white matter, gray matter and fluid from every shell (csd.ts, responses.ts)", verified: true },
+  { cite: "Lawson CL, Hanson RJ. Solving Least Squares Problems. Prentice-Hall, 1974 (SIAM Classics in Applied Mathematics, 1995).", link: "https://doi.org/10.1137/1.9781611971217", usedFor: "the exact solver: non-negative least squares on the CSD problem's dual (csd.ts)", verified: true },
+  { cite: "Aydogan DB, Shi Y. Parallel transport tractography. IEEE Transactions on Medical Imaging 40(2):635-647, 2021.", link: "https://doi.org/10.1109/TMI.2020.3034038", usedFor: "parallel transport tractography (ptt.ts)", verified: true },
   // Naming tracts.
   { cite: "Xue T, Chen Y, Zhang C, Golby AJ, Makris N, Rathi Y, Cai W, Zhang F, O'Donnell LJ. TractCloud: registration-free tractography parcellation with a novel local-global streamline point cloud representation. MICCAI 2023, Lecture Notes in Computer Science, pp. 409-419.", link: "https://doi.org/10.1007/978-3-031-43993-3_40", usedFor: "TractCloud: the network and its trained weights (tractcloud/)", verified: true },
   { cite: "Zhang F, Wu Y, Norton I, Rigolo L, Rathi Y, Makris N, O'Donnell LJ. An anatomically curated fiber clustering white matter atlas for consistent white matter tract parcellation across the lifespan. NeuroImage 179:429-447, 2018.", link: "https://doi.org/10.1016/j.neuroimage.2018.06.027", usedFor: "the atlas of 800 fiber clusters TractCloud's names come from", verified: true },

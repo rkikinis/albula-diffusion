@@ -25,8 +25,17 @@ This extension adds diffusion MRI, from the scanner's files to the tracts near a
 - **Tract names**: TractCloud (Xue, Zhang, O'Donnell et al., MICCAI 2023) written from the paper as a WebGPU network;
   on the reference case (5,120 UKF streamlines of PAT16) every layer agrees with the original running in PyTorch within
   4e-6, and all 5,120 streamlines get the same cluster as the original (the test allows 0.2%).
+- **Fiber distributions and parallel transport tracking** (in the code and the case library; not yet behind the
+  module's buttons): multi-shell multi-tissue CSD (`csd.ts`; Jeurissen et al. 2014, Tournier et al. 2007), solved
+  exactly as the non-negative least squares of its dual (Lawson & Hanson) — on PAT16's 6,770 reference voxels its fit
+  equals DIPY's within 0.1% in 6,742, is better in 28 and worse in none; the response functions estimated from the scan
+  as DIPY does (`responses.ts`, within 4% of DIPY's); a whole brain in about 105 s on the processor's workers
+  (`csd-volume.ts`). Parallel transport tractography (`ptt.ts`; Aydogan & Shi 2021) on the processor's workers, each
+  seed with its own seeded generator. Compared with UKF on 15 cases: about as many streamlines inside meningiomas
+  (where none belong), a few more named tracts near gliomas, about three times the time.
 - **Planning**: tracking through the whole brain, naming, and showing every named tract that comes within a margin of
-  a segmented tumor — whole — in its own color, with its closest distance to the tumor.
+  a segmented tumor — whole — in its own color, with its closest distance to the tumor; a tract counts as near when at
+  least 5 of its streamlines come within the margin (`planning.ts`, MIN_NEAR_STREAMLINES).
 
 ## How it joins Albula
 
