@@ -38,8 +38,8 @@ import { colorFA, fitTensors, type TensorFit } from "./tensor.ts";
 import { prepareUkfData, type UkfData } from "./ukf.ts";
 import { DCM2NIIX_VERSION, secondOpinion, type SecondOpinion } from "./second-opinion.ts";
 import { assetUrl, seriesDicomFiles, startPlacing } from "albula";
-import { createSegmentation, growIntoSegmentation, openDicomDatabase, openLoadFromDisk, paintInto } from "albula";
-import { tractLabel } from "./tract-info.ts";
+import { createSegmentation, growIntoSegmentation, openDicomDatabase, openLoadFromDisk, paintInto, runAction, saveSegmentationToDicom } from "albula";
+import { readMore, tractLabel } from "./tract-info.ts";
 import { loadModel, type ModelJson, type TractCloudModel } from "./tractcloud/tractcloud.ts";
 import { nameTracts } from "./tractcloud/name-tracts.ts";
 import { correctWithReversed, MIN_NEAR_STREAMLINES, sortByDistance, streamlineDistances, tractName, trackUkfSeeds, wholeBrainSeeds } from "./planning.ts";
@@ -149,6 +149,18 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
    * made again from all the strokes at every Grow; Done keeps the outline and takes the strokes away.
    */
   let outline: { imageId: string; seedsId: string; resultId?: string; tool: 0 | 1 | 2; voxels?: number; mm3?: number } | undefined;
+  /** The outline made here, after Done: offered for saving as an AI result is (Ron, 2026-10-01: "same behavior and
+   *  appearance as with the haversack functionality"). */
+  let kept: { segId: string; mm3: number; saved: boolean } | undefined;
+  const saveKept = async () => {
+    if (!kept) return;
+    const k = kept;
+    say("Saving the tumor outline to the DICOM database…");
+    const note = await saveSegmentationToDicom(k.segId).catch((e) => { say(`The tumor outline was not saved: ${(e as Error).message}`); throw e; });
+    k.saved = true;
+    say(`Saved — ${note}`);
+    render();
+  };
   let correct = true;                                        // distortion correction when a reversed scan is there
   let method: Method = "ukf";
   /** dcm2niix's second opinion per scan (second-opinion.ts): running, its answer, or why it could not run. */
@@ -262,9 +274,19 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     paintInto(outline.seedsId, null);
     removeNode(outline.seedsId);
     near = `${outline.resultId}#1`;
+    kept = { segId: outline.resultId, mm3: outline.mm3 ?? 0, saved: false };
     outline = undefined;
-    say("The tumor outline is ready. It is kept for this session; to keep it for next time, save it in the Segment Editor.");
+    say(`The tumor outline is ready: ${(kept.mm3 / 1000).toFixed(1)} mL. It is in the scene now; not saved yet.`);
     render();
+    // TOLD ONCE, AS AN AI RESULT IS (render/demos/ai-seg-panel.ts): in the scene now, not saved; Save or Later.
+    shell.notify({
+      title: `Tumor outline: ${(kept.mm3 / 1000).toFixed(1)} mL`,
+      body: "<p>It is in the scene now; not saved yet.</p>",
+      actions: [
+        { label: "Save to DICOM", primary: true, busyLabel: "Saving…", doneLabel: "Saved ✓", failedLabel: "Not saved", onClick: () => saveKept() },
+        { label: "Later", onClick: () => {} },
+      ],
+    });
   }
 
   /** What the slice views show as background now, in this module's terms. */
@@ -640,6 +662,17 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       step("4", "Done", "Keeps the outline and removes the strokes.", false, !outline?.resultId, () => outlineDone(), "");
       caseSec.append(steps);
     }
+    // THE OUTLINE MADE HERE, NOT SAVED YET: the yellow Save to DICOM, as AI Segmentations' Result section has it.
+    if (kept && live.nodes.get(kept.segId) && !outline) {
+      const bar1 = shell.actions(caseSec);
+      const sv = document.createElement("button");
+      sv.className = kept.saved ? "" : "sl-primary";
+      sv.textContent = kept.saved ? "Saved ✓" : "Save to DICOM";
+      sv.disabled = kept.saved;
+      sv.title = "Write the tumor outline into the DICOM database, under the MRI it was drawn on, so it is there next time.";
+      sv.onclick = () => { void runAction(sv, () => saveKept(), { busyLabel: "Saving…", doneLabel: "Saved ✓", failedLabel: "Not saved" }).catch(() => {}); };
+      bar1.append(sv);
+    }
     if (segs.length > 1) {
       const nearSel0 = document.createElement("select");
       for (const s0 of segs) nearSel0.append(new Option(s0.label, s0.key, false, s0.key === near));
@@ -774,6 +807,14 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
         const row = document.createElement("div");
         row.style.cssText = "display:flex;align-items:center;gap:8px;min-width:0;padding:1px 0";
         const name = document.createElement("span"); name.textContent = g.name; name.title = g.name;
+        // READ MORE (Ron, 2026-10-01): the paper that describes the tract, opened in the browser from the name.
+        const abbr = /\(([^)]+)\)$/.exec(g.name)?.[1];
+        if (g.tract !== undefined && abbr) {
+          const ref = readMore(abbr);
+          name.title = `${g.name}\nRead more (click): ${ref.cite}`;
+          name.style.cursor = "pointer";
+          name.onclick = () => { void fetch(`/_open?url=${encodeURIComponent(ref.link)}`).catch(() => {}); };
+        }
         name.style.cssText = "flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap";
         const n = document.createElement("span"); n.style.opacity = "0.7";
         n.textContent = g.within !== undefined ? `${g.within.toLocaleString()}/${g.strands.length.toLocaleString()}` : g.strands.length.toLocaleString();

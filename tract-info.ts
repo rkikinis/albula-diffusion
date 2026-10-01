@@ -69,6 +69,17 @@ export const TRACT_INFO: TractInfo[] = [
   { abbr: "Sup-T", name: "Superficial temporal", category: "Superficial" },
 ];
 
+/**
+ * "READ MORE" UNTIL A TRACT HAS ITS OWN (Ron, 2026-10-01: TractCloud's papers are "a good startpoint"): the atlas that
+ * defines every tract TractCloud names, open access -- the same entry as in references.ts (checked against Crossref).
+ */
+export const ATLAS_REFERENCE = {
+  cite: "Zhang F, Wu Y, Norton I, Rigolo L, Rathi Y, Makris N, O'Donnell LJ. An anatomically curated fiber clustering white matter atlas for consistent white matter tract parcellation across the lifespan. NeuroImage 179:429-447, 2018.",
+  link: "https://doi.org/10.1016/j.neuroimage.2018.06.027",
+};
+/** The paper to read more about a tract: its own when Ron has entered one, else the atlas's. */
+export const readMore = (abbr: string) => byAbbr.get(abbr)?.reference ?? ATLAS_REFERENCE;
+
 const byAbbr = new Map(TRACT_INFO.map((t) => [t.abbr, t]));
 /** The row for a TractCloud abbreviation, if there is one. */
 export const tractInfo = (abbr: string): TractInfo | undefined => byAbbr.get(abbr);
