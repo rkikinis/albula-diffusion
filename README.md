@@ -25,8 +25,8 @@ This extension adds diffusion MRI, from the scanner's files to the tracts near a
 - **Tract names**: TractCloud (Xue, Zhang, O'Donnell et al., MICCAI 2023) written from the paper as a WebGPU network;
   on the reference case (5,120 UKF streamlines of PAT16) every layer agrees with the original running in PyTorch within
   4e-6, and all 5,120 streamlines get the same cluster as the original (the test allows 0.2%).
-- **Fiber distributions and parallel transport tracking** (in the code and the case library; not yet behind the
-  module's buttons): multi-shell multi-tissue CSD (`csd.ts`; Jeurissen et al. 2014, Tournier et al. 2007), solved
+- **Fiber distributions and parallel transport tracking** (the module's "Smooth curves" under Advanced; two-tensor
+  stays the default): multi-shell multi-tissue CSD (`csd.ts`; Jeurissen et al. 2014, Tournier et al. 2007), solved
   exactly as the non-negative least squares of its dual (Lawson & Hanson) — on PAT16's 6,770 reference voxels its fit
   equals DIPY's within 0.1% in 6,742, is better in 28 and worse in none; the response functions estimated from the scan
   as DIPY does (`responses.ts`, within 4% of DIPY's); a whole brain in about 105 s on the processor's workers
@@ -36,6 +36,17 @@ This extension adds diffusion MRI, from the scanner's files to the tracts near a
 - **Planning**: tracking through the whole brain, naming, and showing every named tract that comes within a margin of
   a segmented tumor — whole — in its own color, with its closest distance to the tumor; a tract counts as near when at
   least 5 of its streamlines come within the margin (`planning.ts`, MIN_NEAR_STREAMLINES).
+- **The module, for a neurosurgery resident** (`module.ts`): 1 · the patient's case — diffusion MRI, MRI of the anatomy
+  and tumor outline, each ticked when it is there; scans come in through Albula's Load / Save and DICOM database; a
+  missing outline is grown from a few Tumor / Not tumor strokes (core's grow from seeds) and saved as an AI result is;
+  2 · one button, "Show the fiber tracts near the tumor", and the named tracts it finds; everything else under
+  Advanced. Measured in a browser on PAT16: 19.1 s from the button to the list (two-tensor); smooth curves took far
+  longer in its first run in a page (491.9 s, measured with the page hidden, which slows it; to be measured again).
+- **Tract names on the face** (`tract-info.ts`, version 1): TractCloud's names with the abbreviation ("Arcuate
+  fasciculus, right (AF)"); the tooltip gives the term in Terminologia Neuroanatomica (FIPAT 2017) where there is one
+  (36 of 42), and how close it is; clicking a name opens the atlas paper that defines the tract. What each tract is
+  for is to be written by a clinician; until then the face says nothing rather than an unchecked claim.
+- **Workers** (`extension.json` `workers`): the CSD and PTT workers, bundled by Albula's build for the page.
 
 ## How it joins Albula
 
