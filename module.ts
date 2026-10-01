@@ -39,7 +39,7 @@ import { prepareUkfData, type UkfData } from "./ukf.ts";
 import { DCM2NIIX_VERSION, secondOpinion, type SecondOpinion } from "./second-opinion.ts";
 import { assetUrl, seriesDicomFiles, startPlacing } from "albula";
 import { createSegmentation, growIntoSegmentation, openDicomDatabase, openLoadFromDisk, paintInto, runAction, saveSegmentationToDicom } from "albula";
-import { readMore, tractLabel } from "./tract-info.ts";
+import { readMore, tnaLine, tractLabel } from "./tract-info.ts";
 import { loadModel, type ModelJson, type TractCloudModel } from "./tractcloud/tractcloud.ts";
 import { nameTracts } from "./tractcloud/name-tracts.ts";
 import { correctWithReversed, MIN_NEAR_STREAMLINES, sortByDistance, streamlineDistances, tractName, trackUkfSeeds, wholeBrainSeeds } from "./planning.ts";
@@ -811,7 +811,8 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
         const abbr = /\(([^)]+)\)$/.exec(g.name)?.[1];
         if (g.tract !== undefined && abbr) {
           const ref = readMore(abbr);
-          name.title = `${g.name}\nRead more (click): ${ref.cite}`;
+          const tna = tnaLine(abbr);
+          name.title = `${g.name}${tna ? `\n${tna}` : ""}\nRead more (click): ${ref.cite}`;
           name.style.cursor = "pointer";
           name.onclick = () => { void fetch(`/_open?url=${encodeURIComponent(ref.link)}`).catch(() => {}); };
         }
