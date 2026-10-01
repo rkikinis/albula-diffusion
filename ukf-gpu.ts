@@ -30,7 +30,7 @@ import { seedTensor, signalAt } from "./ukf.ts";
 const N = 11, S = 2 * N + 1, STRIDE = 264, MAXG = 192;
 
 /** The shader; `sig32`: the signal as 32-bit floats (the processor's precision) or as rounded 16-bit pairs. */
-const wgsl = (sig32: boolean) => /* wgsl */ `
+const wgsl = (sig32: boolean, chol1 = false, pre = false, wgInv = false, onePass = false) => /* wgsl */ `
 const N: u32 = 11u;
 const S: u32 = 23u;
 const MAXG: u32 = ${MAXG}u;
@@ -69,6 +69,14 @@ var<workgroup> yh: array<f32, 11>;
 var<workgroup> iv: array<f32, 11>;
 var<workgroup> xs: array<f32, 11>;     // the state
 var<workgroup> red: array<f32, 64>;
+// Per sigma point, what the signal model needs, computed once a step instead of once per gradient (prePredict):
+// the two unit directions with the free-water weight, and the four eigenvalues floored at zero.
+var<workgroup> spA: array<vec4<f32>, 23>;   // m1 (unit), w
+var<workgroup> spB: array<vec4<f32>, 23>;   // m2 (unit), unused
+var<workgroup> spL: array<vec4<f32>, 23>;   // l1a, l1p, l2a, l2p
+${wgInv ? `// invertA's scratch in workgroup memory, not in the one thread's private memory (wgInv): two arrays idle while it runs
+// -- L (the Cholesky factor, used up by the sigma points; the swap below rewrites it) and B (P_new, written only after
+// the second inversion) -- since two more arrays would pass the standard 16 KB of workgroup memory.` : ""}
 var<workgroup> flag: array<u32, 4>;    // 0 alive, 1 swap, 2 record, 3 fail
 var<workgroup> pos: vec3<f32>;
 var<workgroup> m1: vec3<f32>;
@@ -95,37 +103,48 @@ fn predict(xv: array<f32, 11>, q: u32) -> f32 {
   return w * t + (1.0 - w) * exp(-g.w * 0.003);
 }
 
+// The same model from the per-sigma-point values (spA, spB, spL): the same operations in the same order as predict.
+fn predictPre(t: u32, q: u32) -> f32 {
+  let g = grad[q];
+  let bq = g.w * 1e-3;
+  let a = spA[t]; let b = spB[t]; let l = spL[t];
+  let c1 = dot(g.xyz, a.xyz); let c2 = dot(g.xyz, b.xyz);
+  let w = a.w;
+  let tt = 0.5 * exp(-bq * (l.y + (l.x - l.y) * c1 * c1)) + 0.5 * exp(-bq * (l.w + (l.z - l.w) * c2 * c2));
+  return w * tt + (1.0 - w) * exp(-g.w * 0.003);
+}
+
 // SYMMETRIC POSITIVE INVERSE THROUGH CHOLESKY (A <- A⁻¹), as the processor's spdInverse (ukf.ts) -- one thread, in its
 // own memory (11×11: a few hundred multiplications), the others wait. It replaced an in-place Gauss-Jordan without
 // pivoting (2026-09-30) as the standard stable method for symmetric positive matrices; the card/processor difference
 // then being chased turned out to be the projection's metric (metricScale), not the inversion. All 64 threads must call it.
 fn invertA(lid: u32) {
   if (lid == 0u) {
-    var Lf: array<f32, 121>;
-    var Li: array<f32, 121>;
+    ${wgInv ? "" : `var Lf: array<f32, 121>;
+    var Li: array<f32, 121>;`}
     for (var j = 0u; j < N; j++) {
       var s = A[j * N + j];
-      for (var k = 0u; k < j; k++) { s -= Lf[j * N + k] * Lf[j * N + k]; }
+      for (var k = 0u; k < j; k++) { s -= ${wgInv ? "L[" : "Lf["}j * N + k] * ${wgInv ? "L[" : "Lf["}j * N + k]; }
       let d = sqrt(max(s, 1e-30));
-      Lf[j * N + j] = d;
+      ${wgInv ? "L[" : "Lf["}j * N + j] = d;
       for (var i = j + 1u; i < N; i++) {
         var t = A[i * N + j];
-        for (var k = 0u; k < j; k++) { t -= Lf[i * N + k] * Lf[j * N + k]; }
-        Lf[i * N + j] = t / d;
+        for (var k = 0u; k < j; k++) { t -= ${wgInv ? "L[" : "Lf["}i * N + k] * ${wgInv ? "L[" : "Lf["}j * N + k]; }
+        ${wgInv ? "L[" : "Lf["}i * N + j] = t / d;
       }
     }
     for (var j = 0u; j < N; j++) {
-      Li[j * N + j] = 1.0 / Lf[j * N + j];
+      ${wgInv ? "B[" : "Li["}j * N + j] = 1.0 / ${wgInv ? "L[" : "Lf["}j * N + j];
       for (var i = j + 1u; i < N; i++) {
         var s = 0.0;
-        for (var k = j; k < i; k++) { s -= Lf[i * N + k] * Li[k * N + j]; }
-        Li[i * N + j] = s / Lf[i * N + i];
+        for (var k = j; k < i; k++) { s -= ${wgInv ? "L[" : "Lf["}i * N + k] * ${wgInv ? "B[" : "Li["}k * N + j]; }
+        ${wgInv ? "B[" : "Li["}i * N + j] = s / ${wgInv ? "L[" : "Lf["}i * N + i];
       }
     }
     for (var i = 0u; i < N; i++) {
       for (var j = 0u; j <= i; j++) {
         var s = 0.0;
-        for (var k = i; k < N; k++) { s += Li[k * N + i] * Li[k * N + j]; }
+        for (var k = i; k < N; k++) { s += ${wgInv ? "B[" : "Li["}k * N + i] * ${wgInv ? "B[" : "Li["}k * N + j]; }
         A[i * N + j] = s; A[j * N + i] = s;
       }
     }
@@ -238,11 +257,26 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) l
       } } }
       z[q] = s / ws;
     }
-    // ── Cholesky of P, column by column ──
+    // ── Cholesky of P ──
     for (var e = lid; e < 121u; e += 64u) { L[e] = 0.0; }
     if (lid == 0u) { flag[3] = 0u; }
     workgroupBarrier();
-    for (var j = 0u; j < N; j++) {
+    ${chol1 ? `// ONE THREAD, ONE BARRIER (2026-10-01, Safari benchmark): the same arithmetic in the same order as the column-by-column
+    // form, which spent two workgroup barriers per column (22 a step) on a matrix of 11.
+    if (lid == 0u) {
+      for (var j = 0u; j < N; j++) {
+        var s = Pc[j * N + j];
+        for (var k = 0u; k < j; k++) { s -= L[j * N + k] * L[j * N + k]; }
+        if (!(s > 0.0)) { flag[3] = 1u; s = 1e-12; }
+        L[j * N + j] = sqrt(s);
+        for (var i = j + 1u; i < N; i++) {
+          var t = Pc[i * N + j];
+          for (var k = 0u; k < j; k++) { t -= L[i * N + k] * L[j * N + k]; }
+          L[i * N + j] = t / L[j * N + j];
+        }
+      }
+    }
+    workgroupBarrier();` : `for (var j = 0u; j < N; j++) {
       if (lid == 0u) {
         var s = Pc[j * N + j];
         for (var k = 0u; k < j; k++) { s -= L[j * N + k] * L[j * N + k]; }
@@ -256,7 +290,7 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) l
         L[i * N + j] = t / L[j * N + j];
       }
       workgroupBarrier();
-    }
+    }`}
     // ── sigma points, projection (metric P, inverse Pi), F ──
     let sc = sqrt(f32(N) + P_.kappa);
     for (var e = lid; e < S * N; e += 64u) {
@@ -294,15 +328,42 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) l
     workgroupBarrier();
     invertA(lid);                                   // A <- Yk
     if (lid < N) { var s = 0.0; for (var k = 0u; k < N; k++) { s += A[lid * N + k] * xh[k]; } yh[lid] = s; }
+    ${pre ? `// THE SIGMA POINTS' MODEL VALUES ONCE A STEP (2026-10-01 night, Safari benchmark): each of the 23 threads takes one.
+    if (lid < S) {
+      let t = lid;
+      let m1v = normalize(vec3<f32>(X[t * N + 0u] + xh[0], X[t * N + 1u] + xh[1], X[t * N + 2u] + xh[2]));
+      let m2v = normalize(vec3<f32>(X[t * N + 5u] + xh[5], X[t * N + 6u] + xh[6], X[t * N + 7u] + xh[7]));
+      spA[t] = vec4<f32>(m1v, clamp(X[t * N + 10u] + xh[10], 0.0, 1.0));
+      spB[t] = vec4<f32>(m2v, 0.0);
+      spL[t] = vec4<f32>(max(X[t * N + 3u] + xh[3], 0.0), max(X[t * N + 4u] + xh[4], 0.0), max(X[t * N + 8u] + xh[8], 0.0), max(X[t * N + 9u] + xh[9], 0.0));
+    }` : ""}
     workgroupBarrier();
     // ── per gradient: predictions, mean, Pxz column, innovation, Ht column ──
+    ${onePass ? `// ONE PASS, NO PER-THREAD ARRAYS (onePass, 2026-10-01 night: WebKit's Metal is slow with them). The cross-covariance
+    // column Σ w·Xd·(Z − zm) equals Σ w·Xd·Z, since the weights sum to one and the points are centered (Σ w·Xd = 0), so
+    // the predictions are not kept: they are summed as they come, into three vec4 accumulators.
     for (var q = lid; q < G; q += 64u) {
+      var zm = 0.0; var p0 = vec4<f32>(0.0); var p1 = vec4<f32>(0.0); var p2 = vec4<f32>(0.0);
+      for (var t = 0u; t < S; t++) {
+        let wz = wgt(t) * predictPre(t, q);
+        zm += wz;
+        let b = t * N;
+        p0 += wz * vec4<f32>(X[b], X[b + 1u], X[b + 2u], X[b + 3u]);
+        p1 += wz * vec4<f32>(X[b + 4u], X[b + 5u], X[b + 6u], X[b + 7u]);
+        p2 += wz * vec4<f32>(X[b + 8u], X[b + 9u], X[b + 10u], 0.0);
+      }
+      innov[q] = z[q] - zm + dot(p0, vec4<f32>(yh[0], yh[1], yh[2], yh[3])) + dot(p1, vec4<f32>(yh[4], yh[5], yh[6], yh[7])) + dot(p2, vec4<f32>(yh[8], yh[9], yh[10], 0.0));
+      for (var i = 0u; i < N; i++) {
+        let r = i * N;
+        Ht[i * MAXG + q] = dot(vec4<f32>(A[r], A[r + 1u], A[r + 2u], A[r + 3u]), p0) + dot(vec4<f32>(A[r + 4u], A[r + 5u], A[r + 6u], A[r + 7u]), p1) + dot(vec4<f32>(A[r + 8u], A[r + 9u], A[r + 10u], 0.0), p2);
+      }
+    }` : `    for (var q = lid; q < G; q += 64u) {
       var Zs: array<f32, 23>;
       var zm = 0.0;
       for (var t = 0u; t < S; t++) {
-        var xv: array<f32, 11>;
+        ${pre ? `Zs[t] = predictPre(t, q);` : `var xv: array<f32, 11>;
         for (var k = 0u; k < N; k++) { xv[k] = X[t * N + k] + xh[k]; }
-        Zs[t] = predict(xv, q); zm += wgt(t) * Zs[t];
+        Zs[t] = predict(xv, q);`} zm += wgt(t) * Zs[t];
       }
       var pc: array<f32, 11>;
       for (var k = 0u; k < N; k++) { var s = 0.0; for (var t = 0u; t < S; t++) { s += wgt(t) * X[t * N + k] * (Zs[t] - zm); } pc[k] = s; }
@@ -311,6 +372,7 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) l
       innov[q] = inn;
       for (var i = 0u; i < N; i++) { var s = 0.0; for (var k = 0u; k < N; k++) { s += A[i * N + k] * pc[k]; } Ht[i * MAXG + q] = s; }
     }
+`}
     workgroupBarrier();
     // ── W = Yk + R·Ht·Htᵀ, i = R·Ht·innov + yh ──
     for (var e = lid; e < 121u; e += 64u) {
@@ -403,6 +465,9 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) l
 }
 `;
 
+const packCache = new WeakMap<UkfData, Map<GPUDevice, { lo: number[]; cd: number[]; sig32: boolean; sigBuf: GPUBuffer; maskBuf: GPUBuffer; gBuf: GPUBuffer }>>();
+const pipeCache = new WeakMap<GPUDevice, Map<string, GPUComputePipeline>>();
+
 export interface GpuUkfResult {
   fibers: { points: Float32Array; fa: Float32Array; freeWater: Float32Array; seed: number }[];
   seedsUsed: number; seedsRejected: number; dispatches: number;
@@ -412,7 +477,7 @@ export interface GpuUkfResult {
 }
 
 /** Track from every seed (voxel coordinates) in both directions on the graphics card. */
-export async function trackUkfGpu(device: GPUDevice, data: UkfData, seeds: number[][], opts: UkfOptions & { batch?: number; stepsPerDispatch?: number; /** Checking only: stop after one dispatch and return the states (with stepsPerDispatch 1: one filter step). */ debugOneDispatch?: boolean } = {}): Promise<GpuUkfResult> {
+export async function trackUkfGpu(device: GPUDevice, data: UkfData, seeds: number[][], opts: UkfOptions & { batch?: number; stepsPerDispatch?: number; /** The Cholesky in one thread (one barrier) instead of column by column (22). */ cholOneThread?: boolean; /** The signal model's per-sigma-point values computed once a step, not once per gradient. */ prePredict?: boolean; /** The inversions' scratch in workgroup memory. */ wgInverse?: boolean; /** The per-gradient sums in one pass, without per-thread arrays (needs prePredict). */ onePass?: boolean; /** Pack the signal and compile the shader every call, as before 2026-10-01 night (benchmarking only). */ noCache?: boolean; /** Checking only: stop after one dispatch and return the states (with stepsPerDispatch 1: one filter step). */ debugOneDispatch?: boolean } = {}): Promise<GpuUkfResult> {
   const t0 = performance.now();
   if ((opts.freeWater ?? true) === false) throw new Error("the graphics-card UKF runs the free-water model only (ukf.ts runs both)");
   const G = data.G;
@@ -421,7 +486,14 @@ export async function trackUkfGpu(device: GPUDevice, data: UkfData, seeds: numbe
   const maxSteps = Math.ceil((opts.maxHalfFiberLength ?? 250) / step), cap = Math.ceil(maxSteps / perRecord) + 2;
   const sigma = opts.sigmaSignal ?? Math.min(...data.voxel), p0 = opts.p0 ?? 0.01, seedFA = opts.seedingThreshold ?? 0.18;
   const [nx, ny, nz] = data.dims;
-
+  // THE PACKED SIGNAL AND THE COMPILED SHADER, ONCE PER SCAN AND DEVICE (2026-10-01 night): a whole brain is tracked in 13
+  // batches, and each batch packed the whole signal again and compiled the shader again -- on the processor, and in
+  // WebKit about three times slower than in Chrome (the "seeds" part of the status line: 5.3 s against 1.7 s).
+  const packed = opts.noCache ? undefined : packCache.get(data)?.get(device);
+  const { lo, cd, sig32, sigBuf, maskBuf, gBuf } = packed ?? pack();
+  if (!packed && !opts.noCache) { const m = packCache.get(data) ?? new Map(); m.set(device, { lo, cd, sig32, sigBuf, maskBuf, gBuf }); packCache.set(data, m); }
+  const Gp = G + (G & 1);
+  function pack() {
   // Crop to the mask's bounding box (+1 voxel for the 3×3×3 average), pack the signal as f16 pairs.
   let lo = [nx, ny, nz], hi = [-1, -1, -1];
   for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) if (data.mask[(k * ny + j) * nx + i]) {
@@ -448,6 +520,9 @@ export async function trackUkfGpu(device: GPUDevice, data: UkfData, seeds: numbe
   }
   const grads = new Float32Array(4 * G);
   for (let q = 0; q < G; q++) grads.set([data.g[3 * q], data.g[3 * q + 1], data.g[3 * q + 2], data.b[q]], 4 * q);
+  const mk0 = (d: ArrayBufferView, usage: number) => { const b = device.createBuffer({ size: Math.max(16, Math.ceil(d.byteLength / 4) * 4), usage: usage | GPUBufferUsage.COPY_DST }); device.queue.writeBuffer(b, 0, d.buffer, d.byteOffset, d.byteLength); return b; };
+  return { lo, cd, sig32, sigBuf: mk0(sig32 ? f32s : new Uint32Array(f16.buffer), GPUBufferUsage.STORAGE), maskBuf: mk0(cmask, GPUBufferUsage.STORAGE), gBuf: mk0(grads, GPUBufferUsage.STORAGE) };
+  }
 
   // Seed states on the processor (the original's UnpackTensor): both directions, eigenvalues in 1e-3 mm²/s.
   const z = new Float64Array(G), halves: { seed: number; state: Float32Array }[] = [];
@@ -473,8 +548,17 @@ export async function trackUkfGpu(device: GPUDevice, data: UkfData, seeds: numbe
   });
 
   const mk = (d: ArrayBufferView, usage: number) => { const b = device.createBuffer({ size: Math.max(16, Math.ceil(d.byteLength / 4) * 4), usage: usage | GPUBufferUsage.COPY_DST }); device.queue.writeBuffer(b, 0, d.buffer, d.byteOffset, d.byteLength); return b; };
-  const sigBuf = mk(sig32 ? f32s : new Uint32Array(f16.buffer), GPUBufferUsage.STORAGE), maskBuf = mk(cmask, GPUBufferUsage.STORAGE), gBuf = mk(grads, GPUBufferUsage.STORAGE);
-  const pipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: wgsl(sig32) }), entryPoint: "main" } });
+  // THE DEFAULTS, from the Safari benchmark (2026-10-01 night; WebKit runs Albula's window): the signal model's values
+  // once a step and the inversions' scratch in workgroup memory -- the same fibers bit for bit, the card 23% faster in
+  // WebKit (PAT16's 2,000 reference seeds: 2.68-2.98 s -> 2.08-2.17 s). One pass (37%) changes the fibers at rounding
+  // level and stays off until it is checked on more cases.
+  const pre = (opts.prePredict ?? true) || !!opts.onePass, wgInv = opts.wgInverse ?? true;
+  const pkey = `${sig32}|${opts.cholOneThread ? 1 : 0}|${pre ? 1 : 0}|${wgInv ? 1 : 0}|${opts.onePass ? 1 : 0}`;
+  let pipeline = opts.noCache ? undefined : pipeCache.get(device)?.get(pkey);
+  if (!pipeline) {
+    pipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: wgsl(sig32, !!opts.cholOneThread, pre, wgInv, !!opts.onePass) }), entryPoint: "main" } });
+    if (!opts.noCache) { const m = pipeCache.get(device) ?? new Map(); m.set(pkey, pipeline); pipeCache.set(device, m); }
+  }
   const tPrep = performance.now();
 
   const batch = opts.batch ?? 4096, K = opts.stepsPerDispatch ?? 16;
@@ -536,6 +620,6 @@ export async function trackUkfGpu(device: GPUDevice, data: UkfData, seeds: numbe
     for (let r = 0; r < nf; r++) { put(nb + r, fwd.pts, r); faA[nb + r] = fwd.fa[r]; wA[nb + r] = fwd.w[r]; }
     out.push({ points, fa: faA, freeWater: wA, seed: halves[h].seed });
   }
-  for (const b of [sigBuf, maskBuf, gBuf]) b.destroy();
+  if (opts.noCache) for (const b of [sigBuf, maskBuf, gBuf]) b.destroy();   // cached ones live as long as the scan's data
   return { fibers: out, seedsUsed: used, seedsRejected: rejected, dispatches, ms: { prepare: tPrep - t0, gpu: tGpu - tPrep, total: performance.now() - t0 }, ...(opts.debugOneDispatch ? { debug } : {}) };
 }
