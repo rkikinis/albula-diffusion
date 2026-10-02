@@ -17,6 +17,7 @@
 //
 // Outputs per voxel: D (Dxx, Dxy, Dxz, Dyy, Dyz, Dzz) in mm²/s, S0, the eigenvalues λ1 ≥ λ2 ≥ λ3, the principal
 // eigenvector v1, FA and MD. Voxels outside `mask` (default: brainMask, below) are 0.
+import { medianOtsuMask } from "./median-otsu.ts";
 import { type DiffusionSeries, isotropicVolumes } from "./dwi.ts";
 
 export interface TensorFit {
@@ -32,6 +33,14 @@ export interface TensorFit {
   fa: Float32Array;
   md: Float32Array;
   mask: Uint8Array;
+  /**
+   * WHERE WHOLE-BRAIN SEEDS MAY START: the brain (DIPY's median_otsu, median-otsu.ts), when the fit made its own masks.
+   * Tracking runs inside `mask`, the head; seeding only inside the brain -- the head mask put about a third of the seeds
+   * in high-FA scalp, where they made nothing, and median_otsu as the TRACKING mask ends 4 slices (about 10 mm) below the
+   * top of PAT16's brain, stopping the corticospinal fibers short of the motor cortex (tracking.test.ts failed; 2026-10-02).
+   */
+  seedMask?: Uint8Array;
+  seedMaskRule?: string;
   /** Which volumes were used, and how the mask was made -- for the record. */
   used: number[];
   maskRule: string;
@@ -99,8 +108,15 @@ function chol7(A: Float64Array, y: Float64Array, x: Float64Array): boolean {
 export interface TensorOptions {
   /** Highest b-value used (s/mm²); default 1500. */
   maxB?: number;
-  /** Voxels to fit; default: brainMask (Otsu on the log b=0, holes filled). */
+  /** Voxels to fit; default: made by `maskMethod`. */
   mask?: Uint8Array;
+  /** How the mask is made when none is given: "head" = brainMask below (Otsu on the log b=0, holes filled: the whole head,
+   *  scalp included); "median-otsu" = DIPY's median_otsu (median-otsu.ts; the brain; what Mike Halle's pipeline and the
+   *  usual UKF workflows use). Default "head": median_otsu cuts the top of the brain on PAT16 (see TensorFit.seedMask), so
+   *  it is used for SEEDING (seedMask), not as the tracking mask. */
+  maskMethod?: "head" | "median-otsu";
+  /** false: no seed mask (TensorFit.seedMask); default: made with the head mask. */
+  seedMask?: boolean;
   /** false: ordinary least squares only. Default true (one weighted pass). */
   weighted?: boolean;
   /** The floor for a signal at or below zero, whose logarithm does not exist; default 1, the smallest value an integer
@@ -171,7 +187,11 @@ export function fitTensors(dwi: DiffusionSeries, opts: TensorOptions = {}): Tens
   const n = nx * ny * nz;
 
   let mask = opts.mask, maskRule = "given";
-  if (!mask) ({ mask, rule: maskRule } = brainMask(dwi, b0s));
+  let seedMask: Uint8Array | undefined, seedMaskRule: string | undefined;
+  if (!mask) {
+    ({ mask, rule: maskRule } = opts.maskMethod === "median-otsu" ? medianOtsuMask(dwi, b0s) : brainMask(dwi, b0s));
+    if (opts.maskMethod !== "median-otsu" && opts.seedMask !== false) ({ mask: seedMask, rule: seedMaskRule } = medianOtsuMask(dwi, b0s));
+  }
 
   // Design rows: [ -b gx², -2b gx gy, -2b gx gz, -b gy², -2b gy gz, -b gz², 1 ] · (Dxx, Dxy, Dxz, Dyy, Dyz, Dzz, ln S0) = ln S.
   const m = used.length;
@@ -232,7 +252,7 @@ export function fitTensors(dwi: DiffusionSeries, opts: TensorOptions = {}): Tens
     fa[v] = fractionalAnisotropy(Math.max(l1, 0), Math.max(l2, 0), Math.max(l3, 0));
     md[v] = (l1 + l2 + l3) / 3;
   }
-  return { dims: [nx, ny, nz], ijkToRAS: dwi.ijkToRAS, D, S0, evals, v1, fa, md, mask, used, maskRule };
+  return { dims: [nx, ny, nz], ijkToRAS: dwi.ijkToRAS, D, S0, evals, v1, fa, md, mask, used, maskRule, ...(seedMask ? { seedMask, seedMaskRule } : {}) };
 }
 
 /** Color FA, RGB 0..1 per voxel: |v1| (x red = left-right, y green = front-back, z blue = up-down) times FA -- the

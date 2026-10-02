@@ -55,3 +55,23 @@ Deno.test("faint tracts: within reach with fewer than the minimum; every side's 
   assertEquals([r.total(1, 1), r.total(1, otherSide(1)), r.total(0, -1)], [4, 30, 0]);
   assertEquals(r.unnamedNear.length, 1);
 });
+
+Deno.test("a partner on its own grid is sampled onto the scan's grid through the scanner's coordinates", async () => {
+  const { resampleInto, sameGrid } = await import("./planning.ts");
+  const dims = [6, 5, 4], n = 6 * 5 * 4;
+  const data = Float32Array.from({ length: n }, (_, v) => v % 6 + 10 * (Math.floor(v / 6) % 5) + 100 * Math.floor(v / 30));   // i + 10j + 100k
+  const grid = { dims, ijkToRAS: [2, 0, 0, -5, 0, 2, 0, 3, 0, 0, 2.5, 7, 0, 0, 0, 1] };
+  if (!sameGrid(grid, grid)) throw new Error("a grid is the same as itself");
+  const same = resampleInto(data, grid, grid);
+  for (let v = 0; v < n; v++) if (Math.abs(same[v] - data[v]) > 1e-4) throw new Error(`identity changed voxel ${v}`);
+  // The scan's grid one voxel (2 mm) to the right of the partner's: scan voxel i is partner voxel i + 1.
+  const moved = { dims, ijkToRAS: [2, 0, 0, -3, 0, 2, 0, 3, 0, 0, 2.5, 7, 0, 0, 0, 1] };
+  if (sameGrid(grid, moved)) throw new Error("a moved grid is not the same");
+  const r = resampleInto(data, grid, moved);
+  const at = (i: number, j: number, k: number) => r[(k * 5 + j) * 6 + i];
+  if (Math.abs(at(2, 3, 1) - (3 + 30 + 100)) > 1e-4) throw new Error(`shifted sample ${at(2, 3, 1)}`);
+  if (at(5, 0, 0) !== 0) throw new Error("outside the partner is 0");
+  // Half a voxel along k (1.25 mm): halfway between two slices.
+  const half = resampleInto(data, grid, { dims, ijkToRAS: [2, 0, 0, -5, 0, 2, 0, 3, 0, 0, 2.5, 8.25, 0, 0, 0, 1] });
+  if (Math.abs(half[(1 * 5 + 2) * 6 + 3] - (3 + 20 + 150)) > 1e-4) throw new Error(`half-slice sample ${half[(1 * 5 + 2) * 6 + 3]}`);
+});

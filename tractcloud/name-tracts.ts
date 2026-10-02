@@ -10,7 +10,9 @@ export const MIN_LENGTH_MM = 40;
 export const SHORT = -1;
 
 /** side: +1 right, -1 left, 0 none (the commissures and the middle cerebellar peduncle cross the midline). */
-export interface Named { tract: Int32Array; side: Int8Array; draws: number; seconds: number }
+export interface Named { tract: Int32Array; side: Int8Array; draws: number; seconds: number;
+  /** How sure each name is (the first draw): its tract's probability minus the best other tract's (tractcloud-gpu.ts margins); NaN for a short streamline. */
+  margin?: Float32Array }
 /** Tracts without a side. */
 const NO_SIDE = new Set(["MCP"]);
 
@@ -32,7 +34,7 @@ export async function nameAgainst(device: GPUDevice, model: TractCloudModel, con
   const t0 = performance.now(), draws = opts.draws ?? 1, seed = opts.seed ?? 20260930;
   const kept = (set: Float32Array[]) => set.map((s, i) => [s, i] as const).filter(([s]) => lengthOf(s) >= MIN_LENGTH_MM);
   const keepC = kept(context), keepA = kept(added), Nc = keepC.length;
-  const out = (n: number) => ({ tract: new Int32Array(n).fill(SHORT), side: new Int8Array(n), draws, seconds: 0 });
+  const out = (n: number): Named => ({ tract: new Int32Array(n).fill(SHORT), side: new Int8Array(n), draws, seconds: 0, margin: new Float32Array(n).fill(NaN) });
   const rc = out(context.length), ra = out(added.length);
   const done = () => { rc.seconds = ra.seconds = (performance.now() - t0) / 1000; return { context: rc, added: ra }; };
   if (Nc < model.json.settings.k + 1) return done();
@@ -46,7 +48,8 @@ export async function nameAgainst(device: GPUDevice, model: TractCloudModel, con
       const { ds, glob } = draw(Nc, model, seed + d);
       const clusters = await gpu.classify(feat32, contexts(localNeighbors(feat, ds, model), ds, glob, model.json.settings.k));
       const t = tractsOf(model, clusters);
-      for (let i = 0; i < N; i++) { votes[i * T + t[i]]++; if (d === 0) first[i] = t[i]; }
+      const mg = gpu.margins();
+      for (let i = 0; i < N; i++) { votes[i * T + t[i]]++; if (d === 0) { first[i] = t[i]; const [, at, r] = keep[i]; r.margin![at] = mg[i]; } }
     }
   } finally { gpu.destroy(); }
   for (let i = 0; i < N; i++) {

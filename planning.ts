@@ -21,17 +21,85 @@ function invAffine(m: number[]): number[] {
 }
 const yieldNow = () => new Promise((r) => setTimeout(r, 0));
 
+/** A grid: its size and where its voxels are (voxel index → RAS mm). */
+export interface Grid { dims: number[]; ijkToRAS: number[] }
+
+/** Do two grids put their voxels in the same places (to 0.001 mm and 0.001 in the axes)? */
+export const sameGrid = (a: Grid, b: Grid) => a.dims.every((d, i) => d === b.dims[i]) && a.ijkToRAS.every((v, i) => Math.abs(v - b.ijkToRAS[i]) < 1e-3);
+
+/**
+ * `data` on grid `from`, sampled at the voxels of grid `to` through the scanner's coordinates (trilinear; 0 outside).
+ * Used for a reversed phase-encoding scan whose slab the scanner placed differently -- 11 of ds001226's 29 people have a
+ * partner about 2.3 mm and 0.8° away (measured 2026-10-02). Mike Halle's pipeline aligns it this way and found it in 4 of
+ * his 12; Albula paired those voxel by voxel in the case runs and refused them in the app.
+ */
+export function resampleInto(data: ArrayLike<number>, from: Grid, to: Grid): Float32Array {
+  const [nx, ny, nz] = from.dims, [mx, my, mz] = to.dims;
+  const R = invAffine(from.ijkToRAS), M = to.ijkToRAS;
+  const A = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11].map((k) => { const r = Math.floor(k / 4), c = k % 4;
+    return R[4 * r] * M[c] + R[4 * r + 1] * M[4 + c] + R[4 * r + 2] * M[8 + c] + (c === 3 ? R[4 * r + 3] : 0); });   // to-ijk → from-ijk
+  const out = new Float32Array(mx * my * mz);
+  const at = (i: number, j: number, k: number) => data[(k * ny + j) * nx + i] as number;
+  for (let k = 0; k < mz; k++) for (let j = 0; j < my; j++) for (let i = 0; i < mx; i++) {
+    const x = A[0] * i + A[1] * j + A[2] * k + A[3], y = A[4] * i + A[5] * j + A[6] * k + A[7], z = A[8] * i + A[9] * j + A[10] * k + A[11];
+    const x0 = Math.floor(x), y0 = Math.floor(y), z0 = Math.floor(z);
+    if (x0 < 0 || y0 < 0 || z0 < 0 || x0 > nx - 1 || y0 > ny - 1 || z0 > nz - 1) continue;
+    const x1 = Math.min(x0 + 1, nx - 1), y1 = Math.min(y0 + 1, ny - 1), z1 = Math.min(z0 + 1, nz - 1);
+    const fx = x - x0, fy = y - y0, fz = z - z0;
+    const c00 = at(x0, y0, z0) * (1 - fx) + at(x1, y0, z0) * fx, c10 = at(x0, y1, z0) * (1 - fx) + at(x1, y1, z0) * fx;
+    const c01 = at(x0, y0, z1) * (1 - fx) + at(x1, y0, z1) * fx, c11 = at(x0, y1, z1) * (1 - fx) + at(x1, y1, z1) * fx;
+    out[(k * my + j) * mx + i] = (c00 * (1 - fy) + c10 * fy) * (1 - fz) + (c01 * (1 - fy) + c11 * fy) * fz;
+  }
+  return out;
+}
+
+/**
+ * WHERE THE TIME GOES, step by step, in Mike Halle's stages (his mail, 2026-10-02): read, distortion (align the partner,
+ * estimate the field, apply it), mask and tensor, tracking (with its own breakdown), naming, distances, drawing. Milliseconds;
+ * a step not run is absent. Said in the status line, so it reaches the session log too (Ron: "extend the timing reporting").
+ */
+export interface StageTimes {
+  read?: number; align?: number; field?: number; apply?: number; fit?: number;
+  seeds?: number; track?: number; trackDetail?: TrackTiming & { data?: number };
+  name?: number; distances?: number; draw?: number; total?: number;
+}
+const sec = (ms: number) => `${(ms / 1000).toFixed(ms < 10000 ? 2 : 1)} s`;
+export function stageText(t: StageTimes): string {
+  const d = t.trackDetail;
+  const parts: string[] = [];
+  const add = (label: string, v?: number, extra = "") => { if (v !== undefined) parts.push(`${label} ${sec(v)}${extra}`); };
+  add("read", t.read); add("align partner", t.align); add("distortion field", t.field); add("apply field", t.apply); add("mask + tensor", t.fit);
+  add("seeds", t.seeds);
+  add("tracking", t.track, d ? ` (signal ${sec(d.data ?? 0)}, seeds ${sec(d.prepare)}, card ${sec(d.gpu)}, fibers ${sec(d.assemble)}, page ${sec(d.between)})` : "");
+  add("naming", t.name); add("distances", t.distances); add("drawing", t.draw);
+  return parts.join(" · ") + (t.total !== undefined ? ` — ${sec(t.total)} in all` : "");
+}
+
 /**
  * DISTORTION CORRECTION (distortion.ts, from the papers): the field is fitted between the mean b = 0 of the scan and of
  * its reversed partner, and every volume of the scan is corrected before the tensor. The phase-encoding axis is
  * MEASURED, not assumed: both in-plane axes are fitted and the one that brings the two scans closer is kept (PAT16: 15%
  * of the difference left along j, 59% along i). Refused, and said, when even the better axis leaves more than half: then
- * the two do not look like a reversed pair. Changes `dwi` in place; returns what was done, in words.
+ * the two do not look like a reversed pair. A partner on a grid of its own (`partnerGrid`) is first sampled onto the
+ * scan's grid through the scanner's coordinates. Changes `dwi` in place; returns what was done, in words; `times` gets
+ * align, field and apply.
  */
-export async function correctWithReversed(dwi: DiffusionSeries, reversed: ArrayLike<number>[], name: string, progress?: (s: string) => void): Promise<string> {
+export async function correctWithReversed(dwi: DiffusionSeries, reversed: ArrayLike<number>[], name: string, progress?: (s: string) => void, opts: { partnerGrid?: Grid; times?: StageTimes } = {}): Promise<string> {
   const meanOf = (vols: ArrayLike<number>[]) => { const o = new Float32Array(vols[0].length); for (const d of vols) for (let v = 0; v < o.length; v++) o[v] += d[v] / vols.length; return o; };
-  const plus = meanOf(reversed), minus = meanOf(dwi.volumes.filter((_, i) => dwi.bValues[i] < 50).map((v) => v.data));
-  const dims = dwi.volumes[0].dims;
+  const grid: Grid = { dims: dwi.volumes[0].dims, ijkToRAS: dwi.volumes[0].ijkToRAS };
+  const ta = performance.now();
+  let plus: Float32Array = meanOf(reversed), aligned = "";
+  if (opts.partnerGrid && !sameGrid(opts.partnerGrid, grid)) {
+    plus = resampleInto(plus, opts.partnerGrid, grid);
+    const P = opts.partnerGrid.ijkToRAS, G = grid.ijkToRAS;
+    const shift = Math.hypot(P[3] - G[3], P[7] - G[7], P[11] - G[11]);
+    let cos = 1; for (const c of [0, 1, 2]) { const a = [P[c], P[4 + c], P[8 + c]], b = [G[c], G[4 + c], G[8 + c]]; cos = Math.min(cos, (a[0] * b[0] + a[1] * b[1] + a[2] * b[2]) / (Math.hypot(...a) * Math.hypot(...b))); }
+    aligned = `; ${name} was placed differently by the scanner (${shift.toFixed(1)} mm, ${(Math.acos(Math.min(1, cos)) * 180 / Math.PI).toFixed(1)}°) and was aligned by the scanner's coordinates first`;
+    if (opts.times) opts.times.align = performance.now() - ta;
+  }
+  const minus = meanOf(dwi.volumes.filter((_, i) => dwi.bValues[i] < 50).map((v) => v.data));
+  const dims = grid.dims as [number, number, number];
+  const tf = performance.now();
   let best: FieldFit | undefined, bestLeft = Infinity;
   for (const axis of [0, 1] as const) {
     progress?.(`Correcting distortion with ${name}: trying phase encoding along ${axis ? "the columns" : "the rows"}…`);
@@ -40,16 +108,21 @@ export async function correctWithReversed(dwi: DiffusionSeries, reversed: ArrayL
     const left = f.levels.at(-1)?.residual ?? Infinity;
     if (left < bestLeft) { best = f; bestLeft = left; }
   }
-  if (!best || bestLeft > 0.5) return `not corrected: ${name} and this scan do not look like a reversed pair (${Math.round(bestLeft * 100)}% of their difference would remain)`;
+  if (opts.times) opts.times.field = performance.now() - tf;
+  if (!best || bestLeft > 0.5) return `not corrected: ${name} and this scan do not look like a reversed pair (${Math.round(bestLeft * 100)}% of their difference would remain)${aligned}`;
+  const tp = performance.now();
   for (const v of dwi.volumes) { v.data = applyField(best, v.data, -1); v.dtype = "<f4"; }
+  if (opts.times) opts.times.apply = performance.now() - tp;
   const M = dwi.volumes[0].ijkToRAS, col = best.axis, mmPerVox = Math.hypot(M[col], M[4 + col], M[8 + col]);
   let mx = 0; for (const x of fieldAtCenters(best)) mx = Math.max(mx, Math.abs(x));
-  return `corrected with ${name} (shifts up to ${(mx * mmPerVox).toFixed(1)} mm; ${Math.round(bestLeft * 100)}% of the two scans' difference left)`;
+  return `corrected with ${name} (shifts up to ${(mx * mmPerVox).toFixed(1)} mm; ${Math.round(bestLeft * 100)}% of the two scans' difference left)${aligned}`;
 }
 
-/** WHOLE-BRAIN TRACKING for naming: TractCloud learned from about 10,000 streamlines a brain. 25,000 starting points in
- *  white matter above FA 0.2 give about 10,000 on PAT16 (measured 2026-09-30: 10,772 in Deno, 11,894 in the app). */
-export const WHOLE_BRAIN_SEEDS = 25000, SEED_FA = 0.2;
+/** WHOLE-BRAIN TRACKING for naming: TractCloud learned from about 10,000 streamlines a brain. Seeded in the brain only
+ *  (TensorFit.seedMask, DIPY's median_otsu; since 2026-10-02) 16,000 starting points in white matter above FA 0.2 give
+ *  about that many (measured in the record, 2026-10-02). Seeded in the whole head it took 25,000 -- a third of them in the
+ *  scalp, making nothing (10,705 on PAT16); the same count from fewer seeds is several seconds less tracking a case. */
+export const WHOLE_BRAIN_SEEDS = 16000, SEED_FA = 0.2;
 
 /**
  * Starting points through the whole brain: up to WHOLE_BRAIN_SEEDS white-matter voxels above SEED_FA, chosen and placed
@@ -58,7 +131,7 @@ export const WHOLE_BRAIN_SEEDS = 25000, SEED_FA = 0.2;
  * order the file keeps its slices in. PAT16's DICOM copy stores its slices in the reverse order of its NIfTI file (the
  * same grid in space); drawn in storage order, the two gave different seeds and so different tracts (2026-09-30).
  */
-export function wholeBrainSeeds(fit: TensorFit): number[][] {
+export function wholeBrainSeeds(fit: TensorFit, count = WHOLE_BRAIN_SEEDS, seed = 20260930): number[][] {
   const dims = fit.dims, M = fit.ijkToRAS;
   // For each RAS axis r, the grid axis that runs most along it, and whether it runs backward.
   const axisOf: number[] = [], flip: boolean[] = [], used = new Set<number>();
@@ -72,10 +145,10 @@ export function wholeBrainSeeds(fit: TensorFit): number[][] {
   const cand: number[][] = [];
   for (let c2 = 0; c2 < n[2]; c2++) for (let c1 = 0; c1 < n[1]; c1++) for (let c0 = 0; c0 < n[0]; c0++) {
     const g = toGrid([c0, c1, c2]), v = (g[2] * dims[1] + g[1]) * dims[0] + g[0];
-    if (fit.mask[v] && fit.fa[v] > SEED_FA) cand.push([c0, c1, c2]);
+    if ((fit.seedMask ?? fit.mask)[v] && fit.mask[v] && fit.fa[v] > SEED_FA) cand.push([c0, c1, c2]);   // in the brain (seedMask), tracked in the head (mask)
   }
-  const r = rng(20260930), count = Math.min(WHOLE_BRAIN_SEEDS, cand.length), out: number[][] = [];
-  for (let i = 0; i < count; i++) {
+  const r = rng(seed), take = Math.min(count, cand.length), out: number[][] = [];
+  for (let i = 0; i < take; i++) {
     const j = i + Math.floor(r() * (cand.length - i)); const t = cand[j]; cand[j] = cand[i]; cand[i] = t;
     const c = cand[i].map((x) => x + r() - 0.5), g = toGrid(c);            // jitter in the anatomical frame too
     out.push(matVec(M, g[0], g[1], g[2]));

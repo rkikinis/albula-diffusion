@@ -30,7 +30,7 @@ import { seedTensor, signalAt } from "./ukf.ts";
 const N = 11, S = 2 * N + 1, STRIDE = 264, MAXG = 192;
 
 /** The shader; `sig32`: the signal as 32-bit floats (the processor's precision) or as rounded 16-bit pairs. */
-const wgsl = (sig32: boolean, chol1 = false, pre = false, wgInv = false, onePass = false, parInv = false) => /* wgsl */ `
+export const wgsl = (sig32: boolean, chol1 = false, pre = false, wgInv = false, onePass = false, parInv = false) => /* wgsl */ `
 const N: u32 = 11u;
 const S: u32 = 23u;
 const MAXG: u32 = ${MAXG}u;
@@ -204,6 +204,33 @@ fn vInv(i: u32, j: u32, useB: bool) -> f32 {
 }
 
 // Project state vector v (private) onto the box constraints in the metric whose INVERSE is V (vInv).
+// THE EXACT PROJECTION (2026-10-02; the processor's ukf.ts has the same): min (x' − x)ᵀW(x' − x) over the box, in the dual
+// form -- with the bounds A held, x' = x + V[:,A] t where V[A,A] t = c (V = W⁻¹, c = bound − x on A), and t IS the vector
+// of Lagrange multipliers: the answer is the minimizer exactly when every held lower bound has t ≥ 0 and every held upper
+// bound t ≤ 0, and nothing free is out of its box. The grow-only active set below usually lands there; where it does not
+// (it keeps a bound the minimizer releases: critic, 2026-10-01, finding 1), the 48 faces of the box are tried (the four
+// eigenvalues free or at 0; w free, at 0 or at 1) and the feasible one of least objective, cᵀt, is kept.
+fn solveFace(ai: array<u32, 5>, cv: array<f32, 5>, na: u32, useB: bool) -> array<f32, 5> {
+  var M: array<f32, 25>;
+  for (var a = 0u; a < na; a++) { for (var b = 0u; b < na; b++) { M[a * 5u + b] = vInv(ai[a], ai[b], useB); } }
+  var t = cv;
+  for (var p = 0u; p < na; p++) {
+    let d = M[p * 5u + p];
+    for (var r = p + 1u; r < na; r++) {
+      let f = M[r * 5u + p] / d;
+      for (var c2 = p; c2 < na; c2++) { M[r * 5u + c2] -= f * M[p * 5u + c2]; }
+      t[r] -= f * t[p];
+    }
+  }
+  for (var pp = 0u; pp < na; pp++) {
+    let p = na - 1u - pp;
+    var s = t[p];
+    for (var c2 = p + 1u; c2 < na; c2++) { s -= M[p * 5u + c2] * t[c2]; }
+    t[p] = s / M[p * 5u + p];
+  }
+  return t;
+}
+
 fn projectInv(v: ptr<function, array<f32, 11>>, useB: bool) -> bool {
   var lo = array<f32, 5>(0.0, 0.0, 0.0, 0.0, 0.0);
   var hi = array<f32, 5>(1e30, 1e30, 1e30, 1e30, 1.0);
@@ -214,6 +241,10 @@ fn projectInv(v: ptr<function, array<f32, 11>>, useB: bool) -> bool {
   let orig = *v;
   var act = array<u32, 5>(0u, 0u, 0u, 0u, 0u);
   var bnd = array<f32, 5>(0.0, 0.0, 0.0, 0.0, 0.0);
+  var tLast = array<f32, 5>(0.0, 0.0, 0.0, 0.0, 0.0);
+  var cLast = array<u32, 5>(0u, 0u, 0u, 0u, 0u);
+  var naLast = 0u;
+  var still = false;
   for (var round = 0u; round < 3u; round++) {
     var na = 0u;
     var ai = array<u32, 5>(0u, 0u, 0u, 0u, 0u);
@@ -222,37 +253,70 @@ fn projectInv(v: ptr<function, array<f32, 11>>, useB: bool) -> bool {
       let x = (*v)[idx[c]];
       if (act[c] == 1u || x < lo[c] - 1e-7 || x > hi[c] + 1e-7) {
         if (act[c] == 0u) { act[c] = 1u; bnd[c] = clamp(x, lo[c], hi[c]); }
-        ai[na] = idx[c]; cvec[na] = bnd[c] - orig[idx[c]]; na++;
+        ai[na] = idx[c]; cvec[na] = bnd[c] - orig[idx[c]]; cLast[na] = c; na++;
       }
     }
-    // Solve V[A,A] t = c (Gaussian elimination, na <= 5), then y = V[:,A] t.
-    var M: array<f32, 25>;
-    for (var a = 0u; a < na; a++) { for (var b = 0u; b < na; b++) {
-      M[a * 5u + b] = vInv(ai[a], ai[b], useB);
-    } }
-    var t = cvec;
-    for (var p = 0u; p < na; p++) {
-      let d = M[p * 5u + p];
-      for (var r = p + 1u; r < na; r++) {
-        let f = M[r * 5u + p] / d;
-        for (var c2 = p; c2 < na; c2++) { M[r * 5u + c2] -= f * M[p * 5u + c2]; }
-        t[r] -= f * t[p];
-      }
-    }
-    for (var pp = 0u; pp < na; pp++) {
-      let p = na - 1u - pp;
-      var s = t[p];
-      for (var c2 = p + 1u; c2 < na; c2++) { s -= M[p * 5u + c2] * t[c2]; }
-      t[p] = s / M[p * 5u + p];
-    }
+    let t = solveFace(ai, cvec, na, useB);
+    tLast = t; naLast = na;
     for (var k = 0u; k < N; k++) {
       var y = 0.0;
       for (var a = 0u; a < na; a++) { y += vInv(k, ai[a], useB) * t[a]; }
       (*v)[k] = orig[k] + y;
     }
-    var still = false;
+    still = false;
     for (var c = 0u; c < 5u; c++) { let x = (*v)[idx[c]]; if (act[c] == 0u && (x < lo[c] - 1e-7 || x > hi[c] + 1e-7)) { still = true; } }
     if (!still) { break; }
+  }
+  // Optimal? Every held bound's multiplier of the right sign (lower: t ≥ 0; upper: t ≤ 0), nothing free outside.
+  var ok = !still;
+  for (var a = 0u; a < naLast; a++) {
+    let c = cLast[a];
+    let tol = 1e-6 * (1.0 + abs(tLast[a]));
+    if (bnd[c] == hi[c]) { if (tLast[a] > tol) { ok = false; } } else { if (tLast[a] < -tol) { ok = false; } }
+  }
+  if (!ok) {
+    var bestObj = 1e30;
+    var bestCode = 0xffffffffu;
+    for (var code = 0u; code < 48u; code++) {
+      var na = 0u;
+      var ai = array<u32, 5>(0u, 0u, 0u, 0u, 0u);
+      var cvec = array<f32, 5>(0.0, 0.0, 0.0, 0.0, 0.0);
+      var held = array<u32, 5>(0u, 0u, 0u, 0u, 0u);
+      for (var c = 0u; c < 4u; c++) { if (((code >> c) & 1u) == 1u) { held[c] = 1u; ai[na] = idx[c]; cvec[na] = lo[c] - orig[idx[c]]; na++; } }
+      let wch = code / 16u;                                   // 0 free, 1 at 0, 2 at 1
+      if (wch == 1u) { held[4] = 1u; ai[na] = idx[4]; cvec[na] = lo[4] - orig[idx[4]]; na++; }
+      if (wch == 2u) { held[4] = 2u; ai[na] = idx[4]; cvec[na] = hi[4] - orig[idx[4]]; na++; }
+      var t = array<f32, 5>(0.0, 0.0, 0.0, 0.0, 0.0);
+      if (na > 0u) { t = solveFace(ai, cvec, na, useB); }
+      var feasible = true;
+      for (var c = 0u; c < 5u; c++) {
+        if (held[c] != 0u) { continue; }
+        var y = 0.0;
+        for (var a = 0u; a < na; a++) { y += vInv(idx[c], ai[a], useB) * t[a]; }
+        let x = orig[idx[c]] + y;
+        if (x < lo[c] - 1e-7 || x > hi[c] + 1e-7) { feasible = false; }
+      }
+      if (!feasible) { continue; }
+      var obj = 0.0;
+      for (var a = 0u; a < na; a++) { obj += cvec[a] * t[a]; }
+      if (obj < bestObj) { bestObj = obj; bestCode = code; }
+    }
+    if (bestCode != 0xffffffffu) {
+      var na = 0u;
+      var ai = array<u32, 5>(0u, 0u, 0u, 0u, 0u);
+      var cvec = array<f32, 5>(0.0, 0.0, 0.0, 0.0, 0.0);
+      for (var c = 0u; c < 4u; c++) { if (((bestCode >> c) & 1u) == 1u) { ai[na] = idx[c]; cvec[na] = lo[c] - orig[idx[c]]; na++; } }
+      let wch = bestCode / 16u;
+      if (wch == 1u) { ai[na] = idx[4]; cvec[na] = lo[4] - orig[idx[4]]; na++; }
+      if (wch == 2u) { ai[na] = idx[4]; cvec[na] = hi[4] - orig[idx[4]]; na++; }
+      var t = array<f32, 5>(0.0, 0.0, 0.0, 0.0, 0.0);
+      if (na > 0u) { t = solveFace(ai, cvec, na, useB); }
+      for (var k = 0u; k < N; k++) {
+        var y = 0.0;
+        for (var a = 0u; a < na; a++) { y += vInv(k, ai[a], useB) * t[a]; }
+        (*v)[k] = orig[k] + y;
+      }
+    }
   }
   for (var c = 0u; c < 5u; c++) { (*v)[idx[c]] = clamp((*v)[idx[c]], lo[c], hi[c]); }
   return true;

@@ -20,6 +20,13 @@ export interface GpuTractCloud {
   /** Clusters (0..1599) of all streamlines. ctx (N, 100): for each streamline, the streamline index of each context
    *  (its 20 local neighbors, then the 80 global ones). */
   classify(feat: Float32Array, ctx: Int32Array): Promise<Int32Array>;
+  /**
+   * For the last classify, per streamline: how sure the name is -- the probability of its tract (softmax over the 1,600
+   * clusters, summed per tract) minus that of the best other tract. Mike Halle keeps this margin in his rank field: on an
+   * HCP subject it predicts which streamlines change name across TractCloud's random draws (AUROC 0.875; his mail,
+   * 2026-10-01). The name itself is unchanged: the tract of the most likely cluster, as upstream.
+   */
+  margins(): Float32Array;
   destroy(): void;
 }
 
@@ -57,6 +64,10 @@ export function tractCloudGpu(device: GPUDevice, model: TractCloudModel, batch =
   const nb = buf(batch * P * kPoint * 4, S);
   const pooled = buf(batch * 2048 * 4, S), h1 = buf(batch * 512 * 4, S), h2 = buf(batch * 256 * 4, S), logits = buf(batch * 1600 * 4, S);
   const out = buf(batch * 4, S | CS), read = buf(batch * 4, GPUBufferUsage.MAP_READ | CD);
+  const marginOut = buf(batch * 4, S | CS), readMargin = buf(batch * 4, GPUBufferUsage.MAP_READ | CD);
+  const T = model.json.tracts.length;
+  const lut = buf(1600 * 4, S | CD); device.queue.writeBuffer(lut, 0, Int32Array.from(model.json.clusterToTract.slice(0, 1600)));
+  let lastMargins = new Float32Array(0);
   const params = buf(16, GPUBufferUsage.UNIFORM | CD);      // count in this batch, first streamline
 
   const lr = `fn lr(x: f32) -> f32 { return select(${leak} * x, x, x > 0.0); }`;
@@ -170,11 +181,26 @@ export function tractCloudGpu(device: GPUDevice, model: TractCloudModel, batch =
   const argmax = pipe(`
 @group(0) @binding(1) var<storage, read> x: array<f32>;
 @group(0) @binding(2) var<storage, read_write> y: array<i32>;
+@group(0) @binding(3) var<storage, read> lut: array<i32>;
+@group(0) @binding(4) var<storage, read_write> margin: array<f32>;
 @compute @workgroup_size(${WG}) fn main(@builtin(global_invocation_id) g: vec3u) {
   let b = g.x; if (b >= prm.count) { return; }
   var best = 0u; var bv = x[b * 1600u];
   for (var c = 1u; c < 1600u; c++) { let v = x[b * 1600u + c]; if (v > bv) { bv = v; best = c; } }
   y[b] = i32(best);
+  // The margin: softmax over the clusters (shifted by the largest logit), summed per tract.
+  var p: array<f32, ${T}>;
+  var total = 0.0;
+  for (var c = 0u; c < 1600u; c++) {
+    let e = exp(x[b * 1600u + c] - bv);
+    total += e;
+    let t = lut[c];
+    if (t >= 0 && t < ${T}) { p[t] += e; }
+  }
+  let mine = lut[best];
+  var other = 0.0;
+  for (var t = 0; t < ${T}; t++) { if (t != mine) { other = max(other, p[t]); } }
+  margin[b] = (p[mine] - other) / total;
 }`);
 
   const K = { knn64a: knn(64, 0), knn64b: knn(64, 64), knn128: knn(128, 128),
@@ -200,23 +226,27 @@ export function tractCloudGpu(device: GPUDevice, model: TractCloudModel, batch =
         [K.knn128, [cat, nb], (n) => n * P], [K.ab4, [cat, w4, A, Bh], (n) => n * 256 * P], [K.mx4, [A, Bh, nb, w4, cat], (n) => n * 256 * P],
         [conv5, [cat, w5, pooled], (n) => n * 1024],
         [K.d1, [pooled, l1, h1], (n) => n * 512], [K.d2, [h1, l2, h2], (n) => n * 256], [K.d3, [h2, l3, logits], (n) => n * 1600],
-        [argmax, [logits, out], (n) => n],
+        [argmax, [logits, out, lut, marginOut], (n) => n],
       ];
       const bound = steps.map(([p, b, n]) => [p, bind(p, b), n] as const);
-      const result = new Int32Array(N);
+      const result = new Int32Array(N), margins = new Float32Array(N);
       for (let first = 0; first < N; first += batch) {
         const count = Math.min(batch, N - first);
         device.queue.writeBuffer(params, 0, new Uint32Array([count, first, 0, 0]));
         const enc = device.createCommandEncoder();
         for (const [p, bg, n] of bound) { const pass = enc.beginComputePass(); pass.setPipeline(p); pass.setBindGroup(0, bg); pass.dispatchWorkgroups(groups(n(count))); pass.end(); }
         enc.copyBufferToBuffer(out, 0, read, 0, count * 4);
+        enc.copyBufferToBuffer(marginOut, 0, readMargin, 0, count * 4);
         device.queue.submit([enc.finish()]);                // one batch a submit: short command buffers (the macOS watchdog)
-        await read.mapAsync(GPUMapMode.READ, 0, count * 4);
+        await Promise.all([read.mapAsync(GPUMapMode.READ, 0, count * 4), readMargin.mapAsync(GPUMapMode.READ, 0, count * 4)]);
         result.set(new Int32Array(read.getMappedRange(0, count * 4)).slice(), first);
-        read.unmap();
+        margins.set(new Float32Array(readMargin.getMappedRange(0, count * 4)).slice(), first);
+        read.unmap(); readMargin.unmap();
       }
+      lastMargins = margins;
       return result;
     },
+    margins: () => lastMargins,
     destroy() { for (const b of own) b.destroy(); featBuf?.destroy(); ctxBuf?.destroy(); },
   };
 }

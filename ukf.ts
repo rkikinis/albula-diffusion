@@ -24,9 +24,12 @@
 //     to our patient-space gradients, DWI_CONVENTION 1), as the original does; points come out in patient RAS.
 //  2. The original lists every gradient twice (with its opposite); both copies predict the same signal and see the same
 //     measurement, so here each is used once at twice the weight (R = 2/Rs) -- the same information update, half the work.
-//  3. Constraints (w in [0, 1], eigenvalues >= 0): the original solves a general quadratic program for the projection in
-//     the filter's metric; for these box constraints the same projection is computed exactly by an active-set solve
-//     (`project`), and the number of times it acts is counted.
+//  3. Constraints (w in [0, 1], eigenvalues >= 0): the original solves a quadratic program for the projection in the
+//     filter's metric (Goldfarb-Idnani, QuadProg++ -- LGPL-3, so not ported). Here the projection is the EXACT minimizer,
+//     from the mathematics: an active-set solve (`project`), checked against the optimality conditions, and where they
+//     fail -- the solve keeps a bound that the true minimizer releases (critic, 2026-10-01, finding 1: 293 of 74,826
+//     projections on PAT16) -- the minimizer found among the box's faces. The original's own solver is not always exact
+//     either (finding 5), so this is the textbook answer, not a copy of it. The number of times it acts is counted.
 //  4. The curvature stop is omitted: as the original computes it (radius = 1 / (|v2 − v1| / 2) of unit steps), the radius
 //     is never below 1, so its threshold of 0.87 can never stop a fiber.
 //  5. Seeds come as points (voxel coordinates) from the caller; the original's random offsets (seeds per voxel > 1)
@@ -130,13 +133,18 @@ export function spdInverse(A: Float64Array, n: number): Float64Array | null {
 
 const D_ISO = 0.003;
 const UNPACK = 1e-6;
+/** Plain two-tensor mode (no free water) floors every eigenvalue here, in the state's 1e-6 units: the original's Simple2T
+ *  `_lambda_min(100.0)`, applied in F, H and the step's tensors (filter_Simple2T.cc:34-38, 67-73, 106-111). The free-water
+ *  model has no floor (it is constrained instead). Critic, 2026-10-01, finding 2; Mike Halle found the same. */
+const LAMBDA_MIN_PLAIN = 100;
 
 /** Predicted normalized signal for one state, into y (G values). */
 function predict(x: Float64Array, off: number, fw: boolean, data: UkfData, y: Float64Array, yoff: number) {
   const { g, b, G } = data;
   const n1 = Math.hypot(x[off], x[off + 1], x[off + 2]) || 1, n2 = Math.hypot(x[off + 5], x[off + 6], x[off + 7]) || 1;
   const m1x = x[off] / n1, m1y = x[off + 1] / n1, m1z = x[off + 2] / n1, m2x = x[off + 5] / n2, m2y = x[off + 6] / n2, m2z = x[off + 7] / n2;
-  const l1a = Math.max(x[off + 3], 0), l1p = Math.max(x[off + 4], 0), l2a = Math.max(x[off + 8], 0), l2p = Math.max(x[off + 9], 0);
+  const lo = fw ? 0 : LAMBDA_MIN_PLAIN;
+  const l1a = Math.max(x[off + 3], lo), l1p = Math.max(x[off + 4], lo), l2a = Math.max(x[off + 8], lo), l2p = Math.max(x[off + 9], lo);
   const w = fw ? Math.min(Math.max(x[off + 10], 0), 1) : 1;
   for (let q = 0; q < G; q++) {
     const ux = g[3 * q], uy = g[3 * q + 1], uz = g[3 * q + 2], bq = b[q] * UNPACK;
@@ -179,7 +187,54 @@ function project(x: Float64Array, off: number, W: Float64Array, n: number, fw: b
     if (!bx.some((c) => out(x[off + c.i], c))) break;
   }
   for (const c of bx) x[off + c.i] = Math.min(Math.max(x[off + c.i], c.lo), c.hi);     // exact bounds after rounding
+  if (!optimal(x, off, orig, W, n, bx)) exactOnFaces(x, off, orig, W, n, bx);
   return true;
+}
+
+/**
+ * THE OPTIMALITY CONDITIONS of min (x' − x)ᵀW(x' − x) over the box: with g = W(x' − x), every free coordinate has g = 0
+ * (true by construction), a coordinate held at its lower bound g ≥ 0, at its upper bound g ≤ 0. A bound held with the
+ * wrong sign is one the true minimizer releases.
+ */
+function optimal(x: Float64Array, off: number, orig: Float64Array, W: Float64Array, n: number, bx: { i: number; lo: number; hi: number }[]): boolean {
+  for (const c of bx) {
+    const v = x[off + c.i], atLo = Math.abs(v - c.lo) < 1e-12, atHi = Math.abs(v - c.hi) < 1e-12;
+    if (!atLo && !atHi) continue;
+    let g = 0; for (let k = 0; k < n; k++) g += W[c.i * n + k] * (x[off + k] - orig[k]);
+    const tol = 1e-9 * (1 + Math.abs(g));
+    if (atLo && g < -tol) return false;
+    if (atHi && g > tol) return false;
+  }
+  return true;
+}
+
+/** The exact minimizer by trying every face of the box (each bound: free, or held at lo, or at hi): the feasible one of least objective. */
+function exactOnFaces(x: Float64Array, off: number, orig: Float64Array, W: Float64Array, n: number, bx: { i: number; lo: number; hi: number }[]): void {
+  const choices = bx.map((c) => Number.isFinite(c.hi) ? 3 : 2);
+  const total = choices.reduce((a, b) => a * b, 1);
+  let bestObj = Infinity, best: Float64Array | undefined;
+  const trial = new Float64Array(n);
+  for (let code = 0; code < total; code++) {
+    let r = code; const held = new Map<number, number>();
+    bx.forEach((c, t) => { const ch = r % choices[t]; r = Math.floor(r / choices[t]); if (ch === 1) held.set(c.i, c.lo); else if (ch === 2) held.set(c.i, c.hi); });
+    const A = [...held.keys()], F = [...Array(n).keys()].filter((k) => !held.has(k));
+    const yA = A.map((k) => held.get(k)! - orig[k]);
+    for (let k = 0; k < n; k++) trial[k] = orig[k];
+    A.forEach((k, t) => (trial[k] = orig[k] + yA[t]));
+    if (A.length) {
+      const WFF = new Float64Array(F.length * F.length);
+      F.forEach((rr, a) => F.forEach((c, bb) => (WFF[a * F.length + bb] = W[rr * n + c])));
+      const inv = spdInverse(WFF, F.length);
+      if (!inv) continue;
+      const rhs = F.map((rr) => A.reduce((sum, k, t) => sum + W[rr * n + k] * yA[t], 0));
+      F.forEach((rr, a) => { let sum = 0; for (let bb = 0; bb < F.length; bb++) sum += inv[a * F.length + bb] * rhs[bb]; trial[rr] = orig[rr] - sum; });
+    }
+    if (bx.some((c) => !held.has(c.i) && (trial[c.i] < c.lo - 1e-12 || trial[c.i] > c.hi + 1e-12))) continue;
+    let obj = 0;
+    for (let a = 0; a < n; a++) { const da = trial[a] - orig[a]; if (!da) continue; for (let bb = 0; bb < n; bb++) obj += da * W[a * n + bb] * (trial[bb] - orig[bb]); }
+    if (obj < bestObj) { bestObj = obj; best = trial.slice(); }
+  }
+  if (best) { for (let k = 0; k < n; k++) x[off + k] = best[k]; for (const c of bx) x[off + c.i] = Math.min(Math.max(x[off + c.i], c.lo), c.hi); }
 }
 
 export interface UkfFilter {
@@ -211,11 +266,14 @@ export function filterStep(f: UkfFilter, x: Float64Array, P: Float64Array, z: Fl
   const sc = Math.sqrt(n + f.kappa), X = new Float64Array(S * n);          // X[s*n + k]
   for (let s = 0; s < S; s++) for (let k = 0; k < n; k++) X[s * n + k] = x[k];
   for (let c = 0; c < n; c++) for (let k = 0; k < n; k++) { const v = sc * L[k * n + c]; X[(1 + c) * n + k] += v; X[(1 + n + c) * n + k] -= v; }
-  for (let s = 0; s < S; s++) if (project(X, s * n, P, n, fw)) f.projections++;
-  // F: normalize the directions (and round tiny negative values to zero).
+  // THE PLAIN MODEL IS UNCONSTRAINED in the original (tractography.cc builds Simple2T with constrained = free water, so
+  // Filter skips both Constrain calls): no projection there, the floor instead.
+  if (fw) for (let s = 0; s < S; s++) if (project(X, s * n, P, n, fw)) f.projections++;
+  // F: normalize the directions; free water: round tiny negative values to zero; plain: the floor.
   for (let s = 0; s < S; s++) {
     for (const o of [0, 5]) { const a = s * n + o, l = Math.hypot(X[a], X[a + 1], X[a + 2]) || 1; X[a] /= l; X[a + 1] /= l; X[a + 2] /= l; }
-    for (const i of fw ? [3, 4, 8, 9, 10] : [3, 4, 8, 9]) if (X[s * n + i] < 0 && X[s * n + i] >= -1e-4) X[s * n + i] = 0;
+    if (fw) { for (const i of [3, 4, 8, 9, 10]) if (X[s * n + i] < 0 && X[s * n + i] >= -1e-4) X[s * n + i] = 0; }
+    else for (const i of [3, 4, 8, 9]) X[s * n + i] = Math.max(X[s * n + i], LAMBDA_MIN_PLAIN);
   }
   const xh = new Float64Array(n);
   for (let s = 0; s < S; s++) for (let k = 0; k < n; k++) xh[k] += weights[s] * X[s * n + k];
@@ -248,7 +306,7 @@ export function filterStep(f: UkfFilter, x: Float64Array, P: Float64Array, z: Fl
   if (!Pnew) return false;
   for (let i = 0; i < n; i++) { let s = 0; for (let j = 0; j < n; j++) s += Pnew[i * n + j] * iv[j]; x[i] = s; }
   P.set(Pnew);
-  if (project(x, 0, W, n, fw)) f.projections++;
+  if (fw && project(x, 0, W, n, fw)) f.projections++;
   return true;
 }
 
@@ -370,7 +428,8 @@ export function trackUkf(data: UkfData, seeds: number[][], opts: UkfOptions = {}
       let a = unit(0), c = unit(5);
       if (a[0] * old[0] + a[1] * old[1] + a[2] * old[2] < 0) a = a.map((v) => -v);
       if (c[0] * old[0] + c[1] * old[1] + c[2] * old[2] < 0) c = c.map((v) => -v);
-      let la = [Math.max(x[3], 0), Math.max(x[4], 0)], lc = [Math.max(x[8], 0), Math.max(x[9], 0)];
+      const lo = fw ? 0 : LAMBDA_MIN_PLAIN;
+      let la = [Math.max(x[3], lo), Math.max(x[4], lo)], lc = [Math.max(x[8], lo), Math.max(x[9], lo)];
       const angle = (Math.acos(Math.max(-1, Math.min(1, a[0] * c[0] + a[1] * c[1] + a[2] * c[2]))) * 180) / Math.PI;
       const swap = () => {
         [a, c] = [c, a]; [la, lc] = [lc, la];

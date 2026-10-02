@@ -58,3 +58,21 @@ Deno.test({
     assert(r > 0.95, `density correlation ${r.toFixed(3)} (must be > 0.95)`);
   },
 });
+
+Deno.test({ name: "every variant of the card tracker's shader compiles (a shader that does not compile runs nothing, silently)", ignore: !navigator.gpu, fn: async () => {
+  const { wgsl } = await import("./ukf-gpu.ts");
+  const adapter = await navigator.gpu.requestAdapter();
+  if (!adapter) return;
+  const L = adapter.limits;
+  const device = await adapter.requestDevice({ requiredLimits: { maxComputeWorkgroupStorageSize: L.maxComputeWorkgroupStorageSize, maxStorageBuffersPerShaderStage: L.maxStorageBuffersPerShaderStage } });
+  const bad: string[] = [];
+  for (let code = 0; code < 64; code++) {
+    const b = [0, 1, 2, 3, 4, 5].map((k) => ((code >> k) & 1) === 1) as [boolean, boolean, boolean, boolean, boolean, boolean];
+    if (b[5] && !b[3]) continue;                          // parInverse needs wgInverse
+    const info = await device.createShaderModule({ code: wgsl(...b) }).getCompilationInfo();
+    const errs = info.messages.filter((m) => m.type === "error");
+    if (errs.length) bad.push(`${b.map(Number).join("")}: ${errs[0].lineNum}:${errs[0].linePos} ${errs[0].message.split("\n")[0]}`);
+  }
+  device.destroy();
+  if (bad.length) throw new Error(`shader variants that do not compile:\n${bad.join("\n")}`);
+}});

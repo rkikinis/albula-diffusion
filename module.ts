@@ -46,7 +46,7 @@ import { readMore, tnaLine, tractInfo, tractLabel, tractNote } from "./tract-inf
 import { faceNear as nearOnFace, isTumorName, matchesSearch, patientOf, pickAnatomy, tractGroupKey, TRACT_GROUPS, withoutLastRun } from "./face.ts";
 import { loadModel, type ModelJson, type TractCloudModel } from "./tractcloud/tractcloud.ts";
 import { nameAgainst, nameTracts, type Named } from "./tractcloud/name-tracts.ts";
-import { correctWithReversed, denseSeeds, MIN_NEAR_STREAMLINES, otherSide, sortByDistance, streamlineDistances, tractName, trackUkfSeeds, wholeBrainSeeds, type Sorted, type Structure, type TrackTiming } from "./planning.ts";
+import { correctWithReversed, denseSeeds, MIN_NEAR_STREAMLINES, otherSide, sortByDistance, stageText, streamlineDistances, tractName, trackUkfSeeds, wholeBrainSeeds, type Sorted, type StageTimes, type Structure, type TrackTiming } from "./planning.ts";
 import { tractColor, UNNAMED } from "./tractcloud/tract-colors.ts";
 import { seedsInSphere, trackFromSeeds, type Streamline, type TrackingOptions } from "./tracking.ts";
 import { DIFFUSION_REFERENCES } from "./references.ts";
@@ -58,8 +58,8 @@ import { trackPttParallel } from "./ptt.ts";
 interface Scan { browserId: string; name: string; frameIds: string[]; bValues: number[]; study?: string; patient?: string }
 /** What has been computed for a scan, kept while the scan is in the scene. */
 interface Computed { dwi: DiffusionSeries; fit: TensorFit; maxB: number; corrected: string; partnerId: string; faId?: string; colorFaId?: string; ukf?: UkfData; fod?: FodVolume }
-/** A reversed phase-encoding scan for a diffusion scan: b = 0 images on the same grid, same study. */
-interface Partner { id: string; name: string; frameIds: string[] }
+/** A reversed phase-encoding scan for a diffusion scan: b = 0 images of the same study, on its own grid (aligned by the scanner's coordinates). */
+interface Partner { id: string; name: string; frameIds: string[]; dims: number[]; ijkToRAS: number[] }
 /** A group of tracts. */
 interface TractGroup {
   id: number; name: string; scan: string; strands: Float32Array[]; visible: boolean; method: Method;
@@ -358,30 +358,44 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
   /** A transform on the scan or a segmentation: refused in plain words, not ignored (critic, finding 5). */
   const moved = (n: MrsonNode | undefined) => !!n && !isIdentity(worldForNode(n, live.nodes));
   /**
-   * THE REVERSED PHASE-ENCODING SCAN for a diffusion scan: another sequence (or single volume) of the same study, on the
-   * same grid, all of whose images are b = 0 -- the pair distortion correction needs (distortion.ts).
+   * THE REVERSED PHASE-ENCODING SCAN for a diffusion scan: another sequence (or single volume) of the same study, all of
+   * whose images are b = 0 -- the pair distortion correction needs (distortion.ts). Its slab may be placed differently
+   * (11 of ds001226's 29: 2.3 mm, 0.8°): it is then aligned by the scanner's coordinates (planning.ts resampleInto), as Mike
+   * Halle's pipeline does; until 2026-10-02 such a partner was not found at all. Near enough to be one: within 30 mm and 15°.
    */
   const partnerFor = (scan: Scan): Partner | undefined => {
     const ref = live.nodes.get(scan.frameIds[0]);
     if (!ref) return undefined;
-    const same = (n: MrsonNode) => JSON.stringify(n.dims) === JSON.stringify(ref.dims) && (n.ijkToRAS as number[]).every((v, i) => Math.abs(v - (ref.ijkToRAS as number[])[i]) < 1e-3)
-      && ((n.origin as Record<string, unknown> | undefined)?.studyInstanceUID === scan.study);
+    const R = ref.ijkToRAS as number[];
+    const same = (n: MrsonNode) => {
+      const P = n.ijkToRAS as number[] | undefined;
+      if (!P || (n.origin as Record<string, unknown> | undefined)?.studyInstanceUID !== scan.study) return false;
+      if (Math.hypot(P[3] - R[3], P[7] - R[7], P[11] - R[11]) > 30) return false;
+      for (const c of [0, 1, 2]) {
+        const a = [P[c], P[4 + c], P[8 + c]], b = [R[c], R[4 + c], R[8 + c]];
+        if ((a[0] * b[0] + a[1] * b[1] + a[2] * b[2]) / (Math.hypot(...a) * Math.hypot(...b)) < Math.cos(15 * Math.PI / 180)) return false;
+      }
+      return true;
+    };
     const b0 = (n: MrsonNode) => { const d = (n.origin as Record<string, unknown> | undefined)?.diffusion as { bValue?: number } | undefined; return d?.bValue !== undefined && d.bValue < 50; };
     for (const b of sequenceBrowsers(live)) {
       if (b.id === scan.browserId) continue;
       const { frames, sequence } = browserFrames(live, b.id);
       const nodes = frames.map((f) => live.nodes.get(f.node)).filter(Boolean) as MrsonNode[];
-      if (nodes.length && nodes.every((n) => same(n) && b0(n))) return { id: b.id, name: String(sequence?.name ?? b.name ?? "reversed scan"), frameIds: nodes.map((n) => n.id) };
+      if (nodes.length && nodes.every((n) => same(n) && b0(n))) return { id: b.id, name: String(sequence?.name ?? b.name ?? "reversed scan"), frameIds: nodes.map((n) => n.id), dims: nodes[0].dims as number[], ijkToRAS: nodes[0].ijkToRAS as number[] };
     }
-    for (const n of live.nodes.values()) if (n.type === "image" && !(n as { hidden?: boolean }).hidden && !scan.frameIds.includes(n.id) && same(n) && b0(n)) return { id: n.id, name: String(n.name ?? "reversed scan"), frameIds: [n.id] };
+    for (const n of live.nodes.values()) if (n.type === "image" && !(n as { hidden?: boolean }).hidden && !scan.frameIds.includes(n.id) && same(n) && b0(n)) return { id: n.id, name: String(n.name ?? "reversed scan"), frameIds: [n.id], dims: n.dims as number[], ijkToRAS: n.ijkToRAS as number[] };
     return undefined;
   };
   /** DISTORTION CORRECTION with the reversed scan (planning.ts correctWithReversed). */
-  async function correctDistortion(dwi: DiffusionSeries, partner: Partner): Promise<string> {
+  async function correctDistortion(dwi: DiffusionSeries, partner: Partner, times: StageTimes): Promise<string> {
     const vols: ArrayLike<number>[] = [];
     for (const id of partner.frameIds) { const n = live.nodes.get(id); if (!n) throw new Error("the reversed scan was taken out of the scene"); vols.push((await fetchZarrVolumeNative(live.blobBase(), n.zarr as ZarrDesc)).data); }
-    return await correctWithReversed(dwi, vols, partner.name, say);
+    return await correctWithReversed(dwi, vols, partner.name, say, { partnerGrid: { dims: partner.dims, ijkToRAS: partner.ijkToRAS }, times });
   }
+  /** The maps' own steps (read, distortion, tensor) from the last time they were made, for the next run's timing; taken once. */
+  let fitTimes: StageTimes | undefined;
+  const takeFitTimes = (): StageTimes => { const t = fitTimes ?? {}; fitTimes = undefined; return t; };
 
   // ── computing ─────────────────────────────────────────────────────────────────────────────────────────────────
   async function ensureFit(scan: Scan): Promise<Computed> {
@@ -404,14 +418,18 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     // The second opinion reads the directions before any correction touches the volumes (the correction moves voxels,
     // not directions); it compares b-values and directions only.
     check(scan, { ...dwi, volumes: [] });
-    const corrected = partner ? await correctDistortion(dwi, partner) : correct ? "not corrected (no reversed phase-encoding scan of this study is loaded)" : "not corrected (switched off)";
+    const times: StageTimes = { read: performance.now() - t0 };
+    const corrected = partner ? await correctDistortion(dwi, partner, times) : correct ? "not corrected (no reversed phase-encoding scan of this study is loaded)" : "not corrected (switched off)";
     const t1 = performance.now();
     say("Fitting the diffusion tensor…");
     await new Promise((r) => setTimeout(r, 0));
     const fit = fitTensors(dwi, { maxB: adv.maxB });
+    times.fit = performance.now() - t1;
+    times.total = performance.now() - t0;
+    fitTimes = times;
     const c: Computed = { dwi, fit, maxB: adv.maxB, corrected, partnerId: partner?.id ?? "" };
     computed.set(scan.browserId, c);
-    say(`Tensor fitted in ${((performance.now() - t0) / 1000).toFixed(1)} s (reading and distortion ${((t1 - t0) / 1000).toFixed(1)} s), from ${fit.used.length} volumes up to b = ${adv.maxB}; distortion ${corrected}.`);
+    say(`Maps made from ${fit.used.length} volumes up to b = ${adv.maxB}; distortion ${corrected}. ${stageText(times)}.`);
     return c;
   }
   const dropMaps = (c: Computed) => {
@@ -531,7 +549,6 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     lastTiming = timing;
     return out;
   }
-  const timingText = () => lastTiming ? ` (tracking: signal ${(lastTiming.data / 1000).toFixed(1)} s, seeds ${(lastTiming.prepare / 1000).toFixed(1)} s, card ${(lastTiming.gpu / 1000).toFixed(1)} s, fibers ${(lastTiming.assemble / 1000).toFixed(1)} s, page ${(lastTiming.between / 1000).toFixed(1)} s)` : "";
   /** PARALLEL TRANSPORT TRACKING on fiber distributions, in workers bundled with the extension (extension.json "workers").
    *  The distributions are kept with the scan's computations, so a second run tracks at once. */
   async function trackPtt(c: Computed, seedsRAS: number[][]): Promise<Float32Array[]> {
@@ -594,20 +611,29 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
   async function makeNamedTracts(scan: Scan, target: { seg: MrsonNode; labelValue: number; label: string }) {
     try {
       const c = await ensureFit(scan);
+      const times: StageTimes = takeFitTimes(), before = times.total ?? 0;
       const t0 = performance.now();
       const seeds = wholeBrainSeeds(c.fit);
+      times.seeds = performance.now() - t0;
       say(`Following tracts through the whole brain from ${seeds.length.toLocaleString()} starting points…`);
+      lastTiming = undefined;
       const sl = method === "ptt" ? await trackPtt(c, seeds) : await trackUkf(c, seeds);
       const t1 = performance.now();
+      times.track = t1 - t0 - times.seeds;
+      if (lastTiming) times.trackDetail = lastTiming;
       busy = "Naming tracts…"; render();
       const model = await tractCloud();
       tractCount = model.json.tracts.length;
       const named = await nameTracts(device, model, sl);
+      times.name = named.seconds * 1000;
+      const tDist = performance.now();
       busy = "Measuring distances…"; render();
       const z = await fetchZarrVolumeNative(live.blobBase(), target.seg.zarr as ZarrDesc), lab = z.data;
       const structure: Structure = { dims: target.seg.dims as number[], ijkToRAS: target.seg.ijkToRAS as number[], inside: (v) => Number(lab[v]) === target.labelValue };
       const dist = await streamlineDistances(structure, sl, withinMm + 2);
       const sorted = sortByDistance(model, named, dist, withinMm), nearTracts = sorted.near;
+      times.distances = performance.now() - tDist;
+      const tDraw = performance.now();
       // STILL WANTED? A scan removed while this ran leaves nothing behind (critic, 2026-10-01, finding 8; CONSTRAINTS).
       if (!scans().some((s) => s.browserId === scan.browserId)) return;
       // A NEW RUN REPLACES THE LAST ONE for this scan (critic, finding 5: a second press doubled every tract).
@@ -634,8 +660,10 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       if (rest.length) groups.push({ id: ++groupSeq, name: "Rest of the brain", scan: scan.browserId, strands: pick(rest), visible: false, method, unnamed: true, run: true });
       redraw3d();
       const t2 = performance.now();
+      times.draw = t2 - tDraw;
+      times.total = before + (t2 - t0);
       say(`${nearTracts.length} named tracts come within ${withinMm} mm of ${target.label} (at least ${MIN_NEAR_STREAMLINES} streamlines each)${sorted.faint.length ? `; ${sorted.faint.length} more come that close with fewer (listed in gray, hidden)` : ""}${unnamedNear.length ? `, and ${unnamedNear.length.toLocaleString()} streamlines no name fits` : ""}. ` +
-        `${sl.length.toLocaleString()} streamlines through the whole brain in ${((t1 - t0) / 1000).toFixed(1)} s, named in ${named.seconds.toFixed(1)} s (TractCloud), ${((t2 - t0) / 1000).toFixed(1)} s in all${method === "ukf" ? timingText() : ""}.`);
+        `${sl.length.toLocaleString()} streamlines through the whole brain. Step by step: ${stageText(times)}.`);
     } catch (e) { say(`Tracts could not be made: ${(e as Error).message}`); }
     finally { busy = ""; render(); }
   }
@@ -667,13 +695,21 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       }
       const all = [...run.sorted.near, ...run.sorted.far];
       const foot = [...want.values()].flatMap(({ tract, side }) => all.find((e) => e.tract === tract && e.side === side)?.idx ?? []).map((i) => run.sl[i]);
+      const times: StageTimes = takeFitTimes(), before = times.total ?? 0, ts = performance.now();
       const seeds = denseSeeds(foot, { dims: c.fit.dims, ijkToRAS: c.fit.ijkToRAS });
+      times.seeds = performance.now() - ts;
       const what = picked.length === 1 ? picked[0].name.replace(/, (right|left)/, "") : `${new Set(picked.map((g) => g.tract)).size} tracts`;
       say(`Adding lines to ${what} from ${seeds.length.toLocaleString()} starting points…`);
+      lastTiming = undefined;
+      const tt = performance.now();
       const sl2 = run.method === "ptt" ? await trackPtt(c, seeds) : await trackUkf(c, seeds);
+      times.track = performance.now() - tt;
+      if (lastTiming) times.trackDetail = lastTiming;
       busy = "Naming tracts…"; render();
       const model = await tractCloud();
       const r = await nameAgainst(device, model, run.sl, sl2);
+      times.name = r.added.seconds * 1000;
+      const tDist = performance.now();
       if (!scans().some((s) => s.browserId === scanId) || runs.get(scanId!) !== run) return;   // left, or run again, meanwhile
       let total = 0;
       busy = "Measuring distances…"; render();
@@ -710,9 +746,13 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
         const h = groups.find((x) => x.scan === scanId && x.run && x.tract === tract && x.side === sd), o = groups.find((x) => x.scan === scanId && x.run && x.tract === tract && x.side === otherSide(sd));
         if (h) h.otherSide = o ? o.strands.length : run.sorted.total(tract, otherSide(sd));
       }
+      times.distances = performance.now() - tDist;
+      const tDraw = performance.now();
       redraw3d();
       for (const k of want.keys()) run.added.add(k);
-      say(`${total.toLocaleString()} lines added to ${what}, both sides, from ${seeds.length.toLocaleString()} starting points, in ${((performance.now() - t0) / 1000).toFixed(1)} s.`);
+      times.draw = performance.now() - tDraw;
+      times.total = before + (performance.now() - t0);
+      say(`${total.toLocaleString()} lines added to ${what}, both sides, from ${seeds.length.toLocaleString()} starting points. Step by step: ${stageText(times)}.`);
     } catch (e) { say(`Lines could not be added: ${(e as Error).message}`); }
     finally { busy = ""; adding = false; render(); }
   }

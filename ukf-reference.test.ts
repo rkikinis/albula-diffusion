@@ -1,7 +1,7 @@
 // @full-tier -- the port against the ORIGINAL UKFTractography (Ron, 2026-10-01: "We will need it as test forward
 // looking"), on the reference data Contents/tools/ukf-reference.ts made (test-data "ukf-reference": PAT16, 2,000 seeds,
 // free water). Paired by seed point (fiber-compare.ts pairBySeed). As measured 2026-10-01 night, after the seed-FA fix:
-// every fiber of the original pairs, the port makes none the original does not, 815 of 838 ends within 0.1 mm. The test
+// every fiber of the original pairs, the port makes none the original does not, 828 of 838 ends within 0.1 mm (815 before the exact projection). The test
 // holds that line -- no worse than today -- and is tightened when the constraint step is settled (critic,
 // qa/2026-10-01-ukf-port-vs-original.md, finding 1).
 //   deno test -A --no-check --config ../../src/SlicerLive/deno.jsonc ukf-reference.test.ts
@@ -16,7 +16,8 @@ import { nrrdDecode, nrrdSplitHeader } from "albula";
 const R = testData("ukf-reference", "PAT16/") ?? ABSENT;
 const have = (() => { try { return Deno.statSync(R + "ukf.vtk").isFile; } catch { return false; } })();
 
-Deno.test({ name: "the port against the original UKFTractography, paired by seed point (PAT16, 2,000 seeds, free water)", ignore: !have, fn: async () => {
+/** The port on the reference's inputs, paired by seed point with the original's fibers in `vtk`. */
+async function compare(vtk: string, freeWater: boolean) {
   const dwi = await fromNrrdDwi(Deno.readFileSync(R + "dwi.nrrd"));
   // The mask as Contents/tools/ukf-reference.ts wrote it: one unsigned byte a voxel.
   const { f, body } = nrrdSplitHeader(Deno.readFileSync(R + "mask.nrrd"));
@@ -29,13 +30,30 @@ Deno.test({ name: "the port against the original UKFTractography, paired by seed
   const cof = (r: number, c: number) => { const rr = [0, 1, 2].filter((x) => x !== r), cc = [0, 1, 2].filter((x) => x !== c); return ((r + c) % 2 ? -1 : 1) * (A[rr[0]][cc[0]] * A[rr[1]][cc[1]] - A[rr[0]][cc[1]] * A[rr[1]][cc[0]]); };
   const inv = [0, 1, 2].map((i) => [0, 1, 2].map((j) => cof(j, i) / det));
   const ijk = starts.map((p) => { const q = [p[0] - M[3], p[1] - M[7], p[2] - M[11]]; return [0, 1, 2].map((i) => inv[i][0] * q[0] + inv[i][1] * q[1] + inv[i][2] * q[2]); });
-  const original = readVtkFibers(Deno.readTextFileSync(R + "ukf.vtk")).map((f) => new Float32Array(f));
-  const port = trackUkf(prepareUkfData(dwi, mask), ijk, { freeWater: true }).fibers.map((f) => f.points);
+  const original = readVtkFibers(Deno.readTextFileSync(R + vtk)).map((f) => new Float32Array(f));
+  const port = trackUkf(prepareUkfData(dwi, mask), ijk, { freeWater }).fibers.map((f) => f.points);
   const r = pairBySeed(original, port, starts);
   const within = (t: number) => r.ends.filter((x) => x < t).length;
+  return { r, within };
+}
+
+Deno.test({ name: "the port against the original UKFTractography, paired by seed point (PAT16, 2,000 seeds, free water)", ignore: !have, fn: async () => {
+  const { r, within } = await compare("ukf.vtk", true);
   console.log(`original vs port: ${r.pairs} pairs, only original ${r.onlyA}, only port ${r.onlyB}; ends within 0.001 mm ${within(0.001)}, 0.1 mm ${within(0.1)}, worst ${Math.max(...r.ends).toFixed(1)} mm`);
   assertEquals(r.onlyA, 0, "every fiber of the original has the port's from the same seed");
   assertEquals(r.onlyB, 0, "the port makes no fiber the original does not");
   assert(r.pairs >= 838, `pairs ${r.pairs}`);
-  assert(within(0.1) >= 815, `ends within 0.1 mm: ${within(0.1)} (815 on 2026-10-01)`);
+  // 815 with the grow-only active set (2026-10-01); 828 with the exact projection (2026-10-02; the critic's finding 1
+  // predicted 828). The last 10 are the original's own solver (finding 5), LGPL-3 and not ported.
+  assert(within(0.1) >= 828, `ends within 0.1 mm: ${within(0.1)} (828 on 2026-10-02)`);
+  assert(Math.max(...r.ends) < 14, `worst end ${Math.max(...r.ends).toFixed(1)} mm (13.3 on 2026-10-02)`);
+}});
+
+const havePlain = (() => { try { return Deno.statSync(R + "ukf-plain.vtk").isFile; } catch { return false; } })();
+Deno.test({ name: "plain two-tensor mode against the original (PAT16; Simple2T: unconstrained, eigenvalue floor 100)", ignore: !havePlain, fn: async () => {
+  const { r, within } = await compare("ukf-plain.vtk", false);
+  console.log(`original vs port, plain: ${r.pairs} pairs, only original ${r.onlyA}, only port ${r.onlyB}; ends within 0.001 mm ${within(0.001)}, 0.1 mm ${within(0.1)}, worst ${Math.max(...r.ends).toFixed(2)} mm`);
+  assertEquals(r.onlyA, 0); assertEquals(r.onlyB, 0);
+  // 358 of 822 before (floor 0, projected); the critic's patched copy reached 822 of 822, largest 0.03 mm.
+  assert(within(0.1) >= 820, `plain: ends within 0.1 mm ${within(0.1)} of ${r.pairs}`);
 }});

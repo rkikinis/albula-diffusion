@@ -22,12 +22,15 @@ This extension adds diffusion MRI, from the scanner's files to the tracts near a
   correlating 0.97; the test requires 2 mm and 0.95), on a synthetic
   crossing, and for anatomical plausibility on PAT16. Against the original UKFTractography (v2.1, built from source;
   `Contents/tools/ukf-reference.ts` in the workspace) from the same starting points on PAT16, paired by seed point: all
-  838 of the original's fibers pair up, and 815 (97%) end within 0.1 mm of the port's; the port makes no fiber the
-  original does not, since it computes a seed's FA as the original does for the simple model (the mean of the two minor
-  eigenvalues). The rest part where the filter's limits are in force: the port and the original keep the estimate inside
-  them by different methods (the critic, `qa/2026-10-01-ukf-port-vs-original.md`, finding 1) — not round-off. The
-  graphics-card version, which the app runs, agrees with the original less closely (733 of 838 within 0.1 mm; finding
-  3). Single-tensor tracking too.
+  838 of the original's fibers pair up, and 828 (99%) end within 0.1 mm of the port's (802 within 0.001 mm; the worst
+  13.3 mm); the port makes no fiber the original does not, since it computes a seed's FA as the original does for the
+  simple model (the mean of the two minor eigenvalues). The filter's limits (w in [0, 1], eigenvalues ≥ 0) are kept by
+  the EXACT projection in the filter's metric (2026-10-02; it was 815 with an approximate one: the critic,
+  `qa/2026-10-01-ukf-port-vs-original.md`, finding 1). The last 10 differ because the original's own solver (QuadProg++,
+  LGPL-3, not ported) is not always exact (finding 5). Plain two-tensor mode (no free water) follows the original's
+  Simple2T — unconstrained, eigenvalue floor 100 — and matches it: 822 of 822 fibers within 0.1 mm, the worst 0.01 mm.
+  The graphics-card version, which the app runs, has the same exact projection and agrees with the original on 741 of
+  838 within 0.1 mm (804 within 1 mm; it was 733 and 794): the rest is its 32-bit arithmetic. Single-tensor tracking too.
 - **Tract names**: TractCloud (Xue, Zhang, O'Donnell et al., MICCAI 2023) written from the paper as a WebGPU network;
   on the reference case (5,120 UKF streamlines of PAT16) every layer agrees with the original running in PyTorch within
   4e-6, and all 5,120 streamlines get the same cluster as the original (the test allows 0.2%).

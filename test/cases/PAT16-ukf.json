@@ -1,116 +1,128 @@
 {
- "about": "PAT16 of OpenNeuro ds001226 (CC0), two-tensor UKF, the case library's stored result (Contents/data/tractcloud/cases/PAT16.json, 2026-10-01). The regression test (cases.regression.test.ts) reruns the case and compares; a deliberate change that moves these numbers rewrites this file in the same commit, with the reason. Rewritten 2026-10-01 night: the seed's FA computed as the original UKFTractography does for the simple model (the mean of the two minor eigenvalues; ukf.ts), which tracks fewer seeds -- from the same seeds the port now tracks the same seeds as the original (838 fibers each).",
+ "about": "PAT16 of OpenNeuro ds001226 (CC0), two-tensor UKF, the case library's stored result (Contents/data/tractcloud/cases/PAT16.json, 2026-10-01). The regression test (cases.regression.test.ts) reruns the case and compares; a deliberate change that moves these numbers rewrites this file in the same commit, with the reason. Rewritten 2026-10-01 night: the seed's FA computed as the original UKFTractography does for the simple model (the mean of the two minor eigenvalues; ukf.ts), which tracks fewer seeds -- from the same seeds the port now tracks the same seeds as the original (838 fibers each). Rewritten 2026-10-02: whole-brain seeds start only inside the brain (DIPY's median_otsu mask; the head mask put a third of them in the scalp), 16,000 of them (25,000 before; about the same count of streamlines); tracking still runs inside the head mask (median_otsu cuts the top of the brain); and the tracker's constraint projection is exact (the card's too). Judged against the noise floors (agreement.ts), the near-tumor list changed as much as a new seed draw changes it.",
  "id": "PAT16",
  "method": "ukf",
- "streamlines": 10705,
+ "streamlines": 10828,
  "near8": [
   {
    "tract": "superficial frontal, right",
-   "within8": 162
+   "within8": 150
   },
   {
    "tract": "thalamo-frontal, right",
-   "within8": 112
+   "within8": 113
   },
   {
    "tract": "thalamo-parietal, right",
-   "within8": 62
-  },
-  {
-   "tract": "inferior longitudinal fasciculus, right",
-   "within8": 57
+   "within8": 88
   },
   {
    "tract": "corpus callosum 2",
-   "within8": 51
+   "within8": 77
   },
   {
    "tract": "striato-frontal, right",
-   "within8": 50
-  },
-  {
-   "tract": "superior longitudinal fasciculus II, right",
-   "within8": 50
+   "within8": 54
   },
   {
    "tract": "middle longitudinal fasciculus, right",
-   "within8": 44
+   "within8": 41
   },
   {
-   "tract": "superficial temporal, right",
-   "within8": 32
+   "tract": "superior longitudinal fasciculus II, right",
+   "within8": 35
+  },
+  {
+   "tract": "inferior longitudinal fasciculus, right",
+   "within8": 31
   },
   {
    "tract": "corpus callosum 4",
-   "within8": 30
-  },
-  {
-   "tract": "corona radiata frontal, right",
-   "within8": 28
-  },
-  {
-   "tract": "superior longitudinal fasciculus III, right",
-   "within8": 22
-  },
-  {
-   "tract": "arcuate fasciculus, right",
-   "within8": 19
+   "within8": 27
   },
   {
    "tract": "corticospinal tract, right",
-   "within8": 17
+   "within8": 26
   },
   {
-   "tract": "corpus callosum 3",
-   "within8": 13
+   "tract": "corona radiata frontal, right",
+   "within8": 25
   },
   {
-   "tract": "corpus callosum 6",
-   "within8": 13
+   "tract": "superficial parietal, right",
+   "within8": 23
   },
   {
-   "tract": "corpus callosum 1",
-   "within8": 13
+   "tract": "superficial temporal, right",
+   "within8": 23
+  },
+  {
+   "tract": "superficial occipital-temporal, right",
+   "within8": 23
+  },
+  {
+   "tract": "striato-parietal, right",
+   "within8": 18
   },
   {
    "tract": "posterior limb of internal capsule, right",
+   "within8": 14
+  },
+  {
+   "tract": "corpus callosum 1",
+   "within8": 14
+  },
+  {
+   "tract": "striato-occipital, right",
+   "within8": 13
+  },
+  {
+   "tract": "cortico-ponto-cerebellar, right",
+   "within8": 12
+  },
+  {
+   "tract": "superior longitudinal fasciculus III, right",
    "within8": 12
   },
   {
    "tract": "thalamo-temporal, right",
-   "within8": 9
-  },
-  {
-   "tract": "cortico-ponto-cerebellar, right",
-   "within8": 9
-  },
-  {
-   "tract": "striato-parietal, right",
-   "within8": 8
-  },
-  {
-   "tract": "uncinate fasciculus, left",
-   "within8": 6
-  },
-  {
-   "tract": "superficial parietal-temporal, right",
-   "within8": 8
-  },
-  {
-   "tract": "thalamo-occipital, right",
    "within8": 12
   },
   {
-   "tract": "striato-frontal, left",
+   "tract": "corpus callosum 5",
    "within8": 11
   },
   {
-   "tract": "superficial occipital-temporal, right",
-   "within8": 5
+   "tract": "arcuate fasciculus, right",
+   "within8": 10
+  },
+  {
+   "tract": "corpus callosum 3",
+   "within8": 9
+  },
+  {
+   "tract": "superficial parietal-temporal, right",
+   "within8": 9
+  },
+  {
+   "tract": "corona radiata parietal, right",
+   "within8": 6
+  },
+  {
+   "tract": "cingulum bundle, right",
+   "within8": 15
+  },
+  {
+   "tract": "uncinate fasciculus, left",
+   "within8": 7
   },
   {
    "tract": "thalamo-frontal, left",
-   "within8": 9
+   "within8": 5
+  },
+  {
+   "tract": "thalamo-occipital, right",
+   "within8": 16
   }
  ]
 }
