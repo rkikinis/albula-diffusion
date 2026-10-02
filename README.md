@@ -15,7 +15,11 @@ This extension adds diffusion MRI, from the scanner's files to the tracts near a
 - **Writing** a diffusion series as one Enhanced MR DICOM object, and importing BIDS datasets (`dwi/`).
 - **Maps**: the tensor fit (processor and graphics card), FA and Color FA on the slices; **distortion correction**
   from a reversed phase-encoding pair, written from the papers (Chang & Fitzpatrick 1992; Ruthotto et al. 2012;
-  Macdonald & Ruthotto 2016).
+  Macdonald & Ruthotto 2016). Checked against FSL's topup (FSL 6.0.7.23, a check tool only) on the development
+  cases where the head held still between the two scans: the fields correlate 0.93-0.97, differ by 0.30-0.39 mm at the
+  median and 2.0-2.9 mm at the 99th percentile -- as Mike Halle's own version does -- in about 1 s against topup's 190 s
+  (`distortion-topup.test.ts`). Motion between the two scans is not modeled; topup models it, and on PAT03 (1.8°) the
+  two fields part.
 - **Tracking**: UKF two-tensor free-water tractography — a port of UKFTractography (Rathi and colleagues, Brigham and
   Women's Hospital; `LICENSE-UKF.txt`) to TypeScript and to WebGPU. The graphics-card version is checked against the
   processor version on PAT16 (measured: 90% of fiber ends within 0.06 mm of the processor version's, tract-density maps
