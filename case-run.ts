@@ -30,7 +30,7 @@ export interface CaseResult {
 }
 
 /** Run case `id` of the BIDS dataset at `ds` (ds001226's layout: ses-preop, acq-AP / acq-PA, derivatives/tumor_masks). */
-export async function runCase(ds: string, id: string, device: GPUDevice, model: TractCloudModel, method: "ukf" | "ptt" = "ukf", opts: { pttWorkerUrl?: URL; csdWorkerUrl?: URL } = {}): Promise<CaseResult> {
+export async function runCase(ds: string, id: string, device: GPUDevice, model: TractCloudModel, method: "ukf" | "ptt" = "ukf", opts: { pttWorkerUrl?: URL; csdWorkerUrl?: URL; /** The card tracker's options (checking variants, e.g. onePass). */ ukf?: Record<string, unknown> } = {}): Promise<CaseResult> {
   const t0 = performance.now(), p = `${ds}/sub-${id}/ses-preop`;
   const rd = (f: string) => Deno.readFileSync(`${p}/${f}`), tx = (f: string) => Deno.readTextFileSync(`${p}/${f}`);
   const dwi = fromFsl(await parseNiftiVolumes(rd(`dwi/sub-${id}_ses-preop_acq-AP_dwi.nii.gz`)), tx(`dwi/sub-${id}_ses-preop_acq-AP_dwi.bval`), tx(`dwi/sub-${id}_ses-preop_acq-AP_dwi.bvec`));
@@ -44,7 +44,7 @@ export async function runCase(ds: string, id: string, device: GPUDevice, model: 
     const fod = await csdVolume(dwi, fit.mask, k, opts.csdWorkerUrl ? { workerUrl: opts.csdWorkerUrl } : {});
     csdSeconds = fod.seconds;
     sl = await trackPttParallel(fod, wholeBrainSeeds(fit), opts.pttWorkerUrl ? { workerUrl: opts.pttWorkerUrl } : {});
-  } else sl = await trackUkfSeeds(device, prepareUkfData(dwi, fit.mask), wholeBrainSeeds(fit), CASE_DEFAULTS.stopFA);
+  } else sl = await trackUkfSeeds(device, prepareUkfData(dwi, fit.mask), wholeBrainSeeds(fit), CASE_DEFAULTS.stopFA, undefined, undefined, opts.ukf ?? {});
   const t2 = performance.now();
   const named = await nameTracts(device, model, sl);
   const OTHER = model.json.tracts.length - 1;

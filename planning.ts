@@ -91,12 +91,12 @@ export function wholeBrainSeeds(fit: TensorFit): number[][] {
  *  (drawing, the progress shown). */
 export interface TrackTiming { prepare: number; gpu: number; assemble: number; between: number }
 
-export async function trackUkfSeeds(device: GPUDevice, data: UkfData, seedsRAS: number[][], stoppingFA: number, onBatch?: (done: number) => void | Promise<void>, timing?: TrackTiming): Promise<Float32Array[]> {
+export async function trackUkfSeeds(device: GPUDevice, data: UkfData, seedsRAS: number[][], stoppingFA: number, onBatch?: (done: number) => void | Promise<void>, timing?: TrackTiming, gpuOpts: Partial<Parameters<typeof trackUkfGpu>[3]> = {}): Promise<Float32Array[]> {
   const R = invAffine(data.ijkToRAS);
   const ijk = seedsRAS.map(([x, y, z]) => [R[0] * x + R[1] * y + R[2] * z + R[3], R[4] * x + R[5] * y + R[6] * z + R[7], R[8] * x + R[9] * y + R[10] * z + R[11]]);
   const out: Float32Array[] = [], BATCH = 2000;
   for (let s = 0; s < ijk.length; s += BATCH) {
-    const r = await trackUkfGpu(device, data, ijk.slice(s, s + BATCH), { stoppingFA });
+    const r = await trackUkfGpu(device, data, ijk.slice(s, s + BATCH), { ...gpuOpts, stoppingFA });
     for (const fb of r.fibers) out.push(fb.points);
     const t = performance.now();
     await onBatch?.(Math.min(1, (s + BATCH) / ijk.length));
