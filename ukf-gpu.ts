@@ -30,7 +30,7 @@ import { seedTensor, signalAt } from "./ukf.ts";
 const N = 11, S = 2 * N + 1, STRIDE = 264, MAXG = 192;
 
 /** The shader; `sig32`: the signal as 32-bit floats (the processor's precision) or as rounded 16-bit pairs. */
-const wgsl = (sig32: boolean, chol1 = false, pre = false, wgInv = false, onePass = false) => /* wgsl */ `
+const wgsl = (sig32: boolean, chol1 = false, pre = false, wgInv = false, onePass = false, parInv = false) => /* wgsl */ `
 const N: u32 = 11u;
 const S: u32 = 23u;
 const MAXG: u32 = ${MAXG}u;
@@ -104,21 +104,59 @@ fn predict(xv: array<f32, 11>, q: u32) -> f32 {
 }
 
 // The same model from the per-sigma-point values (spA, spB, spL): the same operations in the same order as predict.
-fn predictPre(t: u32, q: u32) -> f32 {
-  let g = grad[q];
+// The gradient and the free-water term (which does not depend on the sigma point) come from the caller, once per
+// gradient instead of once per sigma point -- the same values (2026-10-01 night).
+fn predictPre(t: u32, g: vec4<f32>, fw: f32) -> f32 {
   let bq = g.w * 1e-3;
   let a = spA[t]; let b = spB[t]; let l = spL[t];
   let c1 = dot(g.xyz, a.xyz); let c2 = dot(g.xyz, b.xyz);
   let w = a.w;
   let tt = 0.5 * exp(-bq * (l.y + (l.x - l.y) * c1 * c1)) + 0.5 * exp(-bq * (l.w + (l.z - l.w) * c2 * c2));
-  return w * tt + (1.0 - w) * exp(-g.w * 0.003);
+  return w * tt + (1.0 - w) * fw;
 }
 
 // SYMMETRIC POSITIVE INVERSE THROUGH CHOLESKY (A <- A⁻¹), as the processor's spdInverse (ukf.ts) -- one thread, in its
 // own memory (11×11: a few hundred multiplications), the others wait. It replaced an in-place Gauss-Jordan without
 // pivoting (2026-09-30) as the standard stable method for symmetric positive matrices; the card/processor difference
 // then being chased turned out to be the projection's metric (metricScale), not the inversion. All 64 threads must call it.
-fn invertA(lid: u32) {
+${parInv ? `fn invertA(lid: u32) {
+  // IN PARALLEL (parInv, 2026-10-01 night): the factor in one thread (as below), then one column of its inverse per
+  // thread and the product's entries over all threads -- each entry computed by the same operations in the same order
+  // as the one-thread version, while 63 threads no longer wait through two 11×11 inversions a step.
+  if (lid == 0u) {
+    for (var j = 0u; j < N; j++) {
+      var s = A[j * N + j];
+      for (var k = 0u; k < j; k++) { s -= L[j * N + k] * L[j * N + k]; }
+      let d = sqrt(max(s, 1e-30));
+      L[j * N + j] = d;
+      for (var i = j + 1u; i < N; i++) {
+        var t = A[i * N + j];
+        for (var k = 0u; k < j; k++) { t -= L[i * N + k] * L[j * N + k]; }
+        L[i * N + j] = t / d;
+      }
+    }
+  }
+  workgroupBarrier();
+  if (lid < N) {
+    let j = lid;
+    B[j * N + j] = 1.0 / L[j * N + j];
+    for (var i = j + 1u; i < N; i++) {
+      var s = 0.0;
+      for (var k = j; k < i; k++) { s -= L[i * N + k] * B[k * N + j]; }
+      B[i * N + j] = s / L[i * N + i];
+    }
+  }
+  workgroupBarrier();
+  for (var e = lid; e < 121u; e += 64u) {
+    let i = e / N; let j = e % N;
+    if (j <= i) {
+      var s = 0.0;
+      for (var k = i; k < N; k++) { s += B[k * N + i] * B[k * N + j]; }
+      A[i * N + j] = s; A[j * N + i] = s;
+    }
+  }
+  workgroupBarrier();
+}` : `fn invertA(lid: u32) {
   if (lid == 0u) {
     ${wgInv ? "" : `var Lf: array<f32, 121>;
     var Li: array<f32, 121>;`}
@@ -150,7 +188,7 @@ fn invertA(lid: u32) {
     }
   }
   workgroupBarrier();
-}
+}`}
 
 // THE METRIC'S UNITS (critic, 2026-09-30, qa/2026-09-30-ukf-gpu-numerics.md, finding 1). The sigma points are projected in
 // the metric P (the original's Constrain(X, p)), and a covariance used as a metric does NOT survive a change of units:
@@ -343,9 +381,10 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) l
     // column Σ w·Xd·(Z − zm) equals Σ w·Xd·Z, since the weights sum to one and the points are centered (Σ w·Xd = 0), so
     // the predictions are not kept: they are summed as they come, into three vec4 accumulators.
     for (var q = lid; q < G; q += 64u) {
+      let gq = grad[q]; let fwq = exp(-gq.w * 0.003);
       var zm = 0.0; var p0 = vec4<f32>(0.0); var p1 = vec4<f32>(0.0); var p2 = vec4<f32>(0.0);
       for (var t = 0u; t < S; t++) {
-        let wz = wgt(t) * predictPre(t, q);
+        let wz = wgt(t) * predictPre(t, gq, fwq);
         zm += wz;
         let b = t * N;
         p0 += wz * vec4<f32>(X[b], X[b + 1u], X[b + 2u], X[b + 3u]);
@@ -358,10 +397,11 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) l
         Ht[i * MAXG + q] = dot(vec4<f32>(A[r], A[r + 1u], A[r + 2u], A[r + 3u]), p0) + dot(vec4<f32>(A[r + 4u], A[r + 5u], A[r + 6u], A[r + 7u]), p1) + dot(vec4<f32>(A[r + 8u], A[r + 9u], A[r + 10u], 0.0), p2);
       }
     }` : `    for (var q = lid; q < G; q += 64u) {
+      ${pre ? "let gq = grad[q]; let fwq = exp(-gq.w * 0.003);" : ""}
       var Zs: array<f32, 23>;
       var zm = 0.0;
       for (var t = 0u; t < S; t++) {
-        ${pre ? `Zs[t] = predictPre(t, q);` : `var xv: array<f32, 11>;
+        ${pre ? `Zs[t] = predictPre(t, gq, fwq);` : `var xv: array<f32, 11>;
         for (var k = 0u; k < N; k++) { xv[k] = X[t * N + k] + xh[k]; }
         Zs[t] = predict(xv, q);`} zm += wgt(t) * Zs[t];
       }
@@ -477,7 +517,7 @@ export interface GpuUkfResult {
 }
 
 /** Track from every seed (voxel coordinates) in both directions on the graphics card. */
-export async function trackUkfGpu(device: GPUDevice, data: UkfData, seeds: number[][], opts: UkfOptions & { batch?: number; stepsPerDispatch?: number; /** The Cholesky in one thread (one barrier) instead of column by column (22). */ cholOneThread?: boolean; /** The signal model's per-sigma-point values computed once a step, not once per gradient. */ prePredict?: boolean; /** The inversions' scratch in workgroup memory. */ wgInverse?: boolean; /** The per-gradient sums in one pass, without per-thread arrays (needs prePredict). */ onePass?: boolean; /** Pack the signal and compile the shader every call, as before 2026-10-01 night (benchmarking only). */ noCache?: boolean; /** Checking only: stop after one dispatch and return the states (with stepsPerDispatch 1: one filter step). */ debugOneDispatch?: boolean } = {}): Promise<GpuUkfResult> {
+export async function trackUkfGpu(device: GPUDevice, data: UkfData, seeds: number[][], opts: UkfOptions & { batch?: number; stepsPerDispatch?: number; /** The Cholesky in one thread (one barrier) instead of column by column (22). */ cholOneThread?: boolean; /** The signal model's per-sigma-point values computed once a step, not once per gradient. */ prePredict?: boolean; /** The inversions' scratch in workgroup memory. */ wgInverse?: boolean; /** The per-gradient sums in one pass, without per-thread arrays (needs prePredict). */ onePass?: boolean; /** The two inversions a step in parallel over the workgroup (needs wgInverse). */ parInverse?: boolean; /** Pack the signal and compile the shader every call, as before 2026-10-01 night (benchmarking only). */ noCache?: boolean; /** Checking only: stop after one dispatch and return the states (with stepsPerDispatch 1: one filter step). */ debugOneDispatch?: boolean } = {}): Promise<GpuUkfResult> {
   const t0 = performance.now();
   if ((opts.freeWater ?? true) === false) throw new Error("the graphics-card UKF runs the free-water model only (ukf.ts runs both)");
   const G = data.G;
@@ -549,14 +589,18 @@ export async function trackUkfGpu(device: GPUDevice, data: UkfData, seeds: numbe
 
   const mk = (d: ArrayBufferView, usage: number) => { const b = device.createBuffer({ size: Math.max(16, Math.ceil(d.byteLength / 4) * 4), usage: usage | GPUBufferUsage.COPY_DST }); device.queue.writeBuffer(b, 0, d.buffer, d.byteOffset, d.byteLength); return b; };
   // THE DEFAULTS, from the Safari benchmark (2026-10-01 night; WebKit runs Albula's window): the signal model's values
-  // once a step and the inversions' scratch in workgroup memory -- the same fibers bit for bit, the card 23% faster in
-  // WebKit (PAT16's 2,000 reference seeds: 2.68-2.98 s -> 2.08-2.17 s). One pass (37%) changes the fibers at rounding
-  // level and stays off until it is checked on more cases.
+  // once a step (its free-water term once a gradient), the inversions' scratch in workgroup memory, and the inversions in
+  // parallel -- the same fibers bit for bit in Deno, the card about half the time in WebKit (PAT16's 2,000 reference
+  // seeds: 2.68-2.98 s -> 1.40 s). One pass (1.04 s) changes the fibers at rounding level and stays off until it is
+  // checked on more cases.
   const pre = (opts.prePredict ?? true) || !!opts.onePass, wgInv = opts.wgInverse ?? true;
-  const pkey = `${sig32}|${opts.cholOneThread ? 1 : 0}|${pre ? 1 : 0}|${wgInv ? 1 : 0}|${opts.onePass ? 1 : 0}`;
+  // The two inversions a step in parallel (2026-10-01 night, Safari: 2.01-2.07 s -> 1.40 s; the same fibers bit for bit
+  // in Deno): on with the workgroup-memory scratch it needs.
+  const parInv = wgInv && (opts.parInverse ?? true);
+  const pkey = `${sig32}|${opts.cholOneThread ? 1 : 0}|${pre ? 1 : 0}|${wgInv ? 1 : 0}|${opts.onePass ? 1 : 0}|${parInv ? 1 : 0}`;
   let pipeline = opts.noCache ? undefined : pipeCache.get(device)?.get(pkey);
   if (!pipeline) {
-    pipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: wgsl(sig32, !!opts.cholOneThread, pre, wgInv, !!opts.onePass) }), entryPoint: "main" } });
+    pipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: wgsl(sig32, !!opts.cholOneThread, pre, wgInv, !!opts.onePass, parInv) }), entryPoint: "main" } });
     if (!opts.noCache) { const m = pipeCache.get(device) ?? new Map(); m.set(pkey, pipeline); pipeCache.set(device, m); }
   }
   const tPrep = performance.now();
