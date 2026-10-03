@@ -315,6 +315,19 @@ export function applyField(fit: FieldFit, image: ArrayLike<number>, sign: 1 | -1
   return out;
 }
 
+/** A field given at cell centers (voxels along the axis, x fastest) as a FieldFit, so applyField can apply a field made
+ *  elsewhere -- topup's, to check the applying against applytopup (distortion-apply.test.ts). Each inner face takes the
+ *  mean of its two cells, an end face its one cell; fieldAtCenters of the result is that field smoothed by one face. */
+export function fieldFromCenters(dims: [number, number, number], axis: 0 | 1 | 2, c: ArrayLike<number>): FieldFit {
+  const g = grid(dims, axis), F = g.m + 1, b = new Float32Array(g.lines * F);
+  for (let l = 0; l < g.lines; l++) {
+    const at = (q: number) => c[g.start[l] + q * g.stride];
+    b[l * F] = at(0); b[l * F + g.m] = at(g.m - 1);
+    for (let q = 1; q < g.m; q++) b[l * F + q] = 0.5 * (at(q - 1) + at(q));
+  }
+  return { b, dims, axis, levels: [], ms: 0 };
+}
+
 /** The field at cell centers (voxels along the axis), x fastest -- for display and for reporting in Hz or mm. */
 export function fieldAtCenters(fit: FieldFit): Float32Array {
   const g = grid(fit.dims, fit.axis), F = g.m + 1, out = new Float32Array(fit.dims[0] * fit.dims[1] * fit.dims[2]);

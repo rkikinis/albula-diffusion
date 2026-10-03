@@ -18,10 +18,7 @@ const device = adapter && L ? await adapter.requestDevice({ requiredLimits: { ma
 const D = testData("openneuro-ds001226", "sub-PAT16/ses-preop/dwi") ?? ABSENT;
 const HAVE = (() => { try { Deno.statSync(`${D}sub-PAT16_ses-preop_acq-AP_dwi.nii.gz`); return true; } catch { return false; } })();
 
-Deno.test({
-  name: "UKF: the graphics card's fibers agree with the processor's (PAT16, 300 seeds)",
-  ignore: !device || !HAVE,
-  fn: async () => {
+async function compare(freeWater: boolean) {
     const I = `${D}sub-PAT16_ses-preop_acq-AP_dwi`;
     const dwi = fromFsl(await parseNiftiVolumes(Deno.readFileSync(`${I}.nii.gz`)), Deno.readTextFileSync(`${I}.bval`), Deno.readTextFileSync(`${I}.bvec`));
     const fit = fitTensors(dwi);
@@ -31,7 +28,7 @@ Deno.test({
       if (fit.mask[v] && fit.fa[v] > 0.25 && Math.abs(i - nx / 2) < 15 && Math.abs(j - ny / 2) < 15 && Math.abs(k - nz / 2) < 10) seeds.push([i, j, k]);
     }
     const S = seeds.slice(0, 300), data = prepareUkfData(dwi, fit.mask);
-    const cpu = trackUkf(data, S), card = await trackUkfGpu(device!, data, S);
+    const cpu = trackUkf(data, S, { freeWater }), card = await trackUkfGpu(device!, data, S, { freeWater });
     // Same seeds accepted.
     assert(Math.abs(cpu.fibers.length - card.fibers.length) <= 1, `fibers: processor ${cpu.fibers.length}, card ${card.fibers.length}`);
     // Where the fibers end (per seed, either orientation of the fiber).
@@ -53,11 +50,14 @@ Deno.test({
     let n = 0, sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0;
     for (let v = 0; v < x.length; v++) { if (!x[v] && !y[v]) continue; n++; sx += x[v]; sy += y[v]; sxx += x[v] ** 2; syy += y[v] ** 2; sxy += x[v] * y[v]; }
     const r = (n * sxy - sx * sy) / Math.sqrt((n * sxx - sx * sx) * (n * syy - sy * sy));
-    console.log(`  ${card.fibers.length} fibers; 90% of ends within ${end90.toFixed(2)} mm; density correlation ${r.toFixed(3)}; card ${(card.ms.total / 1000).toFixed(1)} s, processor ${(cpu.ms / 1000).toFixed(1)} s`);
+    console.log(`  ${freeWater ? "free water" : "plain two-tensor"}: ${card.fibers.length} fibers; 90% of ends within ${end90.toFixed(2)} mm; density correlation ${r.toFixed(3)}; card ${(card.ms.total / 1000).toFixed(1)} s, processor ${(cpu.ms / 1000).toFixed(1)} s`);
     assert(end90 < 2, `90% of fiber ends within ${end90.toFixed(2)} mm (must be < 2)`);
     assert(r > 0.95, `density correlation ${r.toFixed(3)} (must be > 0.95)`);
-  },
-});
+}
+
+Deno.test({ name: "UKF: the graphics card's fibers agree with the processor's (PAT16, 300 seeds)", ignore: !device || !HAVE, fn: () => compare(true) });
+// THE PLAIN TWO-TENSOR MODEL (2026-10-03; the ORG atlas behind the tract names was tracked with it): the same check.
+Deno.test({ name: "UKF, plain two-tensor: the graphics card's fibers agree with the processor's (PAT16, 300 seeds)", ignore: !device || !HAVE, fn: () => compare(false) });
 
 Deno.test({ name: "every variant of the card tracker's shader compiles (a shader that does not compile runs nothing, silently)", ignore: !navigator.gpu, fn: async () => {
   const { wgsl } = await import("./ukf-gpu.ts");
@@ -66,9 +66,10 @@ Deno.test({ name: "every variant of the card tracker's shader compiles (a shader
   const L = adapter.limits;
   const device = await adapter.requestDevice({ requiredLimits: { maxComputeWorkgroupStorageSize: L.maxComputeWorkgroupStorageSize, maxStorageBuffersPerShaderStage: L.maxStorageBuffersPerShaderStage } });
   const bad: string[] = [];
-  for (let code = 0; code < 64; code++) {
-    const b = [0, 1, 2, 3, 4, 5].map((k) => ((code >> k) & 1) === 1) as [boolean, boolean, boolean, boolean, boolean, boolean];
+  for (let code = 0; code < 128; code++) {
+    const b = [0, 1, 2, 3, 4, 5, 6].map((k) => ((code >> k) & 1) === 1) as [boolean, boolean, boolean, boolean, boolean, boolean, boolean];
     if (b[5] && !b[3]) continue;                          // parInverse needs wgInverse
+    if (!b[6] && b[4]) continue;                          // onePass is the free-water model's only (the 7th: free water)
     const info = await device.createShaderModule({ code: wgsl(...b) }).getCompilationInfo();
     const errs = info.messages.filter((m) => m.type === "error");
     if (errs.length) bad.push(`${b.map(Number).join("")}: ${errs[0].lineNum}:${errs[0].linePos} ${errs[0].message.split("\n")[0]}`);

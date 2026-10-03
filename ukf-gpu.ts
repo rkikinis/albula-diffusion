@@ -22,17 +22,26 @@
 // the processor's). The signal is stored in 32 bits when the device allows a buffer that large, as rounded 16-bit
 // pairs otherwise, cropped to the brain's bounding box. The constraint projection uses the INVERSE of its metric (the covariance for a sigma point,
 // P_new for the state -- both already at hand): y = V[:,A]·V[A,A]⁻¹·(bound − x)_A, which equals the active-set solve of
-// ukf.ts. Free-water model only (state of 11); at most 192 gradients.
+// ukf.ts. The free-water model (state of 11, the default) or the plain two-tensor model (state of 10, `freeWater: false`;
+// 2026-10-03, for the training-conditions check: the ORG atlas behind the tract names was tracked with it). The plain
+// model as ukf.ts has it from the original: w absent (1 in the signal), no constraint projection, every eigenvalue
+// floored at 100 in the original's 1e-6 units (0.1 here) in F, H and the step. At most 192 gradients.
 
 import type { UkfData, UkfOptions } from "./ukf.ts";
 import { seedTensor, signalAt } from "./ukf.ts";
 
-const N = 11, S = 2 * N + 1, STRIDE = 264, MAXG = 192;
+// The STATE LAYOUT keeps the free-water model's slots for both models (x at 0, P at 11, P⁻¹ at 132); the plain model's
+// 10×10 matrices use the first 100 floats of their slot.
+const STRIDE = 264, MAXG = 192;
+/** The plain model's eigenvalue floor in the card's 1e-3 units (ukf.ts LAMBDA_MIN_PLAIN = 100 in 1e-6). */
+const LMIN_PLAIN = 0.1;
 
 /** The shader; `sig32`: the signal as 32-bit floats (the processor's precision) or as rounded 16-bit pairs. */
-export const wgsl = (sig32: boolean, chol1 = false, pre = false, wgInv = false, onePass = false, parInv = false) => /* wgsl */ `
-const N: u32 = 11u;
-const S: u32 = 23u;
+export const wgsl = (sig32: boolean, chol1 = false, pre = false, wgInv = false, onePass = false, parInv = false, fw = true) => /* wgsl */ `
+const N: u32 = ${fw ? 11 : 10}u;
+const S: u32 = ${fw ? 23 : 21}u;
+const NN: u32 = ${fw ? 121 : 100}u;
+const LMIN: f32 = ${fw ? "0.0" : LMIN_PLAIN.toFixed(1)};   // eigenvalue floor in the signal model and the step (plain model only)
 const MAXG: u32 = ${MAXG}u;
 const STRIDE: u32 = ${STRIDE}u;
 struct Params {
@@ -97,8 +106,8 @@ fn predict(xv: array<f32, 11>, q: u32) -> f32 {
   let m1v = normalize(vec3<f32>(xv[0], xv[1], xv[2]));
   let m2v = normalize(vec3<f32>(xv[5], xv[6], xv[7]));
   let c1 = dot(g.xyz, m1v); let c2 = dot(g.xyz, m2v);
-  let l1a = max(xv[3], 0.0); let l1p = max(xv[4], 0.0); let l2a = max(xv[8], 0.0); let l2p = max(xv[9], 0.0);
-  let w = clamp(xv[10], 0.0, 1.0);
+  let l1a = max(xv[3], LMIN); let l1p = max(xv[4], LMIN); let l2a = max(xv[8], LMIN); let l2p = max(xv[9], LMIN);
+  let w = ${fw ? "clamp(xv[10], 0.0, 1.0)" : "1.0"};
   let t = 0.5 * exp(-bq * (l1p + (l1a - l1p) * c1 * c1)) + 0.5 * exp(-bq * (l2p + (l2a - l2p) * c2 * c2));
   return w * t + (1.0 - w) * exp(-g.w * 0.003);
 }
@@ -147,7 +156,7 @@ ${parInv ? `fn invertA(lid: u32) {
     }
   }
   workgroupBarrier();
-  for (var e = lid; e < 121u; e += 64u) {
+  for (var e = lid; e < NN; e += 64u) {
     let i = e / N; let j = e % N;
     if (j <= i) {
       var s = 0.0;
@@ -338,7 +347,7 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) l
     m1 = vec3<f32>(st[base + 256u], st[base + 257u], st[base + 258u]);
     fa = st[base + 262u];
   }
-  for (var e = lid; e < 121u; e += 64u) { Pc[e] = st[base + 11u + e]; Pic[e] = st[base + 132u + e]; }
+  for (var e = lid; e < NN; e += 64u) { Pc[e] = st[base + 11u + e]; Pic[e] = st[base + 132u + e]; }
   if (lid < N) { xs[lid] = st[base + lid]; }
   workgroupBarrier();
   if (workgroupUniformLoad(&flag[0]) == 0u) { return; }
@@ -360,7 +369,7 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) l
       z[q] = s / ws;
     }
     // ── Cholesky of P ──
-    for (var e = lid; e < 121u; e += 64u) { L[e] = 0.0; }
+    for (var e = lid; e < NN; e += 64u) { L[e] = 0.0; }
     if (lid == 0u) { flag[3] = 0u; }
     workgroupBarrier();
     ${chol1 ? `// ONE THREAD, ONE BARRIER (2026-10-01, Safari benchmark): the same arithmetic in the same order as the column-by-column
@@ -406,9 +415,10 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) l
     if (lid < S) {
       var v: array<f32, 11>;
       for (var k = 0u; k < N; k++) { v[k] = X[lid * N + k]; }
-      _ = projectInv(&v, false);
+      ${fw ? "_ = projectInv(&v, false);" : "// the plain model is unconstrained in the original: no projection, the floor below instead"}
       let a = normalize(vec3<f32>(v[0], v[1], v[2])); let b = normalize(vec3<f32>(v[5], v[6], v[7]));
       v[0] = a.x; v[1] = a.y; v[2] = a.z; v[5] = b.x; v[6] = b.y; v[7] = b.z;
+      ${fw ? "" : "v[3] = max(v[3], LMIN); v[4] = max(v[4], LMIN); v[8] = max(v[8], LMIN); v[9] = max(v[9], LMIN);"}
       for (var k = 0u; k < N; k++) { X[lid * N + k] = v[k]; }
     }
     workgroupBarrier();
@@ -417,13 +427,13 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) l
     workgroupBarrier();
     for (var e = lid; e < S * N; e += 64u) { X[e] -= xh[e % N]; }
     workgroupBarrier();
-    for (var e = lid; e < 121u; e += 64u) {
+    for (var e = lid; e < NN; e += 64u) {
       let i = e / N; let j = e % N;
       var s = 0.0;
       for (var t = 0u; t < S; t++) { s += wgt(t) * X[t * N + i] * X[t * N + j]; }
       if (i == j) {
         if (i == 0u || i == 1u || i == 2u || i == 5u || i == 6u || i == 7u) { s += P_.qm; }
-        else if (i == 10u) { s += P_.qw; } else { s += P_.ql; }
+        else if (i == 10u) { s += P_.qw; } else { s += P_.ql; }   // i = 10 only in the free-water model
       }
       A[e] = s;
     }
@@ -435,9 +445,9 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) l
       let t = lid;
       let m1v = normalize(vec3<f32>(X[t * N + 0u] + xh[0], X[t * N + 1u] + xh[1], X[t * N + 2u] + xh[2]));
       let m2v = normalize(vec3<f32>(X[t * N + 5u] + xh[5], X[t * N + 6u] + xh[6], X[t * N + 7u] + xh[7]));
-      spA[t] = vec4<f32>(m1v, clamp(X[t * N + 10u] + xh[10], 0.0, 1.0));
+      spA[t] = vec4<f32>(m1v, ${fw ? "clamp(X[t * N + 10u] + xh[10], 0.0, 1.0)" : "1.0"});
       spB[t] = vec4<f32>(m2v, 0.0);
-      spL[t] = vec4<f32>(max(X[t * N + 3u] + xh[3], 0.0), max(X[t * N + 4u] + xh[4], 0.0), max(X[t * N + 8u] + xh[8], 0.0), max(X[t * N + 9u] + xh[9], 0.0));
+      spL[t] = vec4<f32>(max(X[t * N + 3u] + xh[3], LMIN), max(X[t * N + 4u] + xh[4], LMIN), max(X[t * N + 8u] + xh[8], LMIN), max(X[t * N + 9u] + xh[9], LMIN));
     }` : ""}
     workgroupBarrier();
     // ── per gradient: predictions, mean, Pxz column, innovation, Ht column ──
@@ -479,7 +489,7 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) l
 `}
     workgroupBarrier();
     // ── W = Yk + R·Ht·Htᵀ, i = R·Ht·innov + yh ──
-    for (var e = lid; e < 121u; e += 64u) {
+    for (var e = lid; e < NN; e += 64u) {
       let i = e / N; let j = e % N;
       var s = 0.0;
       for (var q = 0u; q < G; q++) { s += Ht[i * MAXG + q] * Ht[j * MAXG + q]; }
@@ -487,23 +497,23 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) l
     }
     if (lid < N) { var s = 0.0; for (var q = 0u; q < G; q++) { s += Ht[lid * MAXG + q] * innov[q]; } iv[lid] = P_.R * s + yh[lid]; }
     workgroupBarrier();
-    for (var e = lid; e < 121u; e += 64u) { A[e] = Wm[e]; }
+    for (var e = lid; e < NN; e += 64u) { A[e] = Wm[e]; }
     workgroupBarrier();
     invertA(lid);                                   // A <- P_new
-    for (var e = lid; e < 121u; e += 64u) { B[e] = A[e]; }
+    for (var e = lid; e < NN; e += 64u) { B[e] = A[e]; }
     workgroupBarrier();
     // ── the new state, projected in the metric W (its inverse is P_new = B); one thread does the fiber logic ──
     if (lid == 0u) {
       var v: array<f32, 11>;
       for (var i = 0u; i < N; i++) { var s = 0.0; for (var k = 0u; k < N; k++) { s += B[i * N + k] * iv[k]; } v[i] = s; }
-      _ = projectInv(&v, true);
+      ${fw ? "_ = projectInv(&v, true);" : ""}
       // Step2T: orient both tensors to the previous direction, order them, move along the first.
       let old = m1;
       var a = normalize(vec3<f32>(v[0], v[1], v[2])); var c = normalize(vec3<f32>(v[5], v[6], v[7]));
       if (dot(a, old) < 0.0) { a = -a; } if (dot(c, old) < 0.0) { c = -c; }
       let angle = degrees(acos(clamp(dot(a, c), -1.0, 1.0)));
       var swap = dot(a, old) < dot(c, old);
-      var fa1 = l2fa(max(v[3], 0.0), max(v[4], 0.0)); var fa2 = l2fa(max(v[8], 0.0), max(v[9], 0.0));
+      var fa1 = l2fa(max(v[3], LMIN), max(v[4], LMIN)); var fa2 = l2fa(max(v[8], LMIN), max(v[9], LMIN));
       if (swap) { let tt = fa1; fa1 = fa2; fa2 = tt; }
       var swap2 = false;
       if (angle <= 20.0 && min(fa1, fa2) <= 0.2 && !(fa1 > 0.2)) { swap2 = true; let tt = fa1; fa1 = fa2; fa2 = tt; }
@@ -511,7 +521,7 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) l
       if (doSwap) { for (var k = 0u; k < 5u; k++) { let tt = v[k]; v[k] = v[5u + k]; v[5u + k] = tt; } }
       let lead = select(a, c, swap);
       let dir = select(lead, select(c, a, swap), swap2);
-      let la = select(v[3], v[3], true); let lp = v[4];
+      let la = max(v[3], LMIN); let lp = max(v[4], LMIN);
       fa = select(fa1, 0.0, la < lp);
       m1 = dir;
       pos = pos + dir / P_.voxel * P_.step;
@@ -521,16 +531,16 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) l
     workgroupBarrier();
     // Swap the covariance blocks (and of its inverse) when the tensors were exchanged.
     if (workgroupUniformLoad(&flag[1]) == 1u) {
-      for (var e = lid; e < 121u; e += 64u) {
+      for (var e = lid; e < NN; e += 64u) {
         let i = e / N; let j = e % N;
         let pi = select(select(i - 5u, i + 5u, i < 5u), i, i == 10u);
         let pj = select(select(j - 5u, j + 5u, j < 5u), j, j == 10u);
         L[e] = B[pi * N + pj]; A[e] = Wm[pi * N + pj];
       }
       workgroupBarrier();
-      for (var e = lid; e < 121u; e += 64u) { B[e] = L[e]; Wm[e] = A[e]; }
+      for (var e = lid; e < NN; e += 64u) { B[e] = L[e]; Wm[e] = A[e]; }
     }
-    for (var e = lid; e < 121u; e += 64u) { Pc[e] = B[e]; Pic[e] = Wm[e]; }
+    for (var e = lid; e < NN; e += 64u) { Pc[e] = B[e]; Pic[e] = Wm[e]; }
     // Predicted mean signal of the new state (threads over gradients).
     var part = 0.0;
     for (var q = lid; q < G; q += 64u) { var xv: array<f32, 11>; for (var k = 0u; k < N; k++) { xv[k] = xs[k]; } part += predict(xv, q); }
@@ -549,7 +559,7 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) l
         let r = u32(st[base + 261u]);
         if (r < P_.cap) {
           let o = (f * P_.cap + r) * 5u;
-          outp[o] = pos.x; outp[o + 1u] = pos.y; outp[o + 2u] = pos.z; outp[o + 3u] = fa; outp[o + 4u] = xs[10];
+          outp[o] = pos.x; outp[o + 1u] = pos.y; outp[o + 2u] = pos.z; outp[o + 3u] = fa; outp[o + 4u] = ${fw ? "xs[10]" : "1.0"};
           st[base + 261u] = f32(r + 1u);
         } else { flag[0] = 0u; }
       }
@@ -558,7 +568,7 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) l
     if (workgroupUniformLoad(&flag[0]) == 0u) { break; }
   }
   // Store the state back.
-  for (var e = lid; e < 121u; e += 64u) { st[base + 11u + e] = Pc[e]; st[base + 132u + e] = Pic[e]; }
+  for (var e = lid; e < NN; e += 64u) { st[base + 11u + e] = Pc[e]; st[base + 132u + e] = Pic[e]; }
   if (lid < N) { st[base + lid] = xs[lid]; }
   if (lid == 0u) {
     st[base + 253u] = pos.x; st[base + 254u] = pos.y; st[base + 255u] = pos.z;
@@ -583,7 +593,8 @@ export interface GpuUkfResult {
 /** Track from every seed (voxel coordinates) in both directions on the graphics card. */
 export async function trackUkfGpu(device: GPUDevice, data: UkfData, seeds: number[][], opts: UkfOptions & { batch?: number; stepsPerDispatch?: number; /** The Cholesky in one thread (one barrier) instead of column by column (22). */ cholOneThread?: boolean; /** The signal model's per-sigma-point values computed once a step, not once per gradient. */ prePredict?: boolean; /** The inversions' scratch in workgroup memory. */ wgInverse?: boolean; /** The per-gradient sums in one pass, without per-thread arrays (needs prePredict). */ onePass?: boolean; /** The two inversions a step in parallel over the workgroup (needs wgInverse). */ parInverse?: boolean; /** Pack the signal and compile the shader every call, as before 2026-10-01 night (benchmarking only). */ noCache?: boolean; /** Checking only: stop after one dispatch and return the states (with stepsPerDispatch 1: one filter step). */ debugOneDispatch?: boolean } = {}): Promise<GpuUkfResult> {
   const t0 = performance.now();
-  if ((opts.freeWater ?? true) === false) throw new Error("the graphics-card UKF runs the free-water model only (ukf.ts runs both)");
+  const fw = opts.freeWater ?? true, N = fw ? 11 : 10;
+  if (!fw && opts.onePass) throw new Error("onePass is written for the free-water model's 11 state values");
   const G = data.G;
   if (G > MAXG) throw new Error(`${G} gradients: the graphics-card UKF holds at most ${MAXG}`);
   const step = opts.stepLength ?? 0.3, perRecord = Math.max(1, Math.round((opts.recordLength ?? 0.9) / step));
@@ -643,7 +654,7 @@ export async function trackUkfGpu(device: GPUDevice, data: UkfData, seeds: numbe
     const la = t.l[0] * 1e-3, lp = lm * 1e-3, fa = l2fa3(t.l[0], lm, lm);
     for (const sgn of [1, -1]) {
       const s = new Float32Array(STRIDE), m = t.m.map((v) => sgn * v);
-      s.set([m[0], m[1], m[2], la, lp, t.m[0], t.m[1], t.m[2], la, lp, 1], 0);
+      s.set([m[0], m[1], m[2], la, lp, t.m[0], t.m[1], t.m[2], la, lp, ...(fw ? [1] : [])], 0);
       // P0 = p0·I in the original's units; the eigenvalue coordinates scale by 1e-3, their variance by 1e-6.
       for (let k = 0; k < N; k++) { const pk = [3, 4, 8, 9].includes(k) ? p0 * 1e-6 : p0; s[11 + k * N + k] = pk; s[132 + k * N + k] = 1 / pk; }
       s.set(sd, 253); s.set(m, 256); s[259] = 0; s[260] = 1; s[261] = 1; s[262] = fa;
@@ -661,10 +672,10 @@ export async function trackUkfGpu(device: GPUDevice, data: UkfData, seeds: numbe
   // The two inversions a step in parallel (2026-10-01 night, Safari: 2.01-2.07 s -> 1.40 s; the same fibers bit for bit
   // in Deno): on with the workgroup-memory scratch it needs.
   const parInv = wgInv && (opts.parInverse ?? true);
-  const pkey = `${sig32}|${opts.cholOneThread ? 1 : 0}|${pre ? 1 : 0}|${wgInv ? 1 : 0}|${opts.onePass ? 1 : 0}|${parInv ? 1 : 0}`;
+  const pkey = `${sig32}|${opts.cholOneThread ? 1 : 0}|${pre ? 1 : 0}|${wgInv ? 1 : 0}|${opts.onePass ? 1 : 0}|${parInv ? 1 : 0}|${fw ? 1 : 0}`;
   let pipeline = opts.noCache ? undefined : pipeCache.get(device)?.get(pkey);
   if (!pipeline) {
-    pipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: wgsl(sig32, !!opts.cholOneThread, pre, wgInv, !!opts.onePass, parInv) }), entryPoint: "main" } });
+    pipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: wgsl(sig32, !!opts.cholOneThread, pre, wgInv, !!opts.onePass, parInv, fw) }), entryPoint: "main" } });
     if (!opts.noCache) { const m = pipeCache.get(device) ?? new Map(); m.set(pkey, pipeline); pipeCache.set(device, m); }
   }
   const tPrep = performance.now();

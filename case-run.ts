@@ -41,8 +41,18 @@ export interface CaseResult {
   tracts: CaseTract[];
 }
 
+/** Every voxel of the seed mask (the brain) that the tracking mask also holds, at its center, RAS mm. */
+function everyVoxel(fit: ReturnType<typeof fitTensors>): number[][] {
+  const [nx, ny, nz] = fit.dims, M = fit.ijkToRAS, sm = fit.seedMask ?? fit.mask, out: number[][] = [];
+  for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+    const v = (k * ny + j) * nx + i;
+    if (sm[v] && fit.mask[v]) out.push([M[0] * i + M[1] * j + M[2] * k + M[3], M[4] * i + M[5] * j + M[6] * k + M[7], M[8] * i + M[9] * j + M[10] * k + M[11]]);
+  }
+  return out;
+}
+
 /** Run case `id` of the BIDS dataset at `ds` (ds001226's layout: ses-preop, acq-AP / acq-PA, derivatives/tumor_masks). */
-export async function runCase(ds: string, id: string, device: GPUDevice, model: TractCloudModel, method: "ukf" | "ptt" = "ukf", opts: { pttWorkerUrl?: URL; csdWorkerUrl?: URL; /** The card tracker's options (checking variants, e.g. onePass). */ ukf?: Record<string, unknown>; /** The naming draw's seed (label noise floor). */ nameSeed?: number; /** Who names: RapidParc (the default since 2026-10-03; its weights) or TractCloud ("tractcloud"). */ labeler?: RapidParcModel | "tractcloud"; /** Add the scan's own noise again, seeded (scan noise floor). */ noiseSeed?: number; /** Return the streamlines and names. */ keep?: boolean; /** How the brain mask is made (tensor.ts). */ maskMethod?: "head" | "median-otsu"; /** Whole-brain starting points (planning.ts WHOLE_BRAIN_SEEDS). */ seeds?: number; /** Their draw's seed (seed noise floor). */ seedDraw?: number; /** false: seeds anywhere in the head mask, as before 2026-10-02. */ seedMask?: boolean } = {}): Promise<CaseResult> {
+export async function runCase(ds: string, id: string, device: GPUDevice, model: TractCloudModel, method: "ukf" | "ptt" = "ukf", opts: { pttWorkerUrl?: URL; csdWorkerUrl?: URL; /** The card tracker's options (checking variants, e.g. onePass). */ ukf?: Record<string, unknown>; /** The naming draw's seed (label noise floor). */ nameSeed?: number; /** Who names: RapidParc (the default since 2026-10-03; its weights) or TractCloud ("tractcloud"). */ labeler?: RapidParcModel | "tractcloud"; /** Add the scan's own noise again, seeded (scan noise floor). */ noiseSeed?: number; /** Return the streamlines and names. */ keep?: boolean; /** How the brain mask is made (tensor.ts). */ maskMethod?: "head" | "median-otsu"; /** Whole-brain starting points (planning.ts WHOLE_BRAIN_SEEDS). */ seeds?: number; /** Their draw's seed (seed noise floor). */ seedDraw?: number; /** false: seeds anywhere in the head mask, as before 2026-10-02. */ seedMask?: boolean; /** One seed at the center of EVERY brain voxel, left to the tracker's own seed threshold (the ORG atlas's tracking, Mike Halle's mail of 2026-10-01; with opts.ukf's freeWater: false and his settings). Checking only: about ten times the seeds. */ seedEveryVoxel?: boolean } = {}): Promise<CaseResult> {
   const t0 = performance.now(), p = `${ds}/sub-${id}/ses-preop`;
   const rd = (f: string) => Deno.readFileSync(`${p}/${f}`), tx = (f: string) => Deno.readTextFileSync(`${p}/${f}`);
   const stages: StageTimes = {};
@@ -73,9 +83,11 @@ export async function runCase(ds: string, id: string, device: GPUDevice, model: 
     csdSeconds = fod.seconds;
     sl = await trackPttParallel(fod, wholeBrainSeeds(fit, opts.seeds, opts.seedDraw), opts.pttWorkerUrl ? { workerUrl: opts.pttWorkerUrl } : {});
   } else {
-    const tData = performance.now(), data = prepareUkfData(dwi, fit.mask), ts = performance.now(), seeds = wholeBrainSeeds(fit, opts.seeds, opts.seedDraw);
+    const tData = performance.now(), data = prepareUkfData(dwi, fit.mask), ts = performance.now();
+    const seeds = opts.seedEveryVoxel ? everyVoxel(fit) : wholeBrainSeeds(fit, opts.seeds, opts.seedDraw);
     stages.seeds = performance.now() - ts;
-    sl = await trackUkfSeeds(device, data, seeds, CASE_DEFAULTS.stopFA, undefined, detail, opts.ukf ?? {});
+    const stopFA = typeof opts.ukf?.stoppingFA === "number" ? opts.ukf.stoppingFA : CASE_DEFAULTS.stopFA;   // trackUkfSeeds takes it apart from the options
+    sl = await trackUkfSeeds(device, data, seeds, stopFA, undefined, detail, opts.ukf ?? {});
     stages.trackDetail = { ...detail, data: ts - tData };
   }
   const t2 = performance.now();
