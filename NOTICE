@@ -24,4 +24,10 @@ These parts are under their own licenses, which apply to them instead:
    (vendor/dcm2niix/LICENSE.txt); it contains NanoJPEG (Martin J. Fiedler, MIT license: vendor/dcm2niix/LICENSE-NanoJPEG.txt,
    from dcm2niix's console/ujpeg.cpp). Used as a second opinion on how a diffusion scan is read; never fetched at run time.
 
+4. rapidparc/model/ — RapidParc's trained weights (rapidparc.safetensors, hemiaug.safetensors; MedVisBonn/RapidParc
+   release v1.0.0, unchanged), BSD 3-Clause License, Copyright (c) 2026, Visualization and Medical Image Analysis Group,
+   University of Bonn (rapidparc/model/LICENSE.txt, whose notice and disclaimer accompany them). The network itself
+   (rapidparc/rapidparc.ts) is written here from RapidParc's source and paper: von Bornhaupt, Bisten, …, Schultz,
+   Imaging Neuroscience 2026; Mike Halle's tractline (Apache-2.0) was the second reading.
+
 The papers each part rests on are listed in references.ts.
