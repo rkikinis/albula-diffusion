@@ -1,128 +1,116 @@
 {
- "about": "PAT16 of OpenNeuro ds001226 (CC0), two-tensor UKF, the case library's stored result (Contents/data/tractcloud/cases/PAT16.json, 2026-10-01). The regression test (cases.regression.test.ts) reruns the case and compares; a deliberate change that moves these numbers rewrites this file in the same commit, with the reason. Rewritten 2026-10-01 night: the seed's FA computed as the original UKFTractography does for the simple model (the mean of the two minor eigenvalues; ukf.ts), which tracks fewer seeds -- from the same seeds the port now tracks the same seeds as the original (838 fibers each). Rewritten 2026-10-02: whole-brain seeds start only inside the brain (DIPY's median_otsu mask; the head mask put a third of them in the scalp), 16,000 of them (25,000 before; about the same count of streamlines); tracking still runs inside the head mask (median_otsu cuts the top of the brain); and the tracker's constraint projection is exact (the card's too). Judged against the noise floors (agreement.ts), the near-tumor list changed as much as a new seed draw changes it.",
+ "about": "PAT16 of OpenNeuro ds001226 (CC0), two-tensor UKF, the case library's stored result (Contents/data/tractcloud/cases/PAT16.json, 2026-10-01). The regression test (cases.regression.test.ts) reruns the case and compares; a deliberate change that moves these numbers rewrites this file in the same commit, with the reason. Rewritten 2026-10-01 night: the seed's FA computed as the original UKFTractography does for the simple model (the mean of the two minor eigenvalues; ukf.ts), which tracks fewer seeds -- from the same seeds the port now tracks the same seeds as the original (838 fibers each). Rewritten 2026-10-02: whole-brain seeds start only inside the brain (DIPY's median_otsu mask; the head mask put a third of them in the scalp), 16,000 of them (25,000 before; about the same count of streamlines); tracking still runs inside the head mask (median_otsu cuts the top of the brain); and the tracker's constraint projection is exact (the card's too). Judged against the noise floors (agreement.ts), the near-tumor list changed as much as a new seed draw changes it. Rewritten 2026-10-03: the names come from RapidParc (rapidparc/, Ron: Albula switches to it, as Mike Halle's tractline did) instead of TractCloud -- same streamlines (10,828), naming 0.7 s instead of 2.8 s; 27 named tracts near the tumor instead of 30: RapidParc puts more streamlines into the large tracts (thalamo-frontal 196 against 113, inferior longitudinal fasciculus 78 against 31), drops four superficial and two corona radiata/callosal groups TractCloud listed with few streamlines, and adds corpus callosum 6 and the left frontal corona radiata.",
  "id": "PAT16",
  "method": "ukf",
  "streamlines": 10828,
  "near8": [
   {
-   "tract": "superficial frontal, right",
-   "within8": 150
+   "tract": "thalamo-frontal, right",
+   "within8": 196
   },
   {
-   "tract": "thalamo-frontal, right",
-   "within8": 113
+   "tract": "superficial frontal, right",
+   "within8": 151
   },
   {
    "tract": "thalamo-parietal, right",
-   "within8": 88
+   "within8": 99
   },
   {
    "tract": "corpus callosum 2",
-   "within8": 77
-  },
-  {
-   "tract": "striato-frontal, right",
-   "within8": 54
-  },
-  {
-   "tract": "middle longitudinal fasciculus, right",
-   "within8": 41
-  },
-  {
-   "tract": "superior longitudinal fasciculus II, right",
-   "within8": 35
+   "within8": 84
   },
   {
    "tract": "inferior longitudinal fasciculus, right",
-   "within8": 31
+   "within8": 78
   },
   {
-   "tract": "corpus callosum 4",
-   "within8": 27
+   "tract": "striato-frontal, right",
+   "within8": 71
+  },
+  {
+   "tract": "middle longitudinal fasciculus, right",
+   "within8": 63
   },
   {
    "tract": "corticospinal tract, right",
-   "within8": 26
+   "within8": 40
   },
   {
-   "tract": "corona radiata frontal, right",
-   "within8": 25
+   "tract": "superior longitudinal fasciculus II, right",
+   "within8": 40
   },
   {
-   "tract": "superficial parietal, right",
-   "within8": 23
-  },
-  {
-   "tract": "superficial temporal, right",
-   "within8": 23
-  },
-  {
-   "tract": "superficial occipital-temporal, right",
-   "within8": 23
+   "tract": "corpus callosum 4",
+   "within8": 39
   },
   {
    "tract": "striato-parietal, right",
-   "within8": 18
+   "within8": 31
   },
   {
-   "tract": "posterior limb of internal capsule, right",
-   "within8": 14
+   "tract": "thalamo-occipital, right",
+   "within8": 30
   },
   {
-   "tract": "corpus callosum 1",
-   "within8": 14
+   "tract": "corona radiata frontal, right",
+   "within8": 30
   },
   {
    "tract": "striato-occipital, right",
+   "within8": 26
+  },
+  {
+   "tract": "arcuate fasciculus, right",
+   "within8": 25
+  },
+  {
+   "tract": "corpus callosum 6",
+   "within8": 24
+  },
+  {
+   "tract": "superficial temporal, right",
+   "within8": 24
+  },
+  {
+   "tract": "superior longitudinal fasciculus III, right",
+   "within8": 21
+  },
+  {
+   "tract": "corpus callosum 3",
+   "within8": 17
+  },
+  {
+   "tract": "corpus callosum 1",
+   "within8": 16
+  },
+  {
+   "tract": "uncinate fasciculus, left",
    "within8": 13
   },
   {
    "tract": "cortico-ponto-cerebellar, right",
-   "within8": 12
-  },
-  {
-   "tract": "superior longitudinal fasciculus III, right",
-   "within8": 12
+   "within8": 13
   },
   {
    "tract": "thalamo-temporal, right",
-   "within8": 12
-  },
-  {
-   "tract": "corpus callosum 5",
-   "within8": 11
-  },
-  {
-   "tract": "arcuate fasciculus, right",
    "within8": 10
   },
   {
-   "tract": "corpus callosum 3",
+   "tract": "posterior limb of internal capsule, right",
    "within8": 9
-  },
-  {
-   "tract": "superficial parietal-temporal, right",
-   "within8": 9
-  },
-  {
-   "tract": "corona radiata parietal, right",
-   "within8": 6
   },
   {
    "tract": "cingulum bundle, right",
-   "within8": 15
-  },
-  {
-   "tract": "uncinate fasciculus, left",
-   "within8": 7
+   "within8": 23
   },
   {
    "tract": "thalamo-frontal, left",
-   "within8": 5
+   "within8": 12
   },
   {
-   "tract": "thalamo-occipital, right",
-   "within8": 16
+   "tract": "corona radiata frontal, left",
+   "within8": 6
   }
  ]
 }

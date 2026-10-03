@@ -1,5 +1,6 @@
-// RAPIDPARC, THE NETWORK THAT NAMES TRACTS (von Bornhaupt, Bisten, …, Schultz, "RapidParc: A Global-Context Transformer
-// for Parallel, Accurate, and Lesion-Robust Tractogram Parcellation", Imaging Neuroscience 2026; github.com/MedVisBonn/
+// RAPIDPARC, THE NETWORK THAT NAMES TRACTS (Bisten, von Bornhaupt, Grün, Bauer, Rüber, Schultz, "RapidParc: A Global-Context
+// Transformer for Parallel, Accurate, and Lesion-Robust Tractogram Parcellation", Imaging Neuroscience 4, 2026,
+// doi:10.1162/IMAG.a.1168 — the authors' citation.bibtex and Crossref; github.com/MedVisBonn/
 // RapidParc, BSD-3-Clause). Ron, 2026-10-03: Albula switches to it, as Mike Halle's tractline did on 2026-10-02 — on
 // TractCloud's own test split 94.5 % of tracts right against TractCloud's 92.0 %, draws agreeing on 98 % of tracts, about
 // 25 times faster (tractline's docs/labelers.md). Written from RapidParc's source (utils/model.py, utils/transforms3D.py,

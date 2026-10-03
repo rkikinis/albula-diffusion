@@ -27,7 +27,7 @@ These parts are under their own licenses, which apply to them instead:
 4. rapidparc/model/ — RapidParc's trained weights (rapidparc.safetensors, hemiaug.safetensors; MedVisBonn/RapidParc
    release v1.0.0, unchanged), BSD 3-Clause License, Copyright (c) 2026, Visualization and Medical Image Analysis Group,
    University of Bonn (rapidparc/model/LICENSE.txt, whose notice and disclaimer accompany them). The network itself
-   (rapidparc/rapidparc.ts) is written here from RapidParc's source and paper: von Bornhaupt, Bisten, …, Schultz,
-   Imaging Neuroscience 2026; Mike Halle's tractline (Apache-2.0) was the second reading.
+   (rapidparc/rapidparc.ts) is written here from RapidParc's source and paper: Bisten, von Bornhaupt, Grün, Bauer, Rüber, Schultz,
+   Imaging Neuroscience 4, 2026 (doi:10.1162/IMAG.a.1168); Mike Halle's tractline (Apache-2.0) was the second reading.
 
 The papers each part rests on are listed in references.ts.

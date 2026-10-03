@@ -12,7 +12,8 @@
 // checked against Crossref.
 // v6 (2026-10-01): the UKF-near-tumors studies Yogesh Rathi pointed to (Chen 2015; Zhang 2017 ISBI) and their companions
 // (Liao 2017, Gong 2018, O'Donnell 2017), checked against Crossref.
-export const REFERENCES_VERSION = 6;
+// v7 (2026-10-03): RapidParc (Bisten et al. 2026) names the tracts; TractCloud kept for its table.
+export const REFERENCES_VERSION = 7;
 
 export interface Reference { cite: string; link?: string; usedFor: string; verified: boolean }
 
@@ -46,8 +47,9 @@ export const DIFFUSION_REFERENCES: Reference[] = [
   { cite: "Lawson CL, Hanson RJ. Solving Least Squares Problems. Prentice-Hall, 1974 (SIAM Classics in Applied Mathematics, 1995).", link: "https://doi.org/10.1137/1.9781611971217", usedFor: "the exact solver: non-negative least squares on the CSD problem's dual (csd.ts)", verified: true },
   { cite: "Aydogan DB, Shi Y. Parallel transport tractography. IEEE Transactions on Medical Imaging 40(2):635-647, 2021.", link: "https://doi.org/10.1109/TMI.2020.3034038", usedFor: "parallel transport tractography (ptt.ts)", verified: true },
   // Naming tracts.
-  { cite: "Xue T, Chen Y, Zhang C, Golby AJ, Makris N, Rathi Y, Cai W, Zhang F, O'Donnell LJ. TractCloud: registration-free tractography parcellation with a novel local-global streamline point cloud representation. MICCAI 2023, Lecture Notes in Computer Science, pp. 409-419.", link: "https://doi.org/10.1007/978-3-031-43993-3_40", usedFor: "TractCloud: the network and its trained weights (tractcloud/)", verified: true },
-  { cite: "Zhang F, Wu Y, Norton I, Rigolo L, Rathi Y, Makris N, O'Donnell LJ. An anatomically curated fiber clustering white matter atlas for consistent white matter tract parcellation across the lifespan. NeuroImage 179:429-447, 2018.", link: "https://doi.org/10.1016/j.neuroimage.2018.06.027", usedFor: "the atlas of 800 fiber clusters TractCloud's names come from", verified: true },
+  { cite: "Bisten J, von Bornhaupt V, Grün J, Bauer T, Rüber T, Schultz T. RapidParc: A global-context transformer for parallel, accurate, and lesion-robust tractogram parcellation. Imaging Neuroscience 4, 2026.", link: "https://doi.org/10.1162/IMAG.a.1168", usedFor: "RapidParc: the network that names the tracts since 2026-10-03, and its trained weights (rapidparc/)", verified: true },
+  { cite: "Xue T, Chen Y, Zhang C, Golby AJ, Makris N, Rathi Y, Cai W, Zhang F, O'Donnell LJ. TractCloud: registration-free tractography parcellation with a novel local-global streamline point cloud representation. MICCAI 2023, Lecture Notes in Computer Science, pp. 409-419.", link: "https://doi.org/10.1007/978-3-031-43993-3_40", usedFor: "TractCloud: the tract-naming network until 2026-10-03; its table of clusters, tracts and names is still the one used (tractcloud/)", verified: true },
+  { cite: "Zhang F, Wu Y, Norton I, Rigolo L, Rathi Y, Makris N, O'Donnell LJ. An anatomically curated fiber clustering white matter atlas for consistent white matter tract parcellation across the lifespan. NeuroImage 179:429-447, 2018.", link: "https://doi.org/10.1016/j.neuroimage.2018.06.027", usedFor: "the atlas of 800 fiber clusters the tract names come from (RapidParc and TractCloud were both trained on it)", verified: true },
   // Data.
   { cite: "Aerts H, Schirner M, Jeurissen B, Van Roost D, Achten E, Ritter P, Marinazzo D. Modeling brain dynamics in brain tumor patients using The Virtual Brain. eNeuro 5(3):ENEURO.0083-18.2018, 2018. Data: OpenNeuro ds001226 (CC0).", link: "https://openneuro.org/datasets/ds001226", usedFor: "the development and test cases", verified: true },
   { cite: "Chen Z, Tie Y, Olubiyi O, Rigolo L, Mehrtash A, Norton I, Pasternak O, Rathi Y, Golby AJ, O'Donnell LJ. Reconstruction of the arcuate fasciculus for surgical planning in the setting of peritumoral edema using two-tensor unscented Kalman filter tractography. NeuroImage: Clinical 7:815-822, 2015.", link: "https://doi.org/10.1016/j.nicl.2015.03.009", usedFor: "two-tensor UKF tracking through peritumoral edema (10 patients; the arcuate fasciculus traced where single-tensor tracking broke)", verified: true },

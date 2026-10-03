@@ -14,6 +14,10 @@ import { prepareUkfData } from "./ukf.ts";
 import { correctWithReversed, sortByDistance, stageText, streamlineDistances, tractName, trackUkfSeeds, wholeBrainSeeds, type StageTimes, type TrackTiming } from "./planning.ts";
 import type { TractCloudModel } from "./tractcloud/tractcloud.ts";
 import { nameTracts, SHORT, type Named } from "./tractcloud/name-tracts.ts";
+import { loadRapidParc, type RapidParcModel } from "./rapidparc/rapidparc.ts";
+/** RapidParc's standard weights from the file beside this module (case runs are Deno's), read once. */
+let rp: RapidParcModel | undefined;
+const defaultRapidParc = () => rp ??= loadRapidParc(Deno.readFileSync(new URL("./rapidparc/model/rapidparc.safetensors", import.meta.url)).buffer);
 import { addScanNoise, noiseSigma } from "./agreement.ts";
 import { estimateResponses, kernelFromResponses } from "./responses.ts";
 import { csdVolume } from "./csd-volume.ts";
@@ -38,7 +42,7 @@ export interface CaseResult {
 }
 
 /** Run case `id` of the BIDS dataset at `ds` (ds001226's layout: ses-preop, acq-AP / acq-PA, derivatives/tumor_masks). */
-export async function runCase(ds: string, id: string, device: GPUDevice, model: TractCloudModel, method: "ukf" | "ptt" = "ukf", opts: { pttWorkerUrl?: URL; csdWorkerUrl?: URL; /** The card tracker's options (checking variants, e.g. onePass). */ ukf?: Record<string, unknown>; /** TractCloud's draw seed (label noise floor). */ nameSeed?: number; /** Add the scan's own noise again, seeded (scan noise floor). */ noiseSeed?: number; /** Return the streamlines and names. */ keep?: boolean; /** How the brain mask is made (tensor.ts). */ maskMethod?: "head" | "median-otsu"; /** Whole-brain starting points (planning.ts WHOLE_BRAIN_SEEDS). */ seeds?: number; /** Their draw's seed (seed noise floor). */ seedDraw?: number; /** false: seeds anywhere in the head mask, as before 2026-10-02. */ seedMask?: boolean } = {}): Promise<CaseResult> {
+export async function runCase(ds: string, id: string, device: GPUDevice, model: TractCloudModel, method: "ukf" | "ptt" = "ukf", opts: { pttWorkerUrl?: URL; csdWorkerUrl?: URL; /** The card tracker's options (checking variants, e.g. onePass). */ ukf?: Record<string, unknown>; /** The naming draw's seed (label noise floor). */ nameSeed?: number; /** Who names: RapidParc (the default since 2026-10-03; its weights) or TractCloud ("tractcloud"). */ labeler?: RapidParcModel | "tractcloud"; /** Add the scan's own noise again, seeded (scan noise floor). */ noiseSeed?: number; /** Return the streamlines and names. */ keep?: boolean; /** How the brain mask is made (tensor.ts). */ maskMethod?: "head" | "median-otsu"; /** Whole-brain starting points (planning.ts WHOLE_BRAIN_SEEDS). */ seeds?: number; /** Their draw's seed (seed noise floor). */ seedDraw?: number; /** false: seeds anywhere in the head mask, as before 2026-10-02. */ seedMask?: boolean } = {}): Promise<CaseResult> {
   const t0 = performance.now(), p = `${ds}/sub-${id}/ses-preop`;
   const rd = (f: string) => Deno.readFileSync(`${p}/${f}`), tx = (f: string) => Deno.readTextFileSync(`${p}/${f}`);
   const stages: StageTimes = {};
@@ -76,7 +80,8 @@ export async function runCase(ds: string, id: string, device: GPUDevice, model: 
   }
   const t2 = performance.now();
   stages.track = t2 - t1 - csdSeconds * 1000 - (stages.seeds ?? 0);
-  const named = await nameTracts(device, model, sl, opts.nameSeed !== undefined ? { seed: opts.nameSeed } : {});
+  const rapidParc = opts.labeler === "tractcloud" ? undefined : opts.labeler ?? defaultRapidParc();
+  const named = await nameTracts(device, model, sl, { ...(opts.nameSeed !== undefined ? { seed: opts.nameSeed } : {}), ...(rapidParc ? { rapidParc } : {}) });
   stages.name = named.seconds * 1000;
   const tDist = performance.now();
   const OTHER = model.json.tracts.length - 1;

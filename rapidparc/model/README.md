@@ -12,8 +12,8 @@
   RapidParc's `mapping_from_800_800_to_43` and `int_to_label` were checked identical to it on 2026-10-03.
 
 License: BSD 3-Clause, Copyright (c) 2026, Visualization and Medical Image Analysis Group, University of Bonn
-(`LICENSE.txt`). Paper: von Bornhaupt, Bisten, …, Schultz. RapidParc: A Global-Context Transformer for Parallel, Accurate,
-and Lesion-Robust Tractogram Parcellation. Imaging Neuroscience (2026).
+(`LICENSE.txt`). Paper: Bisten J, von Bornhaupt V, Grün J, Bauer T, Rüber T, Schultz T. RapidParc: A Global-Context Transformer for
+Parallel, Accurate, and Lesion-Robust Tractogram Parcellation. Imaging Neuroscience 4, 2026. doi:10.1162/IMAG.a.1168
 
 When RapidParc publishes new weights: replace the file, update the sha256 above, rerun
 `Contents/tools/rapidparc-reference.py` (workspace) and `../rapidparc.test.ts`.
