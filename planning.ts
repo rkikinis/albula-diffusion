@@ -85,8 +85,22 @@ export function stageText(t: StageTimes): string {
  * align, field and apply.
  * RULE 2 (distortion.ts, 2026-10-03, the default): the axis is chosen with the field alone (rule 1, about a second each),
  * then the field is fitted again on that axis together with the partner's movement between the two scans (about 4 s).
+ * THE SCANNER'S RECORD FIRST (2026-10-03): where the phase-encoding directions are known (`phaseEncoding`, BIDS's
+ * "i", "j-", … along the voxel axes of the two grids), a pair that is not reversed along one axis is refused, and a
+ * reversed one is fitted on its recorded axis only. Found by Mike Halle's tractline (its ds001226 loader): PAT03's and
+ * CON02's "PA" scans are phase-encoded left-right ("i-") against the AP's front-back ("j-"); measured alone, the axes
+ * let PAT03 through (47% of the difference left, under the 50% refusal) while a true pair, CON01, leaves 40% -- the
+ * residual cannot tell them apart.
  */
-export async function correctWithReversed(dwi: DiffusionSeries, reversed: ArrayLike<number>[], name: string, progress?: (s: string) => void, opts: { partnerGrid?: Grid; times?: StageTimes; /** distortion.ts DISTORTION_RULE; default 2. */ rule?: 1 | 2 } = {}): Promise<string> {
+export async function correctWithReversed(dwi: DiffusionSeries, reversed: ArrayLike<number>[], name: string, progress?: (s: string) => void, opts: { partnerGrid?: Grid; times?: StageTimes; /** distortion.ts DISTORTION_RULE; default 2. */ rule?: 1 | 2; /** The recorded phase-encoding directions, BIDS style ("j-"), when known. */ phaseEncoding?: { scan?: string; partner?: string } } = {}): Promise<string> {
+  const pe = opts.phaseEncoding, axisOf = (d: string) => "ijk".indexOf(d[0]);
+  let recordedAxis: 0 | 1 | 2 | undefined;
+  if (pe?.scan && pe.partner) {
+    const a = axisOf(pe.scan), b = axisOf(pe.partner), opposite = pe.scan.endsWith("-") !== pe.partner.endsWith("-");
+    const words = (d: string) => `${["left-right", "front-back", "top-bottom"][axisOf(d)] ?? d}`;
+    if (a < 0 || a !== b || !opposite) return `not corrected: the scanner's record says ${name} was taken with its distortion ${a === b ? "in the same direction as" : `${words(pe.partner)}, against ${words(pe.scan)} for`} this scan, so the two are not a reversed pair`;
+    recordedAxis = a as 0 | 1 | 2;
+  }
   const meanOf = (vols: ArrayLike<number>[]) => { const o = new Float32Array(vols[0].length); for (const d of vols) for (let v = 0; v < o.length; v++) o[v] += d[v] / vols.length; return o; };
   const grid: Grid = { dims: dwi.volumes[0].dims, ijkToRAS: dwi.volumes[0].ijkToRAS };
   const ta = performance.now();
@@ -103,7 +117,7 @@ export async function correctWithReversed(dwi: DiffusionSeries, reversed: ArrayL
   const dims = grid.dims as [number, number, number];
   const tf = performance.now();
   let best: FieldFit | undefined, bestLeft = Infinity;
-  for (const axis of [0, 1] as const) {
+  for (const axis of (recordedAxis !== undefined ? [recordedAxis] : [0, 1]) as (0 | 1 | 2)[]) {
     progress?.(`Correcting distortion with ${name}: trying phase encoding along ${axis ? "the columns" : "the rows"}…`);
     await yieldNow();
     const f = estimateField({ dims, plus, minus, axis });

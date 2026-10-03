@@ -55,6 +55,7 @@ function everyVoxel(fit: ReturnType<typeof fitTensors>): number[][] {
 export async function runCase(ds: string, id: string, device: GPUDevice, model: TractCloudModel, method: "ukf" | "ptt" = "ukf", opts: { pttWorkerUrl?: URL; csdWorkerUrl?: URL; /** The card tracker's options (checking variants, e.g. onePass). */ ukf?: Record<string, unknown>; /** The naming draw's seed (label noise floor). */ nameSeed?: number; /** Who names: RapidParc (the default since 2026-10-03; its weights) or TractCloud ("tractcloud"). */ labeler?: RapidParcModel | "tractcloud"; /** Add the scan's own noise again, seeded (scan noise floor). */ noiseSeed?: number; /** Return the streamlines and names. */ keep?: boolean; /** How the brain mask is made (tensor.ts). */ maskMethod?: "head" | "median-otsu"; /** Whole-brain starting points (planning.ts WHOLE_BRAIN_SEEDS). */ seeds?: number; /** Their draw's seed (seed noise floor). */ seedDraw?: number; /** false: seeds anywhere in the head mask, as before 2026-10-02. */ seedMask?: boolean; /** One seed at the center of EVERY brain voxel, left to the tracker's own seed threshold (the ORG atlas's tracking, Mike Halle's mail of 2026-10-01; with opts.ukf's freeWater: false and his settings). Checking only: about ten times the seeds. */ seedEveryVoxel?: boolean; /** The distortion correction's rule (distortion.ts DISTORTION_RULE; default 2). */ distortionRule?: 1 | 2 } = {}): Promise<CaseResult> {
   const t0 = performance.now(), p = `${ds}/sub-${id}/ses-preop`;
   const rd = (f: string) => Deno.readFileSync(`${p}/${f}`), tx = (f: string) => Deno.readTextFileSync(`${p}/${f}`);
+  const sidecarPE = (f: string) => { try { return (JSON.parse(tx(f)) as { PhaseEncodingDirection?: string }).PhaseEncodingDirection; } catch { return undefined; } };
   const stages: StageTimes = {};
   const dwi = fromFsl(await parseNiftiVolumes(rd(`dwi/sub-${id}_ses-preop_acq-AP_dwi.nii.gz`)), tx(`dwi/sub-${id}_ses-preop_acq-AP_dwi.bval`), tx(`dwi/sub-${id}_ses-preop_acq-AP_dwi.bvec`));
   const rev = fromFsl(await parseNiftiVolumes(rd(`dwi/sub-${id}_ses-preop_acq-PA_dwi.nii.gz`)), tx(`dwi/sub-${id}_ses-preop_acq-PA_dwi.bval`), tx(`dwi/sub-${id}_ses-preop_acq-PA_dwi.bvec`));
@@ -62,7 +63,10 @@ export async function runCase(ds: string, id: string, device: GPUDevice, model: 
   // THE PARTNER ON ITS OWN GRID: 11 of the 29 have a PA slab placed 2.3 mm and 0.8° away; until 2026-10-02 it was paired
   // voxel by voxel here (Mike Halle's pipeline aligns it by the scanner's coordinates; so does this now).
   const corrected = await correctWithReversed(dwi, rev.volumes.filter((_, i) => rev.bValues[i] < 50).map((v) => v.data), "PA", undefined,
-    { partnerGrid: { dims: rev.volumes[0].dims, ijkToRAS: rev.volumes[0].ijkToRAS }, times: stages, rule: opts.distortionRule });
+    { partnerGrid: { dims: rev.volumes[0].dims, ijkToRAS: rev.volumes[0].ijkToRAS }, times: stages, rule: opts.distortionRule,
+      // The scanner's record of the phase-encoding directions (the BIDS sidecars), when present: PAT03's and CON02's "PA"
+      // scans are not reversed pairs (planning.ts correctWithReversed).
+      phaseEncoding: { scan: sidecarPE(`dwi/sub-${id}_ses-preop_acq-AP_dwi.json`), partner: sidecarPE(`dwi/sub-${id}_ses-preop_acq-PA_dwi.json`) } });
   let added: number | undefined;
   if (opts.noiseSeed !== undefined) {
     // THE SCAN'S OWN NOISE AGAIN (agreement.ts): measured from the background outside the brain, added to every volume.
