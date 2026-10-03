@@ -2,7 +2,7 @@
 // case-library run (Contents/tools/dmri-cases.ts in the workspace; Ron's rules for tools: "a case library with 10 or
 // more cases", half for development, half for testing) call the same code, so what is measured is what the app does.
 import type { DiffusionSeries } from "./dwi.ts";
-import { applyField, estimateField, fieldAtCenters, type FieldFit } from "./distortion.ts";
+import { applyField, estimateField, estimateFieldWithMotion, fieldAtCenters, type FieldFit } from "./distortion.ts";
 import type { TensorFit } from "./tensor.ts";
 import { rng, type TractCloudModel } from "./tractcloud/tractcloud.ts";
 import { SHORT, type Named } from "./tractcloud/name-tracts.ts";
@@ -83,8 +83,10 @@ export function stageText(t: StageTimes): string {
  * the two do not look like a reversed pair. A partner on a grid of its own (`partnerGrid`) is first sampled onto the
  * scan's grid through the scanner's coordinates. Changes `dwi` in place; returns what was done, in words; `times` gets
  * align, field and apply.
+ * RULE 2 (distortion.ts, 2026-10-03, the default): the axis is chosen with the field alone (rule 1, about a second each),
+ * then the field is fitted again on that axis together with the partner's movement between the two scans (about 4 s).
  */
-export async function correctWithReversed(dwi: DiffusionSeries, reversed: ArrayLike<number>[], name: string, progress?: (s: string) => void, opts: { partnerGrid?: Grid; times?: StageTimes } = {}): Promise<string> {
+export async function correctWithReversed(dwi: DiffusionSeries, reversed: ArrayLike<number>[], name: string, progress?: (s: string) => void, opts: { partnerGrid?: Grid; times?: StageTimes; /** distortion.ts DISTORTION_RULE; default 2. */ rule?: 1 | 2 } = {}): Promise<string> {
   const meanOf = (vols: ArrayLike<number>[]) => { const o = new Float32Array(vols[0].length); for (const d of vols) for (let v = 0; v < o.length; v++) o[v] += d[v] / vols.length; return o; };
   const grid: Grid = { dims: dwi.volumes[0].dims, ijkToRAS: dwi.volumes[0].ijkToRAS };
   const ta = performance.now();
@@ -108,6 +110,16 @@ export async function correctWithReversed(dwi: DiffusionSeries, reversed: ArrayL
     const left = f.levels.at(-1)?.residual ?? Infinity;
     if (left < bestLeft) { best = f; bestLeft = left; }
   }
+  let moved = "";
+  if (best && bestLeft <= 0.5 && (opts.rule ?? 2) === 2) {
+    progress?.(`Correcting distortion with ${name}: allowing for movement between the two scans…`);
+    await yieldNow();
+    const M0 = grid.ijkToRAS, voxel = [0, 1, 2].map((c) => Math.hypot(M0[c], M0[4 + c], M0[8 + c])) as [number, number, number];
+    const f = estimateFieldWithMotion({ dims, plus, minus, axis: best.axis, voxel });
+    best = f; bestLeft = f.levels.at(-1)?.residual ?? bestLeft;
+    const mm = Math.hypot(...f.motion.t), deg = Math.max(...f.motion.r.map((x) => Math.abs(x))) * 180 / Math.PI;
+    moved = `; ${name} had moved ${mm.toFixed(1)} mm and ${deg.toFixed(1)}° from this scan, allowed for`;
+  }
   if (opts.times) opts.times.field = performance.now() - tf;
   if (!best || bestLeft > 0.5) return `not corrected: ${name} and this scan do not look like a reversed pair (${Math.round(bestLeft * 100)}% of their difference would remain)${aligned}`;
   const tp = performance.now();
@@ -115,7 +127,7 @@ export async function correctWithReversed(dwi: DiffusionSeries, reversed: ArrayL
   if (opts.times) opts.times.apply = performance.now() - tp;
   const M = dwi.volumes[0].ijkToRAS, col = best.axis, mmPerVox = Math.hypot(M[col], M[4 + col], M[8 + col]);
   let mx = 0; for (const x of fieldAtCenters(best)) mx = Math.max(mx, Math.abs(x));
-  return `corrected with ${name} (shifts up to ${(mx * mmPerVox).toFixed(1)} mm; ${Math.round(bestLeft * 100)}% of the two scans' difference left)${aligned}`;
+  return `corrected with ${name} (shifts up to ${(mx * mmPerVox).toFixed(1)} mm; ${Math.round(bestLeft * 100)}% of the two scans' difference left)${moved}${aligned}`;
 }
 
 /** WHOLE-BRAIN TRACKING for naming: TractCloud learned from about 10,000 streamlines a brain. Seeded in the brain only

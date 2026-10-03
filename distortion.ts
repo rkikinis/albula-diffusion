@@ -26,10 +26,12 @@
 // input grid (Ron: "work in voxels"), which leaves the objective unchanged but for a constant factor; the paper's images
 // were in the usual 0..255 range, so both images are scaled together so their 99th percentile is 255 before fitting
 // (the α it recommends is relative to that). Along v the image is interpolated linearly (the paper does not say which
-// interpolation); its derivative is the linear interpolant of centered differences. Motion between the two scans is not
-// modeled (the pair is taken back to back).
+// interpolation); its derivative is the linear interpolant of centered differences. Motion between the two scans: rule 1
+// does not model it (the field absorbs it); rule 2 (2026-10-03, the default) estimates it with the field -- see "Motion
+// between the two scans" below.
 
-export const DISTORTION_RULE = 1;
+/** 1: the field alone, α = 200 (2026-09-29). 2: the field with the reversed scan's movement, α = 500 (2026-10-03). */
+export const DISTORTION_RULE = 2;
 
 export interface EpiPair {
   dims: [number, number, number];
@@ -39,6 +41,8 @@ export interface EpiPair {
   minus: Float32Array;
   /** The voxel axis of phase encoding: 0 (i), 1 (j) or 2 (k). */
   axis: 0 | 1 | 2;
+  /** Voxel size along i, j, k in mm, for the movement between the scans (rule 2); default 1. */
+  voxel?: [number, number, number];
 }
 
 export interface FieldFit {
@@ -273,9 +277,9 @@ function prolong(bc: Float32Array, gc: Grid, gf: Grid): Float32Array {
 }
 
 /** Estimate the displacement field of a reversed phase-encoding pair (three levels, coarse to fine). */
-export function estimateField(pair: EpiPair, opts: { alpha?: number; beta?: number; levels?: number } = {}): FieldFit {
+export function estimateField(pair: EpiPair, opts: { alpha?: number; beta?: number; levels?: number; /** A field to start from, on this grid: then only the finest level is fitted (rule 2's rounds). */ start?: Float32Array } = {}): FieldFit {
   const t0 = performance.now();
-  const alpha = opts.alpha ?? 200, beta = opts.beta ?? 10, nLevels = opts.levels ?? 3;
+  const alpha = opts.alpha ?? 200, beta = opts.beta ?? 10, nLevels = opts.start ? 1 : opts.levels ?? 3;
   // Both images scaled together: the 99th percentile of their mean to 255 (see UNITS above).
   const sample: number[] = [];
   for (let v = 0; v < pair.plus.length; v += 7) sample.push(0.5 * (pair.plus[v] + pair.minus[v]));
@@ -294,12 +298,156 @@ export function estimateField(pair: EpiPair, opts: { alpha?: number; beta?: numb
   let b: Float32Array | null = null, gPrev: Grid | null = null;
   for (let lv = pyr.length - 1; lv >= 0; lv--) {
     const L = pyr[lv], g = grid(L.dims, pair.axis);
-    const start = b && gPrev ? prolong(b, gPrev, g) : null;
+    const start = b && gPrev ? prolong(b, gPrev, g) : opts.start ?? null;
     const fit = fitLevel(g, L.plus, L.minus, start, alpha, beta);
     levels.push({ dims: L.dims, iterations: fit.iterations, residual: fit.residual });
     b = fit.b; gPrev = g;
   }
   return { b: b!, dims: pair.dims, axis: pair.axis, levels, ms: performance.now() - t0 };
+}
+
+// ── Motion between the two scans (rule 2, 2026-10-03) ─────────────────────────────────────────────────────────────
+// WHY: the field of rule 1 also absorbed any movement of the head between the two scans. On the split-half check
+// (Contents/tools/dmri-field-repeatability.ts; validation step 4) two independent halves of PAT16's b = 0 images gave fields
+// 0.30 mm apart (median), 2.3 mm (99th), against topup's 0.09 / 0.57 mm; topup found the PA image 0.65 mm apart between the
+// halves and took it out as movement -- its model (Andersson, Skare & Ashburner, NeuroImage 20:870, 2003) estimates the
+// field together with each scan's rigid movement. Ron: "Build".
+// HOW (ours, from that model; nothing read from topup's code): alternate -- the field with the reversed image held where
+// it is; then, with the field held, the reversed image's rigid movement that makes the two corrected images agree best
+// (least squares, Gauss-Newton, the six derivatives by differences); then the field again on the moved image; until the
+// movement settles. The movement is applied to the reversed image as acquired, before the reversed-gradient model -- the
+// order is approximate (the distortion happened in the scanner's frame after the head moved); with movements of a
+// millimeter and a degree and a field of tens of millimeters at most the error is about a field times the angle: 0.3 mm
+// at 20 mm and 1°. FIVE parameters, not six: a shift ALONG the phase-encoding axis cannot be told from a constant field
+// (both slide the two images apart along it, and the smoothness penalty does not see a constant), so it stays in the
+// field, as in rule 1; rotations and the two shifts across the axis are estimated. Rotations are about the volume's
+// center, in millimeters (EpiPair.voxel).
+
+/** The reversed image's rigid movement: shifts (mm) along the grid's axes and rotations (radians) about them, about the
+ *  volume's center; y = Rz·Ry·Rx·(x − c) + c + t, where the moved image at x samples the acquired one at y. */
+export interface Motion { t: [number, number, number]; r: [number, number, number] }
+
+/** The image moved rigidly (Motion), trilinear, the edge value beyond the edges. */
+export function moveRigid(img: ArrayLike<number>, dims: [number, number, number], voxel: [number, number, number], mo: Motion): Float32Array {
+  const [nx, ny, nz] = dims, out = new Float32Array(nx * ny * nz);
+  const [a, b, c] = mo.r, ca = Math.cos(a), sa = Math.sin(a), cb = Math.cos(b), sb = Math.sin(b), cc = Math.cos(c), sc = Math.sin(c);
+  // R = Rz(c)·Ry(b)·Rx(a)
+  const R = [cc * cb, cc * sb * sa - sc * ca, cc * sb * ca + sc * sa, sc * cb, sc * sb * sa + cc * ca, sc * sb * ca - cc * sa, -sb, cb * sa, cb * ca];
+  const ctr = [(nx - 1) / 2, (ny - 1) / 2, (nz - 1) / 2];
+  const at = (i: number, j: number, k: number) => img[(Math.min(nz - 1, Math.max(0, k)) * ny + Math.min(ny - 1, Math.max(0, j))) * nx + Math.min(nx - 1, Math.max(0, i))];
+  for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+    const x = (i - ctr[0]) * voxel[0], y = (j - ctr[1]) * voxel[1], z = (k - ctr[2]) * voxel[2];
+    const X = (R[0] * x + R[1] * y + R[2] * z + mo.t[0]) / voxel[0] + ctr[0];
+    const Y = (R[3] * x + R[4] * y + R[5] * z + mo.t[1]) / voxel[1] + ctr[1];
+    const Z = (R[6] * x + R[7] * y + R[8] * z + mo.t[2]) / voxel[2] + ctr[2];
+    const i0 = Math.floor(X), j0 = Math.floor(Y), k0 = Math.floor(Z), fx = X - i0, fy = Y - j0, fz = Z - k0;
+    const c00 = at(i0, j0, k0) * (1 - fx) + at(i0 + 1, j0, k0) * fx, c10 = at(i0, j0 + 1, k0) * (1 - fx) + at(i0 + 1, j0 + 1, k0) * fx;
+    const c01 = at(i0, j0, k0 + 1) * (1 - fx) + at(i0 + 1, j0, k0 + 1) * fx, c11 = at(i0, j0 + 1, k0 + 1) * (1 - fx) + at(i0 + 1, j0 + 1, k0 + 1) * fx;
+    out[(k * ny + j) * nx + i] = (c00 * (1 - fy) + c10 * fy) * (1 - fz) + (c01 * (1 - fy) + c11 * fy) * fz;
+  }
+  return out;
+}
+
+/** A Gaussian blur of σ voxels (separable, the edge value beyond the edges). */
+export function gaussSmooth(img: ArrayLike<number>, dims: [number, number, number], sigma: number): Float32Array {
+  const [nx, ny, nz] = dims, R = Math.ceil(3 * sigma), w: number[] = [];
+  let sum = 0; for (let d = -R; d <= R; d++) { const x = Math.exp(-d * d / (2 * sigma * sigma)); w.push(x); sum += x; }
+  for (let i = 0; i < w.length; i++) w[i] /= sum;
+  let a = Float32Array.from(img);
+  const n = [nx, ny, nz], st = [1, nx, nx * ny];
+  for (let ax = 0; ax < 3; ax++) {
+    const b = new Float32Array(a.length);
+    for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+      const at = [i, j, k][ax], v = (k * ny + j) * nx + i; let acc = 0;
+      for (let d = -R; d <= R; d++) acc += w[d + R] * a[v + (Math.min(n[ax] - 1, Math.max(0, at + d)) - at) * st[ax]];
+      b[v] = acc;
+    }
+    a = b;
+  }
+  return a;
+}
+
+/** Both images' blur before the movement is measured, in voxels: none, by measurement. WHY IT WAS TRIED: every
+ *  resampling of the moved image blurs it a little (linear interpolation), so the plain difference is smallest where it
+ *  needs the least resampling, which pulls the estimate toward no movement -- on a realistic phantom (PAT16's corrected
+ *  b = 0, a known movement of 0.4/0.3 mm and 0.3-0.5°) a full-size fit with the true field held recovered half of it, and
+ *  with a 1.5-voxel blur of both nearly all. WHY NOT: with the field estimated too, the blurred fit was unstable (the
+ *  rotations the field can mimic -- the two that move points partly along the phase-encoding axis -- wandered: −0.85°
+ *  for +0.3°) and its fields were worse (phantom field error 0.27-0.46 mm median against 0.23 without). Fitting the
+ *  movement on HALF-SIZE images (fitMotion's halfSize) averages both images alike, takes most of the bias out (PAT16's
+ *  and PAT08's movements then close to topup's own estimates), and is eight times cheaper. */
+const MOTION_BLUR = 0;
+
+/** The reversed image's movement with the field held (Gauss-Newton on the corrected images' difference, five parameters). */
+export function fitMotion(fit: FieldFit, pair: EpiPair, voxel: [number, number, number], start: Motion, opts: { blur?: number; rotations?: "all" | "about-axis"; /** Measure on half-size images (default; the movement is in mm, the same at any size). */ halfSize?: boolean } = {}): Motion {
+  if (opts.halfSize ?? true) {
+    // Both images and the field at half size: the field's values halve with the voxels doubled.
+    const a = restrict(Float32Array.from(pair.plus), pair.dims), c = restrict(Float32Array.from(pair.minus), pair.dims);
+    const fc = restrict(fieldAtCenters(fit), fit.dims);
+    for (let v = 0; v < fc.img.length; v++) fc.img[v] /= 2;
+    return fitMotion(fieldFromCenters(a.dims, pair.axis, fc.img), { ...pair, dims: a.dims, plus: a.img, minus: c.img }, voxel.map((x) => 2 * x) as [number, number, number], start, { ...opts, halfSize: false });
+  }
+  const free = [0, 1, 2].filter((a) => a !== pair.axis).map((a) => ({ kind: "t" as const, a, h: 0.05 }))
+    .concat([0, 1, 2].filter((a) => opts.rotations !== "about-axis" || a === pair.axis).map((a) => ({ kind: "r" as const, a, h: 1e-3 })));
+  const blur = opts.blur ?? MOTION_BLUR;
+  const corrMinus = applyField(fit, blur > 0 ? gaussSmooth(pair.minus, pair.dims, blur) : pair.minus, -1), plusB = blur > 0 ? gaussSmooth(pair.plus, pair.dims, blur) : Float32Array.from(pair.plus);
+  const resid = (mo: Motion) => { const c = applyField(fit, moveRigid(plusB, pair.dims, voxel, mo), 1); for (let v = 0; v < c.length; v++) c[v] -= corrMinus[v]; return c; };
+  const ssd = (r: Float32Array) => { let s = 0; for (const x of r) s += x * x; return s; };
+  const with_ = (mo: Motion, d: number[]) => { const n: Motion = { t: [...mo.t], r: [...mo.r] }; free.forEach((f, k) => { n[f.kind][f.a] += d[k]; }); return n; };
+  let mo: Motion = { t: [...start.t], r: [...start.r] }, r0 = resid(mo), E = ssd(r0), lambda = 1e-3;
+  for (let it = 0; it < 12; it++) {
+    const P = free.length, J = free.map((f, k) => { const d = new Array(P).fill(0); d[k] = f.h; const r = resid(with_(mo, d)); for (let v = 0; v < r.length; v++) r[v] = (r[v] - r0[v]) / f.h; return r; });
+    const A = new Float64Array(P * P), g = new Float64Array(P);
+    for (let p = 0; p < P; p++) { for (let q = p; q < P; q++) { let s = 0; const a = J[p], b = J[q]; for (let v = 0; v < a.length; v++) s += a[v] * b[v]; A[p * P + q] = A[q * P + p] = s; } let s = 0; for (let v = 0; v < r0.length; v++) s += J[p][v] * r0[v]; g[p] = -s; }
+    let accepted = false;
+    for (let tries = 0; tries < 6 && !accepted; tries++) {
+      const M = Float64Array.from(A); for (let p = 0; p < P; p++) M[p * P + p] *= 1 + lambda;
+      const d = solveSmall(M, g, P), cand = with_(mo, d), rc = resid(cand), Ec = ssd(rc);
+      if (Ec < E) {
+        accepted = true; mo = cand; r0 = rc; lambda = Math.max(1e-6, lambda / 10);
+        const small = free.every((f, k) => Math.abs(d[k]) < (f.kind === "t" ? 0.005 : 5e-5)), gain = (E - Ec) / E; E = Ec;
+        if (small || gain < 1e-5) return mo;
+      } else lambda *= 10;
+    }
+    if (!accepted) break;
+  }
+  return mo;
+}
+
+/** A small dense system by Gaussian elimination with partial pivoting. */
+function solveSmall(A: Float64Array, b: Float64Array, n: number): number[] {
+  const M = Float64Array.from(A), x = Array.from(b);
+  for (let c = 0; c < n; c++) {
+    let p = c; for (let r = c + 1; r < n; r++) if (Math.abs(M[r * n + c]) > Math.abs(M[p * n + c])) p = r;
+    if (p !== c) { for (let k = 0; k < n; k++) { const t = M[c * n + k]; M[c * n + k] = M[p * n + k]; M[p * n + k] = t; } const t = x[c]; x[c] = x[p]; x[p] = t; }
+    const d = M[c * n + c] || 1e-30;
+    for (let r = c + 1; r < n; r++) { const f = M[r * n + c] / d; for (let k = c; k < n; k++) M[r * n + k] -= f * M[c * n + k]; x[r] -= f * x[c]; }
+  }
+  for (let c = n - 1; c >= 0; c--) { let s = x[c]; for (let k = c + 1; k < n; k++) s -= M[c * n + k] * x[k]; x[c] = s / (M[c * n + c] || 1e-30); }
+  return x;
+}
+
+/** RULE 2: the field and the reversed image's movement together (see "Motion between the two scans" above). */
+export function estimateFieldWithMotion(pair: EpiPair, options: { alpha?: number; beta?: number; levels?: number; rounds?: number; alphaMotion?: number; blur?: number; rotations?: "all" | "about-axis" } = {}): FieldFit & { motion: Motion; rounds: number } {
+  const t0 = performance.now(), voxel = pair.voxel ?? [1, 1, 1];
+  // α = 500, not rule 1's 200: on the split halves and against topup (PAT16, PAT05, PAT08) 500 with the movement was better
+  // than 200 with it, than 500 without it, and than 1000 (which lost topup's sharp field near the sinuses, 99th 2.4-2.9 mm).
+  const opts = { alpha: 500, rounds: 6, ...options };
+  // alphaMotion: the field's smoothness while the movement is measured (default the same). A much stiffer one (20,000) was
+  // tried so that the field could not bend to absorb the movement; on the phantom it gave the same field (0.22 against
+  // 0.23 mm median error) in 40% more time, so it is not the default.
+  const stiff = { ...opts, alpha: opts.alphaMotion ?? opts.alpha };
+  let mo: Motion = { t: [0, 0, 0], r: [0, 0, 0] }, fit = estimateField(pair, stiff), rounds = 0;
+  for (let round = 0; round < (opts.rounds ?? 4); round++) {
+    const next = fitMotion(fit, pair, voxel, mo, opts);
+    // Settled: under 0.05 mm and 0.03° of change (a fiftieth of a 2.5 mm voxel; 0.03° moves a point 0.05 mm at 100 mm).
+    const moved = Math.max(...[0, 1, 2].map((a) => Math.abs(next.t[a] - mo.t[a]))) > 0.05 || Math.max(...[0, 1, 2].map((a) => Math.abs(next.r[a] - mo.r[a]))) > 5e-4;
+    mo = next; rounds = round + 1;
+    if (!moved) break;
+    fit = estimateField({ ...pair, plus: moveRigid(pair.plus, pair.dims, voxel, mo) }, { ...stiff, start: fit.b });
+  }
+  fit = estimateField({ ...pair, plus: moveRigid(pair.plus, pair.dims, voxel, mo) }, { ...opts, start: fit.b });
+  return { ...fit, motion: mo, rounds, ms: performance.now() - t0 };
 }
 
 /** Correct one image taken with phase encoding along +axis (sign +1) or -axis (sign -1): I(x) = I±(x ± b v)(1 ± ∂ᵥb). */
