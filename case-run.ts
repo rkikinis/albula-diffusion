@@ -12,12 +12,14 @@ import { fromFsl } from "./dwi.ts";
 import { fitTensors } from "./tensor.ts";
 import { prepareUkfData } from "./ukf.ts";
 import { correctWithReversed, sortByDistance, stageText, streamlineDistances, tractName, trackUkfSeeds, wholeBrainSeeds, type StageTimes, type TrackTiming } from "./planning.ts";
-import { everyBrainVoxel, seedsFor, TRACKING_RULE, TRACKING_RULES, ukfDataFor } from "./tracking-rules.ts";
+import { everyBrainVoxel, seedsFor, TRACKING_RULE, TRACKING_RULES, ukfDataFor, withBrainFromT1, type MaskGrid, type TrackingRuleId } from "./tracking-rules.ts";
 import { alignToT1, type Rigid } from "./registration.ts";
 import { applyField, type FieldFit } from "./distortion.ts";
 import type { TractCloudModel } from "./tractcloud/tractcloud.ts";
 import { nameTracts, SHORT, type Named } from "./tractcloud/name-tracts.ts";
 import { loadRapidParc, type RapidParcModel } from "./rapidparc/rapidparc.ts";
+/** Where tracking rule 3's brain mask for a library case lives (Contents/tools/synthstrip-masks.ts writes it). */
+export const synthstripMaskPath = (ds: string, id: string) => `${ds}/derivatives/synthstrip/sub-${id}/anat/sub-${id}_ses-preop_desc-synthstrip_mask.nii.gz`;
 /** RapidParc's standard weights from the file beside this module (case runs are Deno's), read once. */
 let rp: RapidParcModel | undefined;
 const defaultRapidParc = () => rp ??= loadRapidParc(Deno.readFileSync(new URL("./rapidparc/model/rapidparc.safetensors", import.meta.url)).buffer);
@@ -33,7 +35,9 @@ export interface CaseResult {
   id: string; corrected: string; streamlines: number; short: number; other: number; named: number; tumorVoxels: number;
   method: "ukf" | "ptt";
   /** tracking-rules.ts: the rule the case was tracked by, and the shell it used (undefined: every shell). */
-  trackingRule?: 1 | 2; shell?: number;
+  trackingRule?: TrackingRuleId; shell?: number;
+  /** What the brain mask (seeds and tracking boundary) was made from (TensorFit.seedMaskRule). */
+  brain?: string;
   /** registration.ts: the move from the diffusion scan to the T1 the case was tracked on, and a doubt about it. */
   alignment?: { T: Rigid; doubt?: string };
   seconds: { read_correct_fit: number; csd: number; track: number; name: number; total: number };
@@ -49,7 +53,7 @@ export interface CaseResult {
 }
 
 /** Run case `id` of the BIDS dataset at `ds` (ds001226's layout: ses-preop, acq-AP / acq-PA, derivatives/tumor_masks). */
-export async function runCase(ds: string, id: string, device: GPUDevice, model: TractCloudModel, method: "ukf" | "ptt" = "ukf", opts: { pttWorkerUrl?: URL; csdWorkerUrl?: URL; /** The card tracker's options (checking variants, e.g. onePass). */ ukf?: Record<string, unknown>; /** The naming draw's seed (label noise floor). */ nameSeed?: number; /** Who names: RapidParc (the default since 2026-10-03; its weights) or TractCloud ("tractcloud"). */ labeler?: RapidParcModel | "tractcloud"; /** Add the scan's own noise again, seeded (scan noise floor). */ noiseSeed?: number; /** Return the streamlines and names. */ keep?: boolean; /** How the brain mask is made (tensor.ts). */ maskMethod?: "head" | "median-otsu"; /** Whole-brain starting points (planning.ts WHOLE_BRAIN_SEEDS). */ seeds?: number; /** Their draw's seed (seed noise floor). */ seedDraw?: number; /** false: seeds anywhere in the head mask, as before 2026-10-02. */ seedMask?: boolean; /** One seed at the center of EVERY brain voxel, left to the tracker's own seed threshold (the ORG atlas's tracking, Mike Halle's mail of 2026-10-01; with opts.ukf's freeWater: false and his settings). Checking only: about ten times the seeds. */ seedEveryVoxel?: boolean; /** The distortion correction's rule (distortion.ts DISTORTION_RULE; default 2). */ distortionRule?: 1 | 2; /** tracking-rules.ts TRACKING_RULE; default the current one. */ trackingRule?: 1 | 2; /** false: stay in the diffusion scan's space even when the case has a T1 (as before 2026-10-03). */ onT1?: boolean } = {}): Promise<CaseResult> {
+export async function runCase(ds: string, id: string, device: GPUDevice, model: TractCloudModel, method: "ukf" | "ptt" = "ukf", opts: { pttWorkerUrl?: URL; csdWorkerUrl?: URL; /** The card tracker's options (checking variants, e.g. onePass). */ ukf?: Record<string, unknown>; /** The naming draw's seed (label noise floor). */ nameSeed?: number; /** Who names: RapidParc (the default since 2026-10-03; its weights) or TractCloud ("tractcloud"). */ labeler?: RapidParcModel | "tractcloud"; /** Add the scan's own noise again, seeded (scan noise floor). */ noiseSeed?: number; /** Return the streamlines and names. */ keep?: boolean; /** How the brain mask is made (tensor.ts). */ maskMethod?: "head" | "median-otsu"; /** Whole-brain starting points (planning.ts WHOLE_BRAIN_SEEDS). */ seeds?: number; /** Their draw's seed (seed noise floor). */ seedDraw?: number; /** false: seeds anywhere in the head mask, as before 2026-10-02. */ seedMask?: boolean; /** One seed at the center of EVERY brain voxel, left to the tracker's own seed threshold (the ORG atlas's tracking, Mike Halle's mail of 2026-10-01; with opts.ukf's freeWater: false and his settings). Checking only: about ten times the seeds. */ seedEveryVoxel?: boolean; /** The distortion correction's rule (distortion.ts DISTORTION_RULE; default 2). */ distortionRule?: 1 | 2; /** tracking-rules.ts TRACKING_RULE; default the current one. */ trackingRule?: TrackingRuleId; /** false: stay in the diffusion scan's space even when the case has a T1 (as before 2026-10-03). */ onT1?: boolean } = {}): Promise<CaseResult> {
   const t0 = performance.now(), p = `${ds}/sub-${id}/ses-preop`;
   const rd = (f: string) => Deno.readFileSync(`${p}/${f}`), tx = (f: string) => Deno.readTextFileSync(`${p}/${f}`);
   const sidecarPE = (f: string) => { try { return (JSON.parse(tx(f)) as { PhaseEncodingDirection?: string }).PhaseEncodingDirection; } catch { return undefined; } };
@@ -74,6 +78,16 @@ export async function runCase(ds: string, id: string, device: GPUDevice, model: 
   // THE T1 (2026-10-03, Ron: "Number three, go"; registration.ts): when the case has one, the field is not applied here
   // but with the move to the T1, in one resampling, and everything after is in the T1's space.
   const t1Vol = opts.onT1 === false ? undefined : await (async () => { try { return (await parseNiftiVolumes(rd(`anat/sub-${id}_ses-preop_T1w.nii.gz`)))[0]; } catch { return undefined; } })();
+  // RULE 3's BRAIN (tracking-rules.ts): SynthStrip's mask of the T1, made beforehand by Contents/tools/synthstrip-masks.ts
+  // (haversack). A case run asked for rule 3 without it stops and says so rather than tracking under another rule.
+  const rule = TRACKING_RULES[opts.trackingRule ?? TRACKING_RULE];
+  let brainT1: MaskGrid | undefined;
+  if (method === "ukf" && rule.brain === "t1-synthstrip") {
+    if (!t1Vol) throw new Error(`${id}: tracking rule 3 needs the T1 (onT1 is false or the case has none)`);
+    const f = synthstripMaskPath(ds, id);
+    try { const m = (await parseNiftiVolumes(Deno.readFileSync(f)))[0]; brainT1 = { dims: m.dims, ijkToRAS: m.ijkToRAS, data: m.data as ArrayLike<number> }; }
+    catch { throw new Error(`${id}: tracking rule 3 needs SynthStrip's brain mask at ${f} (run Contents/tools/synthstrip-masks.ts ${id})`); }
+  }
   const field: { fit?: FieldFit; sign?: 1 | -1 } = {};
   let corrected = await correctWithReversed(dwi, rev.volumes.filter((_, i) => rev.bValues[i] < 50).map((v) => v.data), "PA", undefined,
     { partnerGrid: { dims: rev.volumes[0].dims, ijkToRAS: rev.volumes[0].ijkToRAS }, times: stages, rule: opts.distortionRule, apply: !t1Vol, field,
@@ -82,18 +96,19 @@ export async function runCase(ds: string, id: string, device: GPUDevice, model: 
       phaseEncoding: { scan: sidecarPE(`dwi/sub-${id}_ses-preop_acq-AP_dwi.json`), partner: sidecarPE(`dwi/sub-${id}_ses-preop_acq-PA_dwi.json`) } });
   let alignment: { T: Rigid; doubt?: string } | undefined;
   if (t1Vol) {
-    const a = await alignToT1(dwi, { dims: t1Vol.dims as [number, number, number], ijkToRAS: t1Vol.ijkToRAS, data: t1Vol.data as ArrayLike<number> }, field.fit ? { fit: field.fit, sign: field.sign ?? -1 } : undefined, stages);
+    const a = await alignToT1(dwi, { dims: t1Vol.dims as [number, number, number], ijkToRAS: t1Vol.ijkToRAS, data: t1Vol.data as ArrayLike<number> }, field.fit ? { fit: field.fit, sign: field.sign ?? -1 } : undefined, stages, brainT1 ? { brainT1 } : {});
     // A doubtful alignment is not used (as in the module): the scanner's placement stands, the field applied as before.
     if (a.doubt) { if (field.fit) for (const v of dwi.volumes) { v.data = applyField(field.fit, v.data as ArrayLike<number>, field.sign ?? -1); v.dtype = "<f4"; } corrected += `; not aligned to the T1: ${a.doubt}`; }
     else { dwi = a.dwi; corrected += `; ${a.said}`; }
     alignment = { T: a.T, ...(a.doubt ? { doubt: a.doubt } : {}) };
   }
   const tFit = performance.now();
-  const fit = fitTensors(dwi, { maxB: CASE_DEFAULTS.maxB, maskMethod: opts.maskMethod, seedMask: opts.seedMask });
+  let fit = fitTensors(dwi, { maxB: CASE_DEFAULTS.maxB, maskMethod: opts.maskMethod, seedMask: opts.seedMask });
+  // On the T1-aligned grid only: a doubtful alignment left the scan in the scanner's place, where a T1 mask does not fit.
+  if (brainT1 && alignment && !alignment.doubt) fit = withBrainFromT1(fit, brainT1);
   const t1 = performance.now();
   stages.fit = t1 - tFit;
   const detail: TrackTiming = { prepare: 0, gpu: 0, assemble: 0, between: 0 };
-  const rule = TRACKING_RULES[opts.trackingRule ?? TRACKING_RULE];
   let shell: number | undefined;
   let sl: Float32Array[], csdSeconds = 0;
   if (method === "ptt") {
@@ -135,6 +150,6 @@ export async function runCase(ds: string, id: string, device: GPUDevice, model: 
   const t3 = performance.now();
   stages.distances = t3 - tDist;
   stages.total = t3 - t0;
-  return { id, corrected, ...(alignment ? { alignment } : {}), trackingRule: method === "ukf" ? rule.id : undefined, shell, stages, stagesText: stageText(stages), ...(opts.keep ? { kept: { sl, named } } : {}), ...(added !== undefined ? { noiseSigma: +added.toFixed(2) } : {}), streamlines: sl.length, short, other, named: sl.length - short - other, tumorVoxels, method,
+  return { id, corrected, ...(alignment ? { alignment } : {}), trackingRule: method === "ukf" ? rule.id : undefined, brain: fit.seedMaskRule ?? fit.maskRule, shell, stages, stagesText: stageText(stages), ...(opts.keep ? { kept: { sl, named } } : {}), ...(added !== undefined ? { noiseSigma: +added.toFixed(2) } : {}), streamlines: sl.length, short, other, named: sl.length - short - other, tumorVoxels, method,
     seconds: { read_correct_fit: +((t1 - t0) / 1000).toFixed(1), csd: +csdSeconds.toFixed(1), track: +((t2 - t1 - csdSeconds * 1000) / 1000).toFixed(1), name: +named.seconds.toFixed(1), total: +((t3 - t0) / 1000).toFixed(1) }, tracts };
 }

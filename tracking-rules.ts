@@ -14,6 +14,14 @@
 // Why: on PAT14 and PAT25 tractline's fibers reached the tumor where rule 1's stopped 8-9 mm short (validation step 6,
 // dmri-review 2026-10-03). Caveat carried over from tensor.ts: median_otsu cut the top of PAT16's brain; tractline
 // tracks inside it all the same.
+//
+// RULE 3 (2026-10-04; Ron: "yes, SynthStrip through haversack"): rule 2 with a different brain. median_otsu is made on the
+// diffusion scan's b = 0 after a 9-voxel median filter run four times; at the skull base that filter averages the brain
+// with the bone and air around it, and the mask leaves out the lower temporal lobes and part of the cerebellum (PAT13,
+// PAT14, PAT23; dmri-review 2026-10-04). Rule 3 takes the brain from the T1 instead -- SynthStrip (Hoopes et al. 2022)
+// run by haversack on the T1 the scan is aligned to -- as the seeds and the tracking boundary. FastSurfer was tried and
+// not taken: it labels most of a large tumor and much of the tissue around every tumor as not brain. Needs a T1 and its
+// SynthStrip mask; without them the caller falls back to rule 2 and says so.
 import type { DiffusionSeries } from "./dwi.ts";
 import type { TensorFit } from "./tensor.ts";
 import { prepareUkfData, type UkfData, type UkfOptions } from "./ukf.ts";
@@ -21,22 +29,29 @@ import { wholeBrainSeeds } from "./planning.ts";
 import { rng } from "./tractcloud/tractcloud.ts";
 
 export interface TrackingRule {
-  id: 1 | 2;
+  id: 1 | 2 | 3;
   /** The tracker's settings (ukf.ts UkfOptions); stoppingFA is also the module's "Stop below FA" default. */
   ukf: Required<Pick<UkfOptions, "freeWater" | "seedingThreshold" | "stoppingFA" | "stoppingThreshold" | "recordLength">>;
   /** One shell: the b-value it is nearest to (the b = 0 images are always kept); undefined: every shell. */
   shellNear?: number;
   /** Where the seeds go: a draw among brain voxels above FA 0.2 (planning.ts wholeBrainSeeds), or every brain voxel. */
   seeding: "sample" | "every-voxel";
-  /** The tracking boundary: the head mask (TensorFit.mask) or the brain mask (TensorFit.seedMask, median_otsu). */
+  /** The tracking boundary: the head mask (TensorFit.mask) or the brain mask (TensorFit.seedMask). */
   trackIn: "head" | "brain";
+  /** What the brain mask (TensorFit.seedMask) is: median_otsu on the scan's b = 0, or SynthStrip's mask of the T1 put on
+   *  the scan's grid (withBrainFromT1). */
+  brain: "median-otsu" | "t1-synthstrip";
 }
 
-export const TRACKING_RULES: Record<1 | 2, TrackingRule> = {
-  1: { id: 1, ukf: { freeWater: true, seedingThreshold: 0.18, stoppingFA: 0.15, stoppingThreshold: 0.1, recordLength: 0.9 }, seeding: "sample", trackIn: "head" },
-  2: { id: 2, ukf: { freeWater: false, seedingThreshold: 0.1, stoppingFA: 0.08, stoppingThreshold: 0.06, recordLength: 1.8 }, shellNear: 3000, seeding: "every-voxel", trackIn: "brain" },
+export type TrackingRuleId = 1 | 2 | 3;
+export const TRACKING_RULES: Record<TrackingRuleId, TrackingRule> = {
+  1: { id: 1, ukf: { freeWater: true, seedingThreshold: 0.18, stoppingFA: 0.15, stoppingThreshold: 0.1, recordLength: 0.9 }, seeding: "sample", trackIn: "head", brain: "median-otsu" },
+  2: { id: 2, ukf: { freeWater: false, seedingThreshold: 0.1, stoppingFA: 0.08, stoppingThreshold: 0.06, recordLength: 1.8 }, shellNear: 3000, seeding: "every-voxel", trackIn: "brain", brain: "median-otsu" },
+  3: { id: 3, ukf: { freeWater: false, seedingThreshold: 0.1, stoppingFA: 0.08, stoppingThreshold: 0.06, recordLength: 1.8 }, shellNear: 3000, seeding: "every-voxel", trackIn: "brain", brain: "t1-synthstrip" },
 };
-export const TRACKING_RULE: 1 | 2 = 2;
+/** The default. Stays 2 until the module can get SynthStrip's mask from haversack (rule 3 is used by the case runs first,
+ *  to measure what it changes). */
+export const TRACKING_RULE: TrackingRuleId = 2;
 
 /** The b-value of the shell nearest `near` (shells: b-values over 50, grouped within 50 of each other). */
 export function shellNearest(bValues: number[], near: number): number | undefined {
@@ -74,4 +89,29 @@ export function everyBrainVoxel(fit: TensorFit, draw?: number): number[][] {
 /** The whole-brain seeds for a rule (RAS mm). */
 export function seedsFor(fit: TensorFit, rule: TrackingRule, opts: { count?: number; draw?: number } = {}): number[][] {
   return rule.seeding === "every-voxel" ? everyBrainVoxel(fit, opts.draw) : wholeBrainSeeds(fit, opts.count, opts.draw);
+}
+
+/** A mask on a grid (1 inside), e.g. SynthStrip's brain mask of the T1. */
+export interface MaskGrid { dims: number[]; ijkToRAS: number[]; data: ArrayLike<number> }
+
+/** A T1-space mask put on the fit's grid: each fit voxel is inside when the mask is inside at its center (nearest mask
+ *  voxel). The fit's grid is the T1-aligned one (registration.ts), so no move is involved. */
+export function brainFromT1(fit: Pick<TensorFit, "dims" | "ijkToRAS">, mask: MaskGrid): Uint8Array {
+  const [nx, ny, nz] = fit.dims, M = fit.ijkToRAS, [mx, my, mz] = mask.dims, A = mask.ijkToRAS;
+  // Inverse of the mask's affine (its 3×3 by cofactors, then the translation).
+  const a = A[0], b = A[1], c = A[2], d = A[4], e = A[5], f = A[6], g = A[8], h = A[9], i9 = A[10];
+  const det = a * (e * i9 - f * h) - b * (d * i9 - f * g) + c * (d * h - e * g);
+  const Ri = [(e * i9 - f * h) / det, (c * h - b * i9) / det, (b * f - c * e) / det, (f * g - d * i9) / det, (a * i9 - c * g) / det, (c * d - a * f) / det, (d * h - e * g) / det, (b * g - a * h) / det, (a * e - b * d) / det];
+  const out = new Uint8Array(nx * ny * nz);
+  for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+    const x = [0, 1, 2].map((r) => M[4 * r] * i + M[4 * r + 1] * j + M[4 * r + 2] * k + M[4 * r + 3] - A[4 * r + 3]);
+    const p = Math.round(Ri[0] * x[0] + Ri[1] * x[1] + Ri[2] * x[2]), q = Math.round(Ri[3] * x[0] + Ri[4] * x[1] + Ri[5] * x[2]), r = Math.round(Ri[6] * x[0] + Ri[7] * x[1] + Ri[8] * x[2]);
+    if (p >= 0 && q >= 0 && r >= 0 && p < mx && q < my && r < mz && mask.data[(r * my + q) * mx + p] > 0) out[(k * ny + j) * nx + i] = 1;
+  }
+  return out;
+}
+
+/** The fit with its brain mask (seedMask) taken from a T1-space mask: tracking rule 3. */
+export function withBrainFromT1(fit: TensorFit, mask: MaskGrid, what = "SynthStrip's brain mask of the T1"): TensorFit {
+  return { ...fit, seedMask: brainFromT1(fit, mask), seedMaskRule: what };
 }

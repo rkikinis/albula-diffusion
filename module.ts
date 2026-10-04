@@ -39,13 +39,13 @@ import type { Volume } from "albula";
 import { FiberField, type RGBA, type Strand } from "albula";
 import { colorFA, fitTensors, type TensorFit } from "./tensor.ts";
 import { type UkfData } from "./ukf.ts";
-import { seedsFor, TRACKING_RULE, TRACKING_RULES, ukfDataFor } from "./tracking-rules.ts";
+import { seedsFor, TRACKING_RULE, TRACKING_RULES, ukfDataFor, withBrainFromT1, type TrackingRuleId } from "./tracking-rules.ts";
 import { alignToT1 } from "./registration.ts";
 import { applyField, type FieldFit } from "./distortion.ts";
 /** "Stop below FA"'s default under Advanced (the single-tensor tracker's; the UKF's comes from the tracking rule). */
 const ADV_MIN_FA = 0.15;
 import { DCM2NIIX_VERSION, secondOpinion, type SecondOpinion } from "./second-opinion.ts";
-import { assetUrl, holdDrawing, seriesDicomFiles, startPlacing } from "albula";
+import { assetUrl, holdDrawing, seriesDicomFiles, startPlacing, synthstripBrainMask } from "albula";
 import { createSegmentation, growIntoSegmentation, openDicomDatabase, openLoadFromDisk, paintInto, registerProbeRows, registerRayHits, runAction, saveSegmentationToDicom, showHideAllState } from "albula";
 import { buildTractIndex, tractsNear, type TractIndex } from "./tract-index.ts";
 import { sliceCrossings, trimEnds } from "./tract-slice.ts";
@@ -67,7 +67,7 @@ interface Scan { browserId: string; name: string; frameIds: string[]; bValues: n
   /** The scanner's record of the phase-encoding direction (diffusion-vendors.ts phaseEncodingOf: "j-", or "ROW" / "COL"). */
   phaseEncoding?: string }
 /** What has been computed for a scan, kept while the scan is in the scene. */
-interface Computed { dwi: DiffusionSeries; fit: TensorFit; maxB: number; corrected: string; partnerId: string; /** The anatomy MRI the scan was aligned to ("" none). */ anatomyId?: string; faId?: string; colorFaId?: string; ukf?: UkfData; fod?: FodVolume }
+interface Computed { dwi: DiffusionSeries; fit: TensorFit; maxB: number; corrected: string; partnerId: string; /** The anatomy MRI the scan was aligned to ("" none). */ anatomyId?: string; /** The tracking rule the brain mask was made for (tracking-rules.ts): the default, or 2 when rule 3's brain could not be had. */ rule: TrackingRuleId; faId?: string; colorFaId?: string; ukf?: UkfData; fod?: FodVolume }
 /** A reversed phase-encoding scan for a diffusion scan: b = 0 images of the same study, on its own grid (aligned by the scanner's coordinates). */
 interface Partner { id: string; name: string; frameIds: string[]; dims: number[]; ijkToRAS: number[]; phaseEncoding?: string }
 /** A node's recorded phase-encoding direction, as the diffusion interpreter read it. */
@@ -447,25 +447,42 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     const times: StageTimes = { read: performance.now() - t0 };
     const field: { fit?: FieldFit; sign?: 1 | -1 } = {};
     let corrected = partner ? await correctDistortion(dwi, partner, times, scan.phaseEncoding, anatOk ? field : undefined) : correct ? "not corrected (no reversed phase-encoding scan of this study is loaded)" : "not corrected (switched off)";
+    // RULE 3's BRAIN (tracking-rules.ts): SynthStrip's mask of the MRI of the anatomy, from the segmentation server. Without
+    // it (no anatomy MRI, no server, a doubtful alignment) the brain is made from the diffusion scan as in rule 2, and the
+    // status line says so.
+    let rule: TrackingRuleId = TRACKING_RULE;
+    let brainT1: { dims: number[]; ijkToRAS: number[]; data: ArrayLike<number> } | undefined, brainNote = "";
+    if (TRACKING_RULES[rule].brain === "t1-synthstrip") {
+      if (!anatOk) { rule = 2; brainNote = "the brain was taken from the diffusion scan (no MRI of the anatomy is loaded)"; }
+      else {
+        say("Finding the brain on the MRI of the anatomy…");
+        const r = await synthstripBrainMask(live, anatOk.id, (line) => say(`Finding the brain on the MRI of the anatomy: ${line}`));
+        if (r.ok) { brainT1 = r.mask; brainNote = "the brain was found on the MRI of the anatomy (SynthStrip)"; }
+        else { rule = 2; brainNote = `the brain was taken from the diffusion scan, because ${r.message}`; }
+      }
+    }
     if (anatOk) {
       say("Aligning the diffusion scan to the MRI of the anatomy…");
       const z = await fetchZarrVolumeNative(live.blobBase(), anatOk.zarr as ZarrDesc);
-      const a = await alignToT1(dwi, { dims: anatOk.dims as [number, number, number], ijkToRAS: anatOk.ijkToRAS as number[], data: z.data as ArrayLike<number> }, field.fit ? { fit: field.fit, sign: field.sign ?? -1 } : undefined, times);
+      const a = await alignToT1(dwi, { dims: anatOk.dims as [number, number, number], ijkToRAS: anatOk.ijkToRAS as number[], data: z.data as ArrayLike<number> }, field.fit ? { fit: field.fit, sign: field.sign ?? -1 } : undefined, times, brainT1 ? { brainT1 } : {});
       if (a.doubt) {
         // A DOUBTFUL ALIGNMENT IS NOT USED (until aligning by hand is built): the scanner's placement stands, the
         // correction is applied as before, and the person is told.
         if (field.fit) for (const v of dwi.volumes) { v.data = applyField(field.fit, v.data as ArrayLike<number>, field.sign ?? -1); v.dtype = "<f4"; }
         corrected += `; not aligned to the MRI of the anatomy: the automatic alignment looked wrong (${a.doubt}), so the scanner's placement is used`;
+        if (brainT1) { brainT1 = undefined; rule = 2; brainNote = "the brain was taken from the diffusion scan, because the scan is not aligned to the MRI of the anatomy"; }
       } else { dwi = a.dwi; corrected += `; ${a.said}`; }
     }
     const t1 = performance.now();
     say("Fitting the diffusion tensor…");
     await new Promise((r) => setTimeout(r, 0));
-    const fit = fitTensors(dwi, { maxB: adv.maxB });
+    let fit = fitTensors(dwi, { maxB: adv.maxB });
+    if (brainT1) fit = withBrainFromT1(fit, brainT1);
+    if (brainNote) corrected += `; ${brainNote}`;
     times.fit = performance.now() - t1;
     times.total = performance.now() - t0;
     fitTimes = times;
-    const c: Computed = { dwi, fit, maxB: adv.maxB, corrected, partnerId: partner?.id ?? "", anatomyId: anatOk?.id ?? "" };
+    const c: Computed = { dwi, fit, maxB: adv.maxB, corrected, partnerId: partner?.id ?? "", anatomyId: anatOk?.id ?? "", rule };
     computed.set(scan.browserId, c);
     say(`Maps made from ${fit.used.length} volumes up to b = ${adv.maxB}; distortion ${corrected}. ${stageText(times)}.`);
     return c;
@@ -584,7 +601,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     // THE TRACKING RULE (tracking-rules.ts): the shell, the mask and the thresholds. "Stop below FA" under Advanced shows
     // and sets the two-tensor tracker's own value when that tracker is chosen (adv.ukfStopFA, the rule's 0.08 to start
     // with), the single-tensor tracker's (adv.minFA, 0.15) otherwise (critic, 2026-10-03, finding 14).
-    const rule = TRACKING_RULES[TRACKING_RULE];
+    const rule = TRACKING_RULES[c.rule];
     c.ukf ??= ukfDataFor(c.dwi, c.fit, rule);
     const stopFA = adv.ukfStopFA;
     const timing: TrackTiming & { data: number } = { prepare: 0, gpu: 0, assemble: 0, between: 0, data: performance.now() - t0 };
@@ -659,7 +676,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       const c = await ensureFit(scan);
       const times: StageTimes = takeFitTimes(), before = times.total ?? 0;
       const t0 = performance.now();
-      const seeds = method === "ukf" ? seedsFor(c.fit, TRACKING_RULES[TRACKING_RULE]) : wholeBrainSeeds(c.fit);
+      const seeds = method === "ukf" ? seedsFor(c.fit, TRACKING_RULES[c.rule]) : wholeBrainSeeds(c.fit);
       times.seeds = performance.now() - t0;
       say(`Following tracts through the whole brain from ${seeds.length.toLocaleString()} starting points…`);
       lastTiming = undefined;
