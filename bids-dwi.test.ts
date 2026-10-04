@@ -5,6 +5,7 @@
 import { assert, assertEquals } from "jsr:@std/assert@1";
 import { dicomIO, parseInstances, volumesOfSeries } from "albula";
 import { buildBidsSubject, dcmjs, dciodvfy, HAS_DCIODVFY, readBidsDataset, setDicomLibrary } from "albula/testing";
+import { phaseEncodingOf } from "./diffusion-vendors.ts";
 import { fromDicomVolumes } from "./dwi.ts";
 import "./hooks.ts";                                         // the diffusion kind and interpreter, as the app registers them
 
@@ -104,7 +105,10 @@ Deno.test("BIDS import with the diffusion kind: T1, diffusion and mask, stable U
     assertEquals([tumor.SegmentAlgorithmType, tumor.SegmentAlgorithmName], ["SEMIAUTOMATIC", "manual delineation"]);
 
     if (HAS_DCIODVFY) {
-      const known = /PatientOrientation\(0020,0020\)> - Missing attribute for Type 2C Conditional - Module=<GeneralImage>/;
+      // Accepted, each a dicom3tools simplification (Contents/docs/upstream-issues-dicom3tools.md): Patient Orientation
+      // (item 2), and the MR FOV/Geometry macro's encoding attributes, which it requires always where the standard
+      // requires them for ORIGINAL frames only (item 3; module/mr.tpl lines 75-79: Condition="Always").
+      const known = /PatientOrientation\(0020,0020\)> - Missing attribute for Type 2C Conditional - Module=<GeneralImage>|MRFOVGeometrySequence\(0018,9125\)\[1\]\/(MRAcquisitionFrequencyEncodingSteps|MRAcquisitionPhaseEncodingStepsInPlane|PercentSampling|PercentPhaseFieldOfView)\(0018,[0-9a-f]{4}\)> - Missing attribute for Type 1C Conditional - Module=<MRFOVGeometryMacro>/;
       for (const o of a) assertEquals(dciodvfy(o.files[0].bytes)!.errors.filter((e) => !known.test(e)), [], `${o.role}: dciodvfy`);
     }
   } finally { await Deno.remove(root, { recursive: true }); }
@@ -131,6 +135,13 @@ Deno.test("BIDS diffusion: no invented dates, the sidecar's who-and-where left o
     const dwi = objects.find((o) => o.role.startsWith("dwi"))!;
     const text = new TextDecoder().decode(dwi.files[0].bytes);
     assert(text.includes("PhaseEncodingDirection") && !text.includes("Somewhere") && !text.includes("DeviceSerialNumber"), "sidecar filtered");
+    // THE PHASE-ENCODING DIRECTION (2026-10-03): the axis in the standard attribute (j: along the columns), the sign kept
+    // in the private block, and both read back as the scanner's record ("j-") by the diffusion interpreter.
+    const file = io.readFile(ab(dwi.files[0].bytes)), nd = io.naturalize(file.dict) as Record<string, unknown>;
+    const fov = ((nd.SharedFunctionalGroupsSequence as Record<string, unknown>[])[0].MRFOVGeometrySequence as Record<string, unknown>[])[0];
+    assertEquals(fov.InPlanePhaseEncodingDirection, "COLUMN");
+    assertEquals(phaseEncodingOf(fov.InPlanePhaseEncodingDirection, file.dict as never), "j-");
+    assertEquals(phaseEncodingOf(fov.InPlanePhaseEncodingDirection), "COL");
     assertEquals([objects[0].files[0].index.newStudy?.patientSex, objects[0].files[0].index.newStudy?.patientAge], ["F", "047Y"]);
   } finally { await Deno.remove(root, { recursive: true }); }
 });

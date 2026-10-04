@@ -21,7 +21,7 @@
 // DIRECTIONAL; a mosaic's empty SliceNormalVector falls back to the image's own normal.
 export const VENDOR_RULE = 2;
 
-import { privateAt as at, bytesOf, dicomNumber as num, parseCsa, privateNumbers, type DicomJsonRaw as Raw } from "albula";
+import { privateAt as at, bytesOf, dicomNumber as num, parseCsa, privateNumbers, privateTag, type DicomJsonRaw as Raw } from "albula";
 import type { VolumeInterpreter, VolumeKey } from "albula";
 import { INTERPRETER_CODE } from "./interpreter-code.generated.ts";
 
@@ -178,13 +178,35 @@ const unitDir = (g: unknown): [number, number, number] | undefined => {
   const v = Array.isArray(g) ? g.map(Number) : undefined;
   return v && v.length === 3 && Math.hypot(...v) > 0.5 ? v as [number, number, number] : undefined;
 };
-function diffusionKey(b: number, dir: [number, number, number] | undefined, source?: string, weak?: boolean): VolumeKey {
+/**
+ * THE PHASE-ENCODING DIRECTION of a scan (2026-10-03, Ron: "Number two, yes"): whether two scans are a reversed pair is
+ * the scanner's record, not a guess (planning.ts correctWithReversed; ds001226's PAT03 and CON02 have a "PA" scan
+ * phase-encoded left-right). The standard gives the axis only: In-plane Phase Encoding Direction (0018,1312), ROW or COL
+ * -- at the top level of a single-frame image, in the MR FOV/Geometry functional group of an enhanced one. The sign is in
+ * no standard attribute; Albula's own BIDS import keeps the source's sidecar in its private block (export-dicom-dwi.ts,
+ * (0077,xx02) under "SlicerAlbula provenance 1"), whose PhaseEncodingDirection ("j-") is read when present. Returned:
+ * the signed BIDS form when known ("j-"), else "ROW" / "COL", else undefined.
+ */
+export function phaseEncodingOf(standard: unknown, raw?: Raw): string | undefined {
+  if (raw) {
+    const tag = privateTag(raw, "0077", "SlicerAlbula provenance 1", "02");
+    const text = tag ? raw[tag]?.Value?.[0] : undefined;
+    if (typeof text === "string") {
+      try { const pe = (JSON.parse(text) as { PhaseEncodingDirection?: unknown }).PhaseEncodingDirection; if (typeof pe === "string" && /^[ijk]-?$/.test(pe)) return pe; } catch { /* not JSON: the standard attribute */ }
+    }
+  }
+  // ROW, or the column: COL in a single-frame image, COLUMN in an enhanced one.
+  const s = String(standard ?? "").trim().toUpperCase();
+  return s === "ROW" ? "ROW" : s === "COL" || s === "COLUMN" ? "COL" : undefined;
+}
+
+function diffusionKey(b: number, dir: [number, number, number] | undefined, source?: string, weak?: boolean, phaseEncoding?: string): VolumeKey {
   return {
     key: `${b}|${dir?.map((v) => v.toFixed(4)).join(",") ?? ""}`,
     label: `b ${b}${dir ? ` · ${dir.map((v) => v.toFixed(2)).join(", ")}` : ""}`,
     // The rule and its version travel with the values (critic, 2026-09-29, finding 11): a person or a later step can
     // see where a direction came from, or why there is none.
-    meta: { bValue: b, ...(dir ? { gradient: dir } : {}), ...(source ? { source, vendorRule: VENDOR_RULE } : {}) },
+    meta: { bValue: b, ...(dir ? { gradient: dir } : {}), ...(source ? { source, vendorRule: VENDOR_RULE } : {}), ...(phaseEncoding ? { phaseEncoding } : {}) },
     ...(weak ? { weak: true } : {}),
   };
 }
@@ -201,15 +223,15 @@ export const diffusionInterpreter: VolumeInterpreter = {
   code: `rule${VENDOR_RULE}-${INTERPRETER_CODE}`,
   instance(ds, raw) {
     const d = diffusionOf(ds, raw as Raw);
-    return d ? diffusionKey(d.bValue, d.direction, d.source, d.weak) : undefined;
+    return d ? diffusionKey(d.bValue, d.direction, d.source, d.weak, phaseEncodingOf(ds.InPlanePhaseEncodingDirection, raw as Raw)) : undefined;
   },
-  frame(group) {
+  frame(group, top) {
     const diff = group("MRDiffusionSequence");
     const b = diff?.DiffusionBValue != null ? num(diff.DiffusionBValue) : undefined;
     if (b === undefined) return undefined;
     const seq = diff?.DiffusionGradientDirectionSequence;
     const item = (Array.isArray(seq) ? seq[0] : seq) as Record<string, unknown> | undefined;
-    return diffusionKey(b, unitDir(item?.DiffusionGradientOrientation));
+    return diffusionKey(b, unitDir(item?.DiffusionGradientOrientation), undefined, undefined, phaseEncodingOf(group("MRFOVGeometrySequence")?.InPlanePhaseEncodingDirection, top?.raw as Raw | undefined));
   },
   finish(images) {
     const series = new Set(images.filter((i) => ((i.volumeKeys?.diffusion?.meta.bValue as number | undefined) ?? 0) > 0).map((i) => i.seriesInstanceUID));

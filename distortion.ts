@@ -387,7 +387,7 @@ export function fitMotion(fit: FieldFit, pair: EpiPair, voxel: [number, number, 
     for (let v = 0; v < fc.img.length; v++) fc.img[v] /= 2;
     return fitMotion(fieldFromCenters(a.dims, pair.axis, fc.img), { ...pair, dims: a.dims, plus: a.img, minus: c.img }, voxel.map((x) => 2 * x) as [number, number, number], start, { ...opts, halfSize: false });
   }
-  const free = [0, 1, 2].filter((a) => a !== pair.axis).map((a) => ({ kind: "t" as const, a, h: 0.05 }))
+  const free: { kind: "t" | "r"; a: number; h: number }[] = [0, 1, 2].filter((a) => a !== pair.axis).map((a) => ({ kind: "t" as const, a, h: 0.05 }) as { kind: "t" | "r"; a: number; h: number })
     .concat([0, 1, 2].filter((a) => opts.rotations !== "about-axis" || a === pair.axis).map((a) => ({ kind: "r" as const, a, h: 1e-3 })));
   const blur = opts.blur ?? MOTION_BLUR;
   const corrMinus = applyField(fit, blur > 0 ? gaussSmooth(pair.minus, pair.dims, blur) : pair.minus, -1), plusB = blur > 0 ? gaussSmooth(pair.plus, pair.dims, blur) : Float32Array.from(pair.plus);

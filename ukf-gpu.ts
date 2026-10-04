@@ -591,7 +591,7 @@ export interface GpuUkfResult {
 }
 
 /** Track from every seed (voxel coordinates) in both directions on the graphics card. */
-export async function trackUkfGpu(device: GPUDevice, data: UkfData, seeds: number[][], opts: UkfOptions & { batch?: number; stepsPerDispatch?: number; /** The Cholesky in one thread (one barrier) instead of column by column (22). */ cholOneThread?: boolean; /** The signal model's per-sigma-point values computed once a step, not once per gradient. */ prePredict?: boolean; /** The inversions' scratch in workgroup memory. */ wgInverse?: boolean; /** The per-gradient sums in one pass, without per-thread arrays (needs prePredict). */ onePass?: boolean; /** The two inversions a step in parallel over the workgroup (needs wgInverse). */ parInverse?: boolean; /** Pack the signal and compile the shader every call, as before 2026-10-01 night (benchmarking only). */ noCache?: boolean; /** Checking only: stop after one dispatch and return the states (with stepsPerDispatch 1: one filter step). */ debugOneDispatch?: boolean } = {}): Promise<GpuUkfResult> {
+export async function trackUkfGpu(device: GPUDevice, data: UkfData, seeds: number[][], opts: UkfOptions & { batch?: number; stepsPerDispatch?: number; /** Hold each dispatch near this many milliseconds (steps set from the last one's time; see the dispatch loop). */ targetMsPerDispatch?: number; /** The Cholesky in one thread (one barrier) instead of column by column (22). */ cholOneThread?: boolean; /** The signal model's per-sigma-point values computed once a step, not once per gradient. */ prePredict?: boolean; /** The inversions' scratch in workgroup memory. */ wgInverse?: boolean; /** The per-gradient sums in one pass, without per-thread arrays (needs prePredict). */ onePass?: boolean; /** The two inversions a step in parallel over the workgroup (needs wgInverse). */ parInverse?: boolean; /** Pack the signal and compile the shader every call, as before 2026-10-01 night (benchmarking only). */ noCache?: boolean; /** Checking only: stop after one dispatch and return the states (with stepsPerDispatch 1: one filter step). */ debugOneDispatch?: boolean } = {}): Promise<GpuUkfResult> {
   const t0 = performance.now();
   const fw = opts.freeWater ?? true, N = fw ? 11 : 10;
   if (!fw && opts.onePass) throw new Error("onePass is written for the free-water model's 11 state values");
@@ -705,7 +705,16 @@ export async function trackUkfGpu(device: GPUDevice, data: UkfData, seeds: numbe
     f32(96, opts.Qw ?? 0.0015);
     const pBuf = mk(new Uint8Array(params), GPUBufferUsage.UNIFORM);
     const bind = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [pBuf, sigBuf, maskBuf, gBuf, stBuf, outBuf, aliveBuf].map((buffer, binding) => ({ binding, resource: { buffer } })) });
-    for (let round = 0; round * K <= maxSteps + K; round++) {
+    // STEPS PER DISPATCH, held to a time (2026-10-03): Ron's window lost its card when tracking ran beside the 3D view's
+    // solid anatomy -- macOS's watchdog aborted a command buffer ("Impacting Interactivity", the system log at the crash;
+    // as on 2026-09-23). With `targetMsPerDispatch` each dispatch is timed and the next one's steps set to stay near it:
+    // short while every fiber is alive, longer as they stop. The steps a dispatch takes do not change the fibers (the
+    // same steps run either way; checked bit for bit, planning.ts trackUkfSeeds).
+    const target = opts.targetMsPerDispatch;
+    let k = target ? Math.min(K, 2) : K, stepsDone = 0;
+    for (; stepsDone <= maxSteps + k; ) {
+      if (target) device.queue.writeBuffer(pBuf, 84, Uint32Array.of(k));
+      const ts = performance.now();
       const enc = device.createCommandEncoder();
       enc.clearBuffer(aliveBuf);
       const pass = enc.beginComputePass(); pass.setPipeline(pipeline); pass.setBindGroup(0, bind); pass.dispatchWorkgroups(count); pass.end();
@@ -714,7 +723,9 @@ export async function trackUkfGpu(device: GPUDevice, data: UkfData, seeds: numbe
       await aliveRead.mapAsync(GPUMapMode.READ);
       const n = new Uint32Array(aliveRead.getMappedRange().slice(0))[0];
       aliveRead.unmap();
+      stepsDone += k;
       if (n === 0 || opts.debugOneDispatch) break;
+      if (target) { const ms = performance.now() - ts; k = Math.max(1, Math.min(256, Math.round(k * Math.min(2, Math.max(0.25, target / Math.max(ms, 0.5)))))); }
     }
     // Read back the recorded points and the record counts.
     const read = async (buf: GPUBuffer, size: number) => { const r = device.createBuffer({ size, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }); const e = device.createCommandEncoder(); e.copyBufferToBuffer(buf, 0, r, 0, size); device.queue.submit([e.finish()]); await r.mapAsync(GPUMapMode.READ); const a = new Float32Array(r.getMappedRange().slice(0)); r.unmap(); r.destroy(); return a; };

@@ -84,7 +84,12 @@ Deno.test("a partner phase-encoded along another axis, or the same way, is refus
   const dims: [number, number, number] = [4, 4, 2], data = new Float32Array(32).fill(100);
   const dwi = { volumes: [{ dims, ijkToRAS: [2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 1], data, dtype: "<f4" }], bValues: [0], gradients: [[0, 0, 0]], ijkToRAS: [2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 1], source: "test", convention: 1 } as unknown as DiffusionSeries;
   const left = await correctWithReversed(dwi, [data], "PA", undefined, { phaseEncoding: { scan: "j-", partner: "i-" } });
-  assert(left.startsWith("not corrected") && left.includes("left-right") && left.includes("front-back"), left);
+  assert(left.startsWith("not corrected") && left.includes("along the rows") && left.includes("along the columns"), left);
+  // DICOM's form (axis only): another axis is refused, the same axis is not judged by sign.
+  const dicom = await correctWithReversed(dwi, [data], "PA", undefined, { phaseEncoding: { scan: "COL", partner: "ROW" } });
+  assert(dicom.startsWith("not corrected"), dicom);
+  const mixed = await correctWithReversed(dwi, [data], "PA", undefined, { phaseEncoding: { scan: "j-", partner: "ROW" } });
+  assert(mixed.startsWith("not corrected"), mixed);
   const same = await correctWithReversed(dwi, [data], "PA", undefined, { phaseEncoding: { scan: "j-", partner: "j-" } });
   assert(same.startsWith("not corrected") && same.includes("same direction"), same);
   assertEquals(dwi.volumes[0].data, data, "the scan is untouched");

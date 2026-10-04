@@ -59,7 +59,7 @@ export function resampleInto(data: ArrayLike<number>, from: Grid, to: Grid): Flo
  * a step not run is absent. Said in the status line, so it reaches the session log too (Ron: "extend the timing reporting").
  */
 export interface StageTimes {
-  read?: number; align?: number; field?: number; apply?: number; fit?: number;
+  read?: number; align?: number; field?: number; apply?: number; register?: number; resample?: number; fit?: number;
   seeds?: number; track?: number; trackDetail?: TrackTiming & { data?: number };
   name?: number; distances?: number; draw?: number; total?: number;
 }
@@ -68,7 +68,7 @@ export function stageText(t: StageTimes): string {
   const d = t.trackDetail;
   const parts: string[] = [];
   const add = (label: string, v?: number, extra = "") => { if (v !== undefined) parts.push(`${label} ${sec(v)}${extra}`); };
-  add("read", t.read); add("align partner", t.align); add("distortion field", t.field); add("apply field", t.apply); add("mask + tensor", t.fit);
+  add("read", t.read); add("align partner", t.align); add("distortion field", t.field); add("apply field", t.apply); add("align to the T1", t.register); add("onto the T1", t.resample); add("mask + tensor", t.fit);
   add("seeds", t.seeds);
   add("tracking", t.track, d ? ` (signal ${sec(d.data ?? 0)}, seeds ${sec(d.prepare)}, card ${sec(d.gpu)}, fibers ${sec(d.assemble)}, page ${sec(d.between)})` : "");
   add("naming", t.name); add("distances", t.distances); add("drawing", t.draw);
@@ -92,14 +92,16 @@ export function stageText(t: StageTimes): string {
  * let PAT03 through (47% of the difference left, under the 50% refusal) while a true pair, CON01, leaves 40% -- the
  * residual cannot tell them apart.
  */
-export async function correctWithReversed(dwi: DiffusionSeries, reversed: ArrayLike<number>[], name: string, progress?: (s: string) => void, opts: { partnerGrid?: Grid; times?: StageTimes; /** distortion.ts DISTORTION_RULE; default 2. */ rule?: 1 | 2; /** The recorded phase-encoding directions, BIDS style ("j-"), when known. */ phaseEncoding?: { scan?: string; partner?: string } } = {}): Promise<string> {
-  const pe = opts.phaseEncoding, axisOf = (d: string) => "ijk".indexOf(d[0]);
+export async function correctWithReversed(dwi: DiffusionSeries, reversed: ArrayLike<number>[], name: string, progress?: (s: string) => void, opts: { partnerGrid?: Grid; times?: StageTimes; /** distortion.ts DISTORTION_RULE; default 2. */ rule?: 1 | 2; /** The recorded phase-encoding directions, BIDS style ("j-"), when known. */ phaseEncoding?: { scan?: string; partner?: string }; /** false: the field is found but not applied; it is handed back in `field` (registration.ts resampleOntoT1 applies it with the move to the T1, in one resampling). */ apply?: boolean; field?: { fit?: FieldFit; sign?: 1 | -1 } } = {}): Promise<string> {
+  // Either form: BIDS's signed voxel axis ("j-"), or DICOM's In-plane Phase Encoding Direction (ROW = the voxel axis i,
+  // COL = j; no sign -- then only the axis is checked). diffusion-vendors.ts phaseEncodingOf reads both from a file.
+  const pe = opts.phaseEncoding, axisOf = (d: string) => d === "ROW" ? 0 : d === "COL" ? 1 : "ijk".indexOf(d[0]), signed = (d: string) => /^[ijk]-?$/.test(d);
   let recordedAxis: 0 | 1 | 2 | undefined;
   if (pe?.scan && pe.partner) {
-    const a = axisOf(pe.scan), b = axisOf(pe.partner), opposite = pe.scan.endsWith("-") !== pe.partner.endsWith("-");
-    const words = (d: string) => `${["left-right", "front-back", "top-bottom"][axisOf(d)] ?? d}`;
-    if (a < 0 || a !== b || !opposite) return `not corrected: the scanner's record says ${name} was taken with its distortion ${a === b ? "in the same direction as" : `${words(pe.partner)}, against ${words(pe.scan)} for`} this scan, so the two are not a reversed pair`;
-    recordedAxis = a as 0 | 1 | 2;
+    const a = axisOf(pe.scan), b = axisOf(pe.partner), both = signed(pe.scan) && signed(pe.partner), same = both && pe.scan.endsWith("-") === pe.partner.endsWith("-");
+    const words = (d: string) => `${["along the rows", "along the columns", "across the slices"][axisOf(d)] ?? d}`;
+    if (a >= 0 && b >= 0 && (a !== b || same)) return `not corrected: the scanner's record says ${name} was taken with its distortion ${a === b ? "in the same direction as" : `${words(pe.partner)}, against ${words(pe.scan)} for`} this scan, so the two are not a reversed pair`;
+    if (a >= 0 && a === b) recordedAxis = a as 0 | 1 | 2;
   }
   const meanOf = (vols: ArrayLike<number>[]) => { const o = new Float32Array(vols[0].length); for (const d of vols) for (let v = 0; v < o.length; v++) o[v] += d[v] / vols.length; return o; };
   const grid: Grid = { dims: dwi.volumes[0].dims, ijkToRAS: dwi.volumes[0].ijkToRAS };
@@ -137,7 +139,8 @@ export async function correctWithReversed(dwi: DiffusionSeries, reversed: ArrayL
   if (opts.times) opts.times.field = performance.now() - tf;
   if (!best || bestLeft > 0.5) return `not corrected: ${name} and this scan do not look like a reversed pair (${Math.round(bestLeft * 100)}% of their difference would remain)${aligned}`;
   const tp = performance.now();
-  for (const v of dwi.volumes) { v.data = applyField(best, v.data, -1); v.dtype = "<f4"; }
+  if (opts.field) { opts.field.fit = best; opts.field.sign = -1; }
+  if (opts.apply !== false) for (const v of dwi.volumes) { v.data = applyField(best, v.data, -1); v.dtype = "<f4"; }
   if (opts.times) opts.times.apply = performance.now() - tp;
   const M = dwi.volumes[0].ijkToRAS, col = best.axis, mmPerVox = Math.hypot(M[col], M[4 + col], M[8 + col]);
   let mx = 0; for (const x of fieldAtCenters(best)) mx = Math.max(mx, Math.abs(x));
@@ -193,7 +196,19 @@ export interface TrackTiming { prepare: number; gpu: number; assemble: number; b
 export async function trackUkfSeeds(device: GPUDevice, data: UkfData, seedsRAS: number[][], stoppingFA: number, onBatch?: (done: number) => void | Promise<void>, timing?: TrackTiming, gpuOpts: Partial<Parameters<typeof trackUkfGpu>[3]> = {}): Promise<Float32Array[]> {
   const R = invAffine(data.ijkToRAS);
   const ijk = seedsRAS.map(([x, y, z]) => [R[0] * x + R[1] * y + R[2] * z + R[3], R[4] * x + R[5] * y + R[6] * z + R[7], R[8] * x + R[9] * y + R[10] * z + R[11]]);
-  const out: Float32Array[] = [], BATCH = 2000;
+  // 10,000 SEEDS A CALL, 64 STEPS A DISPATCH (2026-10-03; was 2,000 and 16): every brain voxel a seed (tracking rule 2)
+  // made the old setting take 108 s on PAT16. Measured on 18,765 of its seeds: 2,000 / 16 took 22.6 s in 466 dispatches
+  // of 48 ms; 10,000 / 64 7.2 s in 28 dispatches of 0.26 s; 20,000 / 64 6.8 s (0.48 s each); 20,000 / 128 5.9 s (0.84 s)
+  // -- the fibers bit for bit the same in every one (the card does the same steps; only how many it is given at once
+  // changes). A dispatch is kept near a quarter of a second, well inside what macOS's watchdog allows a window's card
+  // (2026-09-23: a long command buffer killed the views); the page answers between dispatches.
+  // NOT held to a short time per dispatch: tried 2026-10-03 after Ron's window lost its card (macOS's watchdog, tracking
+  // beside the 3D view's solid anatomy) -- each dispatch reloads and stores every fiber's state, so 50 ms dispatches took
+  // 111 s where 64 steps took 7.6 s (18,765 PAT16 seeds); and the crash came with the old, already short dispatches.
+  // ukf-gpu.ts targetMsPerDispatch stays as an option.
+  const g = gpuOpts as { seedsPerCall?: number; batch?: number; stepsPerDispatch?: number };
+  const out: Float32Array[] = [], BATCH = g.seedsPerCall ?? 10000;
+  gpuOpts = { ...gpuOpts, batch: g.batch ?? 2 * BATCH, stepsPerDispatch: g.stepsPerDispatch ?? 64 };
   for (let s = 0; s < ijk.length; s += BATCH) {
     const r = await trackUkfGpu(device, data, ijk.slice(s, s + BATCH), { ...gpuOpts, stoppingFA });
     for (const fb of r.fibers) out.push(fb.points);

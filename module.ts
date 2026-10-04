@@ -17,7 +17,9 @@
 //    or within a distance of it -- or from a point clicked in a view.
 //  - IN THE SCENE (green band: what exists): the tract groups, each with its eye and its ✕, drawn as tubes (Ron:
 //    "tubes" first) or lines, and as dots where they cross the slices (drawSliceCrossings), ends shortened (drawn()).
-// Tracking: UKF two-tensor free water on the graphics card (ukf-gpu.ts), or one tensor (tracking.ts). Names: RapidParc
+// Tracking: UKF two-tensor on the graphics card (ukf-gpu.ts) by the current tracking rule (tracking-rules.ts; rule 2 since
+// 2026-10-03, Mike Halle's tractline: plain two-tensor, the shell nearest b = 3000, every brain voxel a seed), or one
+// tensor (tracking.ts). Names: RapidParc
 // (rapidparc/; TractCloud's tractcloud/ until 2026-10-03, its table still shared), from whole-brain tracking; the named tracts near the chosen structure are shown whole (makeNamedTracts).
 // NOT YET: the tract groups are the module's, not scene nodes -- Scene does not list them and a saved scene does not keep
 // them (the mockup's "in Scene under the diffusion scan" is still to build).
@@ -36,9 +38,14 @@ import { IDENTITY4, worldForNode } from "albula";
 import type { Volume } from "albula";
 import { FiberField, type RGBA, type Strand } from "albula";
 import { colorFA, fitTensors, type TensorFit } from "./tensor.ts";
-import { prepareUkfData, type UkfData } from "./ukf.ts";
+import { type UkfData } from "./ukf.ts";
+import { seedsFor, TRACKING_RULE, TRACKING_RULES, ukfDataFor } from "./tracking-rules.ts";
+import { alignToT1 } from "./registration.ts";
+import { applyField, type FieldFit } from "./distortion.ts";
+/** "Stop below FA"'s default under Advanced (the single-tensor tracker's; the UKF's comes from the tracking rule). */
+const ADV_MIN_FA = 0.15;
 import { DCM2NIIX_VERSION, secondOpinion, type SecondOpinion } from "./second-opinion.ts";
-import { assetUrl, seriesDicomFiles, startPlacing } from "albula";
+import { assetUrl, holdDrawing, seriesDicomFiles, startPlacing } from "albula";
 import { createSegmentation, growIntoSegmentation, openDicomDatabase, openLoadFromDisk, paintInto, registerProbeRows, registerRayHits, runAction, saveSegmentationToDicom, showHideAllState } from "albula";
 import { buildTractIndex, tractsNear, type TractIndex } from "./tract-index.ts";
 import { sliceCrossings, trimEnds } from "./tract-slice.ts";
@@ -56,11 +63,15 @@ import { csdVolume, type FodVolume } from "./csd-volume.ts";
 import { trackPttParallel } from "./ptt.ts";
 
 /** A diffusion scan in the scene: a sequence whose frames carry diffusion values. */
-interface Scan { browserId: string; name: string; frameIds: string[]; bValues: number[]; study?: string; patient?: string }
+interface Scan { browserId: string; name: string; frameIds: string[]; bValues: number[]; study?: string; patient?: string;
+  /** The scanner's record of the phase-encoding direction (diffusion-vendors.ts phaseEncodingOf: "j-", or "ROW" / "COL"). */
+  phaseEncoding?: string }
 /** What has been computed for a scan, kept while the scan is in the scene. */
-interface Computed { dwi: DiffusionSeries; fit: TensorFit; maxB: number; corrected: string; partnerId: string; faId?: string; colorFaId?: string; ukf?: UkfData; fod?: FodVolume }
+interface Computed { dwi: DiffusionSeries; fit: TensorFit; maxB: number; corrected: string; partnerId: string; /** The anatomy MRI the scan was aligned to ("" none). */ anatomyId?: string; faId?: string; colorFaId?: string; ukf?: UkfData; fod?: FodVolume }
 /** A reversed phase-encoding scan for a diffusion scan: b = 0 images of the same study, on its own grid (aligned by the scanner's coordinates). */
-interface Partner { id: string; name: string; frameIds: string[]; dims: number[]; ijkToRAS: number[] }
+interface Partner { id: string; name: string; frameIds: string[]; dims: number[]; ijkToRAS: number[]; phaseEncoding?: string }
+/** A node's recorded phase-encoding direction, as the diffusion interpreter read it. */
+const phaseEncodingOfNode = (n: MrsonNode | undefined) => ((n?.origin as Record<string, unknown> | undefined)?.diffusion as { phaseEncoding?: string } | undefined)?.phaseEncoding;
 /** A group of tracts. */
 interface TractGroup {
   id: number; name: string; scan: string; strands: Float32Array[]; visible: boolean; method: Method;
@@ -87,8 +98,8 @@ interface Run { sl: Float32Array[]; named: Named; sorted: Sorted; structure: Str
   dist: Float64Array;
   /** The fit it was tracked on (critic, 2026-10-01, finding 5): Add lines on a different fit is refused. */
   maxB: number; partnerId: string }
-/** How tracts are followed: one tensor per voxel (fast, the classic), or the two-tensor free-water UKF (ukf.ts; crossing
- *  fibers, and free water -- edema -- modeled; the method SlicerDMRI uses for tumor planning). */
+/** How tracts are followed: one tensor per voxel (fast, the classic), or the two-tensor UKF (ukf.ts; crossing fibers;
+ *  the method SlicerDMRI uses for tumor planning), with the settings of the current tracking rule (tracking-rules.ts). */
 /** "ptt": fiber distributions from multi-shell CSD (csd.ts, responses from the scan) and parallel transport tracking
  *  (ptt.ts), on the processor's workers -- the smoother method Lauren O'Donnell recommended; about three times as long
  *  as UKF and no better on the development cases' meningiomas, so an option (Ron, 2026-10-01: "if both are close to
@@ -179,7 +190,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
   let chosen = "";                                          // browser id of the scan the panel is about
   let near = "", withinMm = 8, busy = "", seeding = false, note = "";
   let cancelSeeding: (() => void) | undefined;
-  const adv: Required<Pick<TrackingOptions, "minFA" | "maxAngleDeg" | "stepVoxels">> & { maxB: number } = { minFA: 0.15, maxAngleDeg: 45, stepVoxels: 0.5, maxB: 1500 };
+  const adv: Required<Pick<TrackingOptions, "minFA" | "maxAngleDeg" | "stepVoxels">> & { maxB: number } = { minFA: ADV_MIN_FA, maxAngleDeg: 45, stepVoxels: 0.5, maxB: 1500 };
   let root: HTMLElement | undefined;
   let advOpen = false;
   let moreOpen = false;
@@ -239,7 +250,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     const bs = nodes.map((n) => Number((org(n).diffusion as { bValue?: number } | undefined)?.bValue ?? NaN));
     if (nodes.length < 7 || !bs.some((b) => b > 0)) return [];
     const o = org(nodes[0]);
-    return [{ browserId: b.id, name: String(sequence?.name ?? b.name ?? "Diffusion scan"), frameIds: nodes.map((n) => n.id), bValues: bs, study: o.studyInstanceUID as string | undefined, patient: o.patientID as string | undefined }];
+    return [{ browserId: b.id, name: String(sequence?.name ?? b.name ?? "Diffusion scan"), frameIds: nodes.map((n) => n.id), bValues: bs, study: o.studyInstanceUID as string | undefined, patient: o.patientID as string | undefined, phaseEncoding: phaseEncodingOfNode(nodes[0]) }];
   });
   /**
    * The segments a scan's tracts may start near: those of the SAME PATIENT -- the segmentation's study is the scan's, or
@@ -391,16 +402,17 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       if (b.id === scan.browserId) continue;
       const { frames, sequence } = browserFrames(live, b.id);
       const nodes = frames.map((f) => live.nodes.get(f.node)).filter(Boolean) as MrsonNode[];
-      if (nodes.length && nodes.every((n) => same(n) && b0(n))) return { id: b.id, name: String(sequence?.name ?? b.name ?? "reversed scan"), frameIds: nodes.map((n) => n.id), dims: nodes[0].dims as number[], ijkToRAS: nodes[0].ijkToRAS as number[] };
+      if (nodes.length && nodes.every((n) => same(n) && b0(n))) return { id: b.id, name: String(sequence?.name ?? b.name ?? "reversed scan"), frameIds: nodes.map((n) => n.id), dims: nodes[0].dims as number[], ijkToRAS: nodes[0].ijkToRAS as number[], phaseEncoding: phaseEncodingOfNode(nodes[0]) };
     }
-    for (const n of live.nodes.values()) if (n.type === "image" && !(n as { hidden?: boolean }).hidden && !scan.frameIds.includes(n.id) && same(n) && b0(n)) return { id: n.id, name: String(n.name ?? "reversed scan"), frameIds: [n.id], dims: n.dims as number[], ijkToRAS: n.ijkToRAS as number[] };
+    for (const n of live.nodes.values()) if (n.type === "image" && !(n as { hidden?: boolean }).hidden && !scan.frameIds.includes(n.id) && same(n) && b0(n)) return { id: n.id, name: String(n.name ?? "reversed scan"), frameIds: [n.id], dims: n.dims as number[], ijkToRAS: n.ijkToRAS as number[], phaseEncoding: phaseEncodingOfNode(n) };
     return undefined;
   };
   /** DISTORTION CORRECTION with the reversed scan (planning.ts correctWithReversed). */
-  async function correctDistortion(dwi: DiffusionSeries, partner: Partner, times: StageTimes): Promise<string> {
+  async function correctDistortion(dwi: DiffusionSeries, partner: Partner, times: StageTimes, scanPE?: string, field?: { fit?: FieldFit; sign?: 1 | -1 }): Promise<string> {
     const vols: ArrayLike<number>[] = [];
     for (const id of partner.frameIds) { const n = live.nodes.get(id); if (!n) throw new Error("the reversed scan was taken out of the scene"); vols.push((await fetchZarrVolumeNative(live.blobBase(), n.zarr as ZarrDesc)).data); }
-    return await correctWithReversed(dwi, vols, partner.name, say, { partnerGrid: { dims: partner.dims, ijkToRAS: partner.ijkToRAS }, times });
+    // The scanner's record decides whether the two are a reversed pair, when the files carry it (2026-10-03).
+    return await correctWithReversed(dwi, vols, partner.name, say, { partnerGrid: { dims: partner.dims, ijkToRAS: partner.ijkToRAS }, times, phaseEncoding: { scan: scanPE, partner: partner.phaseEncoding }, ...(field ? { apply: false, field } : {}) });
   }
   /** The maps' own steps (read, distortion, tensor) from the last time they were made, for the next run's timing; taken once. */
   let fitTimes: StageTimes | undefined;
@@ -410,8 +422,11 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
   async function ensureFit(scan: Scan): Promise<Computed> {
     const have = computed.get(scan.browserId);
     const partner = correct ? partnerFor(scan) : undefined;
-    // Still valid when made with the same b range and the same reversed scan (or none).
-    if (have && have.maxB === adv.maxB && have.partnerId === (partner?.id ?? "")) return have;
+    // THE MRI OF THE ANATOMY (2026-10-03, Ron: "Number three, go"; registration.ts): with one loaded, the scan is aligned
+    // to it and read once onto its axes, so the maps and the tracts are made in its space.
+    const anat = anatomyFor(scan), anatOk = anat && !moved(anat) ? anat : undefined;
+    // Still valid when made with the same b range, the same reversed scan (or none) and the same anatomy (or none).
+    if (have && have.maxB === adv.maxB && have.partnerId === (partner?.id ?? "") && (have.anatomyId ?? "") === (anatOk?.id ?? "")) return have;
     if (have) dropMaps(have);
     if (moved(live.nodes.get(scan.frameIds[0]))) throw new Error("the scan has a transform (Transforms module); the maps and tracts are not computed on a moved scan yet — harden or remove the transform first");
     say(`Reading ${scan.frameIds.length} diffusion volumes…`);
@@ -423,12 +438,24 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       const z = await fetchZarrVolumeNative(live.blobBase(), n.zarr as ZarrDesc);
       vols.push({ dims: n.dims as [number, number, number], ijkToRAS: n.ijkToRAS as number[], data: z.data as Volume["data"], dtype: z.dtype, meta: n.origin as Record<string, unknown> });
     }
-    const dwi = fromDicomVolumes(vols, scan.name);
+    let dwi = fromDicomVolumes(vols, scan.name);
     // The second opinion reads the directions before any correction touches the volumes (the correction moves voxels,
     // not directions); it compares b-values and directions only.
     check(scan, { ...dwi, volumes: [] });
     const times: StageTimes = { read: performance.now() - t0 };
-    const corrected = partner ? await correctDistortion(dwi, partner, times) : correct ? "not corrected (no reversed phase-encoding scan of this study is loaded)" : "not corrected (switched off)";
+    const field: { fit?: FieldFit; sign?: 1 | -1 } = {};
+    let corrected = partner ? await correctDistortion(dwi, partner, times, scan.phaseEncoding, anatOk ? field : undefined) : correct ? "not corrected (no reversed phase-encoding scan of this study is loaded)" : "not corrected (switched off)";
+    if (anatOk) {
+      say("Aligning the diffusion scan to the MRI of the anatomy…");
+      const z = await fetchZarrVolumeNative(live.blobBase(), anatOk.zarr as ZarrDesc);
+      const a = await alignToT1(dwi, { dims: anatOk.dims as [number, number, number], ijkToRAS: anatOk.ijkToRAS as number[], data: z.data as ArrayLike<number> }, field.fit ? { fit: field.fit, sign: field.sign ?? -1 } : undefined, times);
+      if (a.doubt) {
+        // A DOUBTFUL ALIGNMENT IS NOT USED (until aligning by hand is built): the scanner's placement stands, the
+        // correction is applied as before, and the person is told.
+        if (field.fit) for (const v of dwi.volumes) { v.data = applyField(field.fit, v.data as ArrayLike<number>, field.sign ?? -1); v.dtype = "<f4"; }
+        corrected += `; not aligned to the MRI of the anatomy: the automatic alignment looked wrong (${a.doubt}), so the scanner's placement is used`;
+      } else { dwi = a.dwi; corrected += `; ${a.said}`; }
+    }
     const t1 = performance.now();
     say("Fitting the diffusion tensor…");
     await new Promise((r) => setTimeout(r, 0));
@@ -436,7 +463,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     times.fit = performance.now() - t1;
     times.total = performance.now() - t0;
     fitTimes = times;
-    const c: Computed = { dwi, fit, maxB: adv.maxB, corrected, partnerId: partner?.id ?? "" };
+    const c: Computed = { dwi, fit, maxB: adv.maxB, corrected, partnerId: partner?.id ?? "", anatomyId: anatOk?.id ?? "" };
     computed.set(scan.browserId, c);
     say(`Maps made from ${fit.used.length} volumes up to b = ${adv.maxB}; distortion ${corrected}. ${stageText(times)}.`);
     return c;
@@ -552,9 +579,17 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
   let lastTiming: (TrackTiming & { data: number }) | undefined;
   async function trackUkf(c: Computed, seedsRAS: number[][]): Promise<Float32Array[]> {
     const t0 = performance.now();
-    c.ukf ??= prepareUkfData(c.dwi, c.fit.mask);
+    // THE TRACKING RULE (tracking-rules.ts): the shell, the mask and the thresholds. "Stop below FA" under Advanced still
+    // rules when the user has changed it from its default (that setting also serves the single-tensor tracker, where the
+    // rule's 0.08 would wander into gray matter).
+    const rule = TRACKING_RULES[TRACKING_RULE];
+    c.ukf ??= ukfDataFor(c.dwi, c.fit, rule);
+    const stopFA = adv.minFA !== ADV_MIN_FA ? adv.minFA : rule.ukf.stoppingFA;
     const timing: TrackTiming & { data: number } = { prepare: 0, gpu: 0, assemble: 0, between: 0, data: performance.now() - t0 };
-    const out = await trackUkfSeeds(device, c.ukf, seedsRAS, adv.minFA, (f) => { busy = `${adding ? "Adding lines" : "Making tracts"}… ${Math.round(100 * f)}%`; render(); }, timing);
+    // The 3D view's drawing is held while the card tracks (holdDrawing: macOS's watchdog took the card when tracking ran
+    // beside the solid anatomy, Ron's window, 2026-10-03 build 16:45).
+    const release = holdDrawing("tracking");
+    const out = await trackUkfSeeds(device, c.ukf, seedsRAS, stopFA, (f) => { busy = `${adding ? "Adding lines" : "Making tracts"}… ${Math.round(100 * f)}%`; render(); }, timing, { ...rule.ukf, stoppingFA: stopFA }).finally(release);
     lastTiming = timing;
     return out;
   }
@@ -622,7 +657,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       const c = await ensureFit(scan);
       const times: StageTimes = takeFitTimes(), before = times.total ?? 0;
       const t0 = performance.now();
-      const seeds = wholeBrainSeeds(c.fit);
+      const seeds = method === "ukf" ? seedsFor(c.fit, TRACKING_RULES[TRACKING_RULE]) : wholeBrainSeeds(c.fit);
       times.seeds = performance.now() - t0;
       say(`Following tracts through the whole brain from ${seeds.length.toLocaleString()} starting points…`);
       lastTiming = undefined;
@@ -633,7 +668,8 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       busy = "Naming tracts…"; render();
       const model = await tractCloud();
       tractCount = model.json.tracts.length;
-      const named = await nameTracts(device, model, sl, { rapidParc: await rapidParc() });
+      const rp = await rapidParc(), releaseN = holdDrawing("naming tracts");
+      const named = await nameTracts(device, model, sl, { rapidParc: rp }).finally(releaseN);
       times.name = named.seconds * 1000;
       const tDist = performance.now();
       busy = "Measuring distances…"; render();
@@ -686,7 +722,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
    * points in every voxel the tract's streamlines pass through, on both sides so the sides stay comparable, followed by
    * the run's method, named against the whole-brain run (nameAgainst), and the ones named as this tract added to it.
    * Measured on PAT16 (Deno, 2026-10-01): the right uncinate 1 -> 18 streamlines; about 5-10% of the new streamlines
-   * belong to the tract (the rest cross it), so one press is held to the whole-brain run's 25,000 starting points.
+   * belong to the tract (the rest cross it), so one press is held to 16,000 starting points (MORE_MAX_SEEDS).
    */
   async function addLines(chosen: TractGroup[]) {
     const scanId = chosen[0]?.scan, run = scanId ? runs.get(scanId) : undefined, scan = scans().find((s) => s.browserId === scanId);
@@ -716,7 +752,8 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       if (lastTiming) times.trackDetail = lastTiming;
       busy = "Naming tracts…"; render();
       const model = await tractCloud();
-      const r = await nameAgainst(device, model, run.sl, sl2, { rapidParc: await rapidParc() });
+      const rp = await rapidParc(), releaseN = holdDrawing("naming tracts");
+      const r = await nameAgainst(device, model, run.sl, sl2, { rapidParc: rp }).finally(releaseN);
       times.name = r.added.seconds * 1000;
       const tDist = performance.now();
       if (!scans().some((s) => s.browserId === scanId) || runs.get(scanId!) !== run) return;   // left, or run again, meanwhile
@@ -1082,7 +1119,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     shell.row(tr, "Within").append(mmWrap);
     const meth = document.createElement("div");
     meth.style.cssText = "display:flex;gap:3px";
-    for (const [k, label, tip] of [["ukf", "Two-tensor", "Follows two crossing fiber directions and the free water around them (edema): the method used for tumor planning. The default: about half a minute."], ["ptt", "Smooth curves", "Follows fiber directions as smooth curves, from a model of all the directions in each voxel (CSD and parallel transport tracking). About three minutes; on the development cases no better near meningiomas than two-tensor."], ["single", "Single tensor", "One direction per voxel: fast, but stops or turns where fibers cross."]] as const) {
+    for (const [k, label, tip] of [["ukf", "Two-tensor", "Follows two crossing fiber directions, as the atlas the tract names come from was made: the method used for tumor planning. The default: under a minute."], ["ptt", "Smooth curves", "Follows fiber directions as smooth curves, from a model of all the directions in each voxel (CSD and parallel transport tracking). About three minutes; on the development cases no better near meningiomas than two-tensor."], ["single", "Single tensor", "One direction per voxel: fast, but stops or turns where fibers cross."]] as const) {
       const b = document.createElement("button"); b.textContent = label; b.title = tip; b.disabled = !!busy;
       b.className = "sl-sh-look-b" + (method === k ? " sl-on" : ""); b.setAttribute("aria-pressed", String(method === k));
       b.onclick = () => { method = k; render(); };
@@ -1305,7 +1342,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     title: "Diffusion",
     groups: ["Display"],
     tip: "Which of the brain's fiber tracts run near a tumor, for planning an operation.",
-    help: "<p><b>For preparing a case.</b> The module needs three things, and ticks each off when it is there: the <b>diffusion MRI</b> (the scan that shows the brain's wiring; often named DTI, DWI or diffusion), the <b>MRI of the anatomy</b> (usually the T1 with contrast), and the <b>tumor's outline</b>. <b>Open a patient…</b> opens the DICOM database; <b>Scans on this computer…</b> opens Load / Save, where a folder from a CD, a USB stick or an export is added to the database. Without an outline, draw a few <b>Tumor</b> strokes inside it and a few <b>Not tumor</b> strokes around it, on a few slices, then <b>Grow the outline</b>, check it, correct with more strokes, and press <b>Done</b>. Then <b>Show the fiber tracts near the tumor</b>: each named tract with at least 5 of its fibers within 8 mm of the tumor (the distance can be changed under Advanced) is shown whole, in its own color, with how close it comes; pressing it again replaces the list. Tracts that come that close with fewer fibers are listed after them in gray, hidden. Each tract shows how many fibers the same tract has on the other side. Turn on the tracts you care about and press <b>Add lines</b>: it follows many more fibers in the tracts shown that have none added yet, on both sides (the other side stays hidden unless it is on), to see a thin tract better and compare the sides (about as long as the first run). A tract that looks thin or missing on the tumor's side may be destroyed by the tumor, or still there but hidden by swelling (edema). Only an outline named as a tumor (or made here) counts. Everything stays on this computer.</p><p><b>Advanced</b> holds the maps and the settings behind that button:</p><p>Shows what a diffusion MRI scan measures: <b>FA</b>, how strongly water moves along one direction (bright in white matter tracts), and <b>Color FA</b>, that direction as a color (red left-right, green front-back, blue up-down). A diffusion scan shows Color FA when it loads. When the case has an MRI of the anatomy, FA and Color FA are shown over it at half opacity; otherwise they fill the slice views. The gear in each slice view chooses the image, the one over it and how much shows through.</p><p><b>Tracts</b> follow the main direction of water movement from voxel to voxel. Under Advanced, <b>Make tracts</b> with <b>Single tensor</b> starts them in the white matter inside and around the chosen structure; with <b>Two-tensor</b> or <b>Smooth curves</b> it does what the face's button does, from the structure chosen there; <b>Seed where I click…</b> starts them at one point. <b>Smooth curves</b> follows fibers as gently bending lines from a model of every direction in each voxel (CSD and parallel transport tracking): about three minutes, an option. Tracts are drawn in 3D as tubes or lines, and as a dot in the tract's color wherever a shown tract crosses a slice, with the MRI of the anatomy behind it. Each tract is drawn 2 voxels shorter at each end, where fibers fan out (<b>Shorten ends</b>; 0 draws them whole); the tracts themselves stay whole. Each group can be hidden or removed.</p><p><b>Two-tensor</b> (UKF, the default) follows two fiber directions and the free water around them; it runs on the graphics card and agrees with the reference computation on the processor (fiber ends within a fraction of a millimeter for 90% of fibers) and with the original UKFTractography program (97% of fibers end within 0.1 mm from the same starting points). <b>Single tensor</b> follows one direction per voxel; where tracts cross, that direction is an average, and a tract may stop or turn. With <b>Two-tensor</b>, <b>Make tracts</b> follows tracts through the whole brain and names them with RapidParc (Bisten, Schultz et al., University of Bonn), a network trained on an atlas of 800 fiber clusters (Zhang, O'Donnell et al.); each named tract that comes within the distance of the chosen structure is shown whole, in its own color, with its closest distance to the structure. Streamlines no name fits and pass close are shown in gray; the rest of the brain is kept, hidden.</p><p><b>Licenses.</b> Research software: not reviewed or approved by the FDA or any other agency; clinical applications are neither recommended nor advised. The two-tensor tracking is a port of UKFTractography (authors: Yogesh Rathi, Stefan Lienhard, Yinpeng Li, Martin Styner, Ipek Oguz, Yundi Shi, Christian Baumgartner, Ryan Eckbo, Tashrif Billah and Dheshan Mohandass; github.com/pnlbwh/ukftractography). All or portions of this licensed product (such portions are the \"Software\") have been obtained under license from The Brigham and Women's Hospital, Inc. and are subject to the following terms and conditions: <a href=\"./vendor/diffusion/licenses/LICENSE-UKF.txt\" target=\"_blank\">the UKF Tractography Contribution and Software License Agreement</a> (this is a modified version: translated to TypeScript and WGSL). RapidParc's trained network is under <a href=\"./vendor/diffusion/rapidparc/LICENSE.txt\" target=\"_blank\">its BSD license</a> (University of Bonn); TractCloud's table of tract names under <a href=\"./vendor/diffusion/tractcloud/LICENSE.txt\" target=\"_blank\">3D Slicer's license</a>; dcm2niix under <a href=\"./vendor/diffusion/dcm2niix/LICENSE.txt\" target=\"_blank\">its own (BSD)</a>; the rest of this extension under the <a href=\"./vendor/diffusion/licenses/LICENSE\" target=\"_blank\">Apache License 2.0</a> (<a href=\"./vendor/diffusion/licenses/NOTICE\" target=\"_blank\">NOTICE</a>).</p>",
+    help: "<p><b>For preparing a case.</b> The module needs three things, and ticks each off when it is there: the <b>diffusion MRI</b> (the scan that shows the brain's wiring; often named DTI, DWI or diffusion), the <b>MRI of the anatomy</b> (usually the T1 with contrast), and the <b>tumor's outline</b>. <b>Open a patient…</b> opens the DICOM database; <b>Scans on this computer…</b> opens Load / Save, where a folder from a CD, a USB stick or an export is added to the database. Without an outline, draw a few <b>Tumor</b> strokes inside it and a few <b>Not tumor</b> strokes around it, on a few slices, then <b>Grow the outline</b>, check it, correct with more strokes, and press <b>Done</b>. Then <b>Show the fiber tracts near the tumor</b>: each named tract with at least 5 of its fibers within 8 mm of the tumor (the distance can be changed under Advanced) is shown whole, in its own color, with how close it comes; pressing it again replaces the list. Tracts that come that close with fewer fibers are listed after them in gray, hidden. Each tract shows how many fibers the same tract has on the other side. Turn on the tracts you care about and press <b>Add lines</b>: it follows many more fibers in the tracts shown that have none added yet, on both sides (the other side stays hidden unless it is on), to see a thin tract better and compare the sides (about as long as the first run). A tract that looks thin or missing on the tumor's side may be destroyed by the tumor, or still there but hidden by swelling (edema). Only an outline named as a tumor (or made here) counts. Everything stays on this computer.</p><p><b>Advanced</b> holds the maps and the settings behind that button:</p><p>Shows what a diffusion MRI scan measures: <b>FA</b>, how strongly water moves along one direction (bright in white matter tracts), and <b>Color FA</b>, that direction as a color (red left-right, green front-back, blue up-down). A diffusion scan shows Color FA when it loads. When the case has an MRI of the anatomy, FA and Color FA are shown over it at half opacity; otherwise they fill the slice views. The gear in each slice view chooses the image, the one over it and how much shows through.</p><p><b>Tracts</b> follow the main direction of water movement from voxel to voxel. Under Advanced, <b>Make tracts</b> with <b>Single tensor</b> starts them in the white matter inside and around the chosen structure; with <b>Two-tensor</b> or <b>Smooth curves</b> it does what the face's button does, from the structure chosen there; <b>Seed where I click…</b> starts them at one point. <b>Smooth curves</b> follows fibers as gently bending lines from a model of every direction in each voxel (CSD and parallel transport tracking): about three minutes, an option. Tracts are drawn in 3D as tubes or lines, and as a dot in the tract's color wherever a shown tract crosses a slice, with the MRI of the anatomy behind it. Each tract is drawn 2 voxels shorter at each end, where fibers fan out (<b>Shorten ends</b>; 0 draws them whole); the tracts themselves stay whole. Each group can be hidden or removed.</p><p><b>Two-tensor</b> (UKF, the default) follows two fiber directions, from a starting point in every voxel of the brain, with the settings of the atlas the tract names come from (as Mike Halle's tractline does), so tracts reach into the swelling around a tumor; it runs on the graphics card and agrees with the original UKFTractography program (on a whole brain, 93% of fibers end within 0.1 mm of the original's from the same starting points). <b>Single tensor</b> follows one direction per voxel; where tracts cross, that direction is an average, and a tract may stop or turn. With <b>Two-tensor</b>, <b>Make tracts</b> follows tracts through the whole brain and names them with RapidParc (Bisten, Schultz et al., University of Bonn), a network trained on an atlas of 800 fiber clusters (Zhang, O'Donnell et al.); each named tract that comes within the distance of the chosen structure is shown whole, in its own color, with its closest distance to the structure. Streamlines no name fits and pass close are shown in gray; the rest of the brain is kept, hidden.</p><p><b>Licenses.</b> Research software: not reviewed or approved by the FDA or any other agency; clinical applications are neither recommended nor advised. The two-tensor tracking is a port of UKFTractography (authors: Yogesh Rathi, Stefan Lienhard, Yinpeng Li, Martin Styner, Ipek Oguz, Yundi Shi, Christian Baumgartner, Ryan Eckbo, Tashrif Billah and Dheshan Mohandass; github.com/pnlbwh/ukftractography). All or portions of this licensed product (such portions are the \"Software\") have been obtained under license from The Brigham and Women's Hospital, Inc. and are subject to the following terms and conditions: <a href=\"./vendor/diffusion/licenses/LICENSE-UKF.txt\" target=\"_blank\">the UKF Tractography Contribution and Software License Agreement</a> (this is a modified version: translated to TypeScript and WGSL). RapidParc's trained network is under <a href=\"./vendor/diffusion/rapidparc/LICENSE.txt\" target=\"_blank\">its BSD license</a> (University of Bonn); TractCloud's table of tract names under <a href=\"./vendor/diffusion/tractcloud/LICENSE.txt\" target=\"_blank\">3D Slicer's license</a>; dcm2niix under <a href=\"./vendor/diffusion/dcm2niix/LICENSE.txt\" target=\"_blank\">its own (BSD)</a>; the rest of this extension under the <a href=\"./vendor/diffusion/licenses/LICENSE\" target=\"_blank\">Apache License 2.0</a> (<a href=\"./vendor/diffusion/licenses/NOTICE\" target=\"_blank\">NOTICE</a>).</p>",
     acknowledgements: DIFFUSION_REFERENCES.map((r) => `${r.cite}${r.link ? ` ${r.link}` : ""} — ${r.usedFor}${r.verified ? "" : " (citation to be checked)"}`),
     mount(el) { root = el; render(); },
     onShow() { render(); },

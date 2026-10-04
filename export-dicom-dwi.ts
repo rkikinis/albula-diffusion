@@ -48,6 +48,13 @@ export async function diffusionToEnhancedMR(
     seriesDescription?: string; seriesNumber?: number;
     /** The source's own description of the acquisition (a BIDS sidecar's JSON text), kept whole in the private block. */
     sourceDescription?: string;
+    /** In-plane Phase Encoding Direction (0018,1312) along this object's rows or columns (ROW: the voxel axis i, the row
+     *  direction; COLUMN: j -- the enhanced objects' values; a single-frame image says COL), in the MR FOV/Geometry
+     *  functional group (2026-10-03; diffusion-vendors.ts phaseEncodingOf). That macro's other attributes (encoding steps,
+     *  percent sampling, percent phase field of view) are Type 1C, required only for ORIGINAL frames; these are DERIVED,
+     *  and a BIDS sidecar does not hold them, so they are not written (dciodvfy asks for them anyway:
+     *  Contents/docs/upstream-issues-dicom3tools.md, item 3). */
+    phaseEncoding?: "ROW" | "COLUMN";
     /** Applicable Safety Standard Agency (0018,9174): IEC, FDA or MHW -- required in every Enhanced MR object. It describes
      *  the acquisition, so the caller states it and why (the writer does not guess). */
     safetyStandardAgency: "IEC" | "FDA" | "MHW";
@@ -150,6 +157,7 @@ export async function diffusionToEnhancedMR(
     SharedFunctionalGroupsSequence: [{
       PixelMeasuresSequence: [{ PixelSpacing: [ds10(sj), ds10(si)], SliceThickness: ds10(sk), SpacingBetweenSlices: ds10(sk) }],
       PlaneOrientationSequence: [{ ImageOrientationPatient: iop }],
+      ...(opts.phaseEncoding ? { MRFOVGeometrySequence: [{ InPlanePhaseEncodingDirection: opts.phaseEncoding }] } : {}),
       FrameAnatomySequence: [{
         AnatomicRegionSequence: [{ CodeValue: "12738006", CodingSchemeDesignator: "SCT", CodeMeaning: "Brain" }],
         FrameLaterality: "U",

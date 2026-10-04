@@ -40,6 +40,9 @@ export const bidsDiffusion: BidsKind = {
         const number = ctx.nextSeriesNumber();
         const exp = await diffusionToEnhancedMR(series, { patientName: st.patientName, patientID: st.patientID, studyInstanceUID: st.studyInstanceUID, frameOfReferenceUID: st.frameOfReferenceUID, studyDescription: st.studyDescription, comments: st.comments, extra: st.extra, studyDate: st.studyDate, studyTime: st.studyTime }, {
           seriesDescription: desc, seriesNumber: number, sourceDescription: sidecarText ? JSON.stringify(kept, null, 2) : undefined,
+          // The sidecar's phase-encoding axis as the standard attribute: i along the rows (ROW), j along the columns (COL);
+          // the writer keeps the voxel axes as the image's (export-dicom-dwi.ts). Its sign stays in the private block.
+          ...(typeof side.PhaseEncodingDirection === "string" && /^[ij]-?$/.test(side.PhaseEncodingDirection) ? { phaseEncoding: (side.PhaseEncodingDirection[0] === "i" ? "ROW" : "COLUMN") as "ROW" | "COLUMN" } : {}),
           safetyStandardAgency: agency,
           uids: { series: await ctx.uid(m[1], `dwi rule ${DWI_RULE}`, "series"), sop: await ctx.uid(m[1], `dwi rule ${DWI_RULE}`, "instance") },
         });
