@@ -1,4 +1,4 @@
-// @full-tier -- the FIXED COHORT, whole brain on the graphics card (46-70 s a case with tracking rule 2 and the T1 alignment, 2026-10-03; twelve cases): the rebuild runs it
+// @full-tier -- the FIXED COHORT, whole brain on the graphics card (44-71 s a case with tracking rule 3 and the T1 alignment, 2026-10-04; twelve cases): the rebuild runs it
 // only in the full tier (Contents/tools/Rebuild SlicerAlbula App.command).
 //
 // THE CASE LIBRARY DOES NOT DRIFT (Ron, 2026-10-01: "Are there tests that you can add/improve now?"; Mike: an algorithm
@@ -12,11 +12,14 @@
 //   deno test -A --no-check --unstable-webgpu --config ../../src/SlicerLive/deno.jsonc cases.regression.test.ts
 import { assert, assertEquals } from "jsr:@std/assert";
 import { ABSENT, testData } from "albula/testing";
-import { runCase } from "./case-run.ts";
+import { runCase, synthstripMaskPath } from "./case-run.ts";
+import { TRACKING_RULE, TRACKING_RULES } from "./tracking-rules.ts";
 import { loadModel, type ModelJson } from "./tractcloud/tractcloud.ts";
 
 const DS = (testData("openneuro-ds001226", "") ?? ABSENT).replace(/\/$/, "");
-const have = (id: string) => { try { return Deno.statSync(`${DS}/sub-${id}/ses-preop/dwi/sub-${id}_ses-preop_acq-AP_dwi.nii.gz`).isFile; } catch { return false; } };
+const exists = (f: string) => { try { return Deno.statSync(f).isFile; } catch { return false; } };
+// Tracking rule 3 also needs the case's SynthStrip mask (Contents/tools/synthstrip-masks.ts); without it the case is skipped.
+const have = (id: string) => exists(`${DS}/sub-${id}/ses-preop/dwi/sub-${id}_ses-preop_acq-AP_dwi.nii.gz`) && (TRACKING_RULES[TRACKING_RULE].brain !== "t1-synthstrip" || exists(synthstripMaskPath(DS, id)));
 const adapter = await navigator.gpu?.requestAdapter().catch(() => null);
 const CASES = [...Deno.readDirSync(new URL("./test/cases/", import.meta.url))].map((e) => e.name.match(/^(\w+)-ukf\.json$/)?.[1]).filter((x): x is string => !!x).sort();
 
@@ -26,7 +29,9 @@ for (const id of CASES) Deno.test({ name: `${id}, two-tensor: the same streamlin
   try {
     const M = new URL("./tractcloud/model/", import.meta.url);
     const model = loadModel(Deno.readFileSync(new URL("weights.f32", M)).buffer, JSON.parse(Deno.readTextFileSync(new URL("model.json", M))) as ModelJson);
-    const ref = JSON.parse(Deno.readTextFileSync(new URL(`./test/cases/${id}-ukf.json`, import.meta.url))) as { streamlines: number; near8: { tract: string; within8: number }[] };
+    const ref = JSON.parse(Deno.readTextFileSync(new URL(`./test/cases/${id}-ukf.json`, import.meta.url))) as { streamlines: number; near8: { tract: string; within8: number }[]; trackingRule?: number };
+    // A reference made under another rule is a stale file, not a regression (critic, 2026-10-04, finding 10).
+    assertEquals(ref.trackingRule, TRACKING_RULE, `the stored result was made under tracking rule ${ref.trackingRule}, the default is ${TRACKING_RULE}: rerun Contents/tools/dmri-cohort.ts`);
     const r = await runCase(DS, id, device, model, "ukf");
     console.log(`${id}: ${r.streamlines} streamlines (stored ${ref.streamlines}), ${r.seconds.total} s`);
     assert(Math.abs(r.streamlines - ref.streamlines) <= ref.streamlines * 0.005, `streamlines ${r.streamlines} against ${ref.streamlines}`);

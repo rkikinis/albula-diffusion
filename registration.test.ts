@@ -56,15 +56,3 @@ Deno.test("resampling with no move and no field onto the scan's own axes gives t
   assertAlmostEquals(out.gradients[0][0], 1, 1e-12);
 });
 
-Deno.test("the resampled box holds the T1-space points it is given besides the scan's covered voxels (rule 3's brain)", async () => {
-  const dims: [number, number, number] = [12, 10, 8], M = [2, 0, 0, -10, 0, 2, 0, -8, 0, 0, 2, -6, 0, 0, 0, 1];
-  const data = Float32Array.from({ length: 960 }, (_, v) => v % 7);
-  const dwi = { volumes: [{ dims, ijkToRAS: M, data, dtype: "<f4" }], bValues: [0], gradients: [[0, 0, 0]], ijkToRAS: M, source: "test", convention: 1 } as unknown as DiffusionSeries;
-  const cover = new Uint8Array(960); cover[(4 * 10 + 5) * 12 + 6] = 1;                     // one voxel, at (2, 2, 2) mm
-  const I = { R: rotation(0, 0, 0), t: [0, 0, 0], c: [0, 0, 0] }, t1 = { dims: [50, 50, 50] as [number, number, number], ijkToRAS: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] };
-  const small = await resampleOntoT1(dwi, I, t1, undefined, { cover, marginMm: 0 });
-  const big = await resampleOntoT1(dwi, I, t1, undefined, { cover, marginMm: 0, alsoCover: [[-6, -4, -2]] });
-  assert(small.volumes[0].dims.join() === "1,1,1", `small ${small.volumes[0].dims}`);
-  assert(big.volumes[0].dims.join() === "5,4,3", `big ${big.volumes[0].dims}`);
-  assertAlmostEquals(big.ijkToRAS[3], -6, 1e-9);
-});

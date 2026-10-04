@@ -13,7 +13,8 @@
 // v6 (2026-10-01): the UKF-near-tumors studies Yogesh Rathi pointed to (Chen 2015; Zhang 2017 ISBI) and their companions
 // (Liao 2017, Gong 2018, O'Donnell 2017), checked against Crossref.
 // v7 (2026-10-03): RapidParc (Bisten et al. 2026) names the tracts; TractCloud kept for its table.
-export const REFERENCES_VERSION = 7;
+// v8 (2026-10-04, critic finding 14): SynthStrip (Hoopes et al. 2022), the brain of tracking rule 3, checked against Crossref.
+export const REFERENCES_VERSION = 8;
 
 export interface Reference { cite: string; link?: string; usedFor: string; verified: boolean }
 
@@ -33,6 +34,7 @@ export const DIFFUSION_REFERENCES: Reference[] = [
   { cite: "Pajevic S, Pierpaoli C. Color schemes to represent the orientation of anisotropic tissues from diffusion tensor data: application to white matter fiber tract mapping in the human brain. Magnetic Resonance in Medicine 42(3):526-540, 1999.", link: "https://doi.org/10.1002/(SICI)1522-2594(199909)42:3<526::AID-MRM15>3.0.CO;2-J", usedFor: "color FA (tensor.ts)", verified: true },
   { cite: "Basser PJ, Pajevic S, Pierpaoli C, Duda J, Aldroubi A. In vivo fiber tractography using DT-MRI data. Magnetic Resonance in Medicine 44(4):625-632, 2000.", link: "https://doi.org/10.1002/1522-2594(200010)44:4<625::AID-MRM17>3.0.CO;2-O", usedFor: "single-tensor streamline tracking (tracking.ts)", verified: true },
   { cite: "Otsu N. A threshold selection method from gray-level histograms. IEEE Transactions on Systems, Man, and Cybernetics 9(1):62-66, 1979.", link: "https://doi.org/10.1109/TSMC.1979.4310076", usedFor: "the brain mask (tensor.ts brainMask)", verified: true },
+  { cite: "Hoopes A, Mora JS, Dalca AV, Fischl B, Hoffmann M. SynthStrip: skull-stripping for any brain image. NeuroImage 260:119474, 2022.", link: "https://doi.org/10.1016/j.neuroimage.2022.119474", usedFor: "the brain the whole-brain tracking starts and stops in (tracking rule 3), found on the MRI of the anatomy by the segmentation server (haversack)", verified: true },
   { cite: "Garyfallidis E, Brett M, Amirbekian B, et al. Dipy, a library for the analysis of diffusion MRI data. Frontiers in Neuroinformatics 8:8, 2014.", link: "https://doi.org/10.3389/fninf.2014.00008", usedFor: "the independent check of the tensor fit (a check tool, not a dependency)", verified: true },
   // Distortion correction.
   { cite: "Chang H, Fitzpatrick JM. A technique for accurate magnetic resonance imaging in the presence of field inhomogeneities. IEEE Transactions on Medical Imaging 11(3):319-329, 1992.", link: "https://doi.org/10.1109/42.158935", usedFor: "the reversed phase-encoding principle (distortion.ts)", verified: true },

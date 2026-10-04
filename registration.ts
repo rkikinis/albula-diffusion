@@ -203,7 +203,7 @@ export async function rigidToT1(moving: Grid3, fixedFull: Grid3, mask: Uint8Arra
  * correction distortion.ts applyField makes, with its stretch), and the scan as acquired is read there. Target grid: the
  * T1's axes at the scan's own spacing, over the box the scan covers once moved. Gradients turned by the rotation.
  */
-export async function resampleOntoT1(dwi: DiffusionSeries, T: Rigid, t1: Pick<Grid3, "dims" | "ijkToRAS">, field?: { fit: FieldFit; sign: 1 | -1 }, opts: { /** The scan's voxels to cover (the brain, on the scan's grid): the box is theirs plus a margin, not the whole field of view. */ cover?: Uint8Array; marginMm?: number; /** Points in T1 space (RAS mm) the box must also hold: the T1's own brain mask (tracking rule 3), so a box made from the scan's median_otsu cannot cut what SynthStrip keeps. */ alsoCover?: number[][] } = {}): Promise<DiffusionSeries> {
+export async function resampleOntoT1(dwi: DiffusionSeries, T: Rigid, t1: Pick<Grid3, "dims" | "ijkToRAS">, field?: { fit: FieldFit; sign: 1 | -1 }, opts: { /** The scan's voxels to cover (the brain, on the scan's grid): the box is theirs plus a margin, not the whole field of view. */ cover?: Uint8Array; marginMm?: number } = {}): Promise<DiffusionSeries> {
   const src = dwi.volumes[0], [sx, sy, sz] = src.dims, Ms = src.ijkToRAS, Si = inv4(Ms), sp = spacingOf(Ms);
   const Mt = t1.ijkToRAS, tsp = spacingOf(Mt), axes = [0, 1, 2].map((c) => [Mt[c] / tsp[c], Mt[4 + c] / tsp[c], Mt[8 + c] / tsp[c]]);
   // THE SPACING keeps the scan's voxel volume (critic, 2026-10-03, finding 7: the smallest spacing in all three directions
@@ -214,9 +214,14 @@ export async function resampleOntoT1(dwi: DiffusionSeries, T: Rigid, t1: Pick<Gr
   // grown by a margin -- a third of the field-of-view box was zero fill (PAT16).
   const pts: number[][] = [], cov = opts.cover;
   if (cov) { for (let k = 0; k < sz; k++) for (let j = 0; j < sy; j++) for (let i = 0; i < sx; i++) if (cov[(k * sy + j) * sx + i]) pts.push(applyRigid(T, [0, 1, 2].map((r) => Ms[4 * r] * i + Ms[4 * r + 1] * j + Ms[4 * r + 2] * k + Ms[4 * r + 3]))); }
-  if (cov && opts.alsoCover) for (const p of opts.alsoCover) pts.push(p);
   if (!pts.length) for (const a of [0, sx - 1]) for (const b of [0, sy - 1]) for (const c of [0, sz - 1]) pts.push(applyRigid(T, [0, 1, 2].map((r) => Ms[4 * r] * a + Ms[4 * r + 1] * b + Ms[4 * r + 2] * c + Ms[4 * r + 3])));
-  const margin = cov ? (opts.marginMm ?? 2 * h) : 0;
+  // THE MARGIN: 4 voxels (2 until 2026-10-04). Tracking rule 3's brain comes from the T1 (SynthStrip), and a box made from
+  // the scan's own median_otsu with 2 voxels left up to 0.26 mL of it outside on 4 of ds001226's 29 cases; 3 voxels left
+  // 18 µL on one, 4 none (critic, 2026-10-04, finding 18 and the measurement after it). A fixed margin, not one made from
+  // the T1's mask: the maps are made before the mask arrives, and the grid must not depend on when it did. Whole voxels, so
+  // the voxel centers inside are the same as with 2 -- but median_otsu's 9-voxel filter reaches the grid's edge, so rule 2's
+  // brain, and its tracts, can differ slightly (PAT07: 48,944 streamlines with 2, 49,331 with 4).
+  const margin = cov ? (opts.marginMm ?? 4 * h) : 0;
   const lo = [0, 1, 2].map((ax) => { let m = Infinity; for (const p of pts) m = Math.min(m, p[0] * axes[ax][0] + p[1] * axes[ax][1] + p[2] * axes[ax][2]); return m - margin; });
   const hi = [0, 1, 2].map((ax) => { let m = -Infinity; for (const p of pts) m = Math.max(m, p[0] * axes[ax][0] + p[1] * axes[ax][1] + p[2] * axes[ax][2]); return m + margin; });
   const dims = [0, 1, 2].map((ax) => Math.floor((hi[ax] - lo[ax]) / h) + 1) as [number, number, number];
@@ -257,14 +262,6 @@ export async function resampleOntoT1(dwi: DiffusionSeries, T: Rigid, t1: Pick<Gr
   return { ...dwi, volumes, ijkToRAS: M, gradients, source: `${dwi.source}; onto the T1 (registration rule ${REGISTRATION_RULE})` };
 }
 
-/** The RAS points (mm) of a mask's inside voxels, every `stride`-th along each axis -- enough for a bounding box. */
-export function maskPoints(m: { dims: number[]; ijkToRAS: number[]; data: ArrayLike<number> }, stride = 1): number[][] {
-  const [nx, ny, nz] = m.dims, A = m.ijkToRAS, out: number[][] = [];
-  for (let k = 0; k < nz; k += stride) for (let j = 0; j < ny; j += stride) for (let i = 0; i < nx; i += stride)
-    if (m.data[(k * ny + j) * nx + i] > 0) out.push([0, 1, 2].map((r) => A[4 * r] * i + A[4 * r + 1] * j + A[4 * r + 2] * k + A[4 * r + 3]));
-  return out;
-}
-
 /** A move too large to be the same session's -- the alignment is then shown as doubtful (the person aligns by hand). */
 export const DOUBTFUL = { mm: 10, degrees: 10 };
 
@@ -274,7 +271,7 @@ export const DOUBTFUL = { mm: 10, degrees: 10 };
  * the T1-aligned grid through the move and the field. Returns the new series, the move, and what was done, in words --
  * with a doubt when the move is larger than one session's or the alignment did not improve the match.
  */
-export async function alignToT1(dwi: DiffusionSeries, t1: Grid3, field?: { fit: FieldFit; sign: 1 | -1 }, times?: { register?: number; resample?: number }, opts: { /** The T1's brain mask (tracking rule 3): the resampled box holds it too. */ brainT1?: { dims: number[]; ijkToRAS: number[]; data: ArrayLike<number> } } = {}): Promise<{ dwi: DiffusionSeries; T: Rigid; result: RigidResult; said: string; doubt?: string }> {
+export async function alignToT1(dwi: DiffusionSeries, t1: Grid3, field?: { fit: FieldFit; sign: 1 | -1 }, times?: { register?: number; resample?: number }): Promise<{ dwi: DiffusionSeries; T: Rigid; result: RigidResult; said: string; doubt?: string }> {
   const t0 = performance.now(), src = dwi.volumes[0], n = src.dims[0] * src.dims[1] * src.dims[2];
   const b0i = dwi.bValues.map((b, i) => (b < 50 ? i : -1)).filter((i) => i >= 0);
   const b0 = new Float32Array(n);
@@ -289,7 +286,7 @@ export async function alignToT1(dwi: DiffusionSeries, t1: Grid3, field?: { fit: 
   const result = await rigidToT1({ dims: src.dims as [number, number, number], ijkToRAS: src.ijkToRAS, data: b0 }, t1, mask);
   const t1Done = performance.now();
   if (times) times.register = t1Done - t0;
-  const out = await resampleOntoT1(dwi, result.T, t1, field, { cover: mask, ...(opts.brainT1 ? { alsoCover: maskPoints(opts.brainT1, 2) } : {}) });
+  const out = await resampleOntoT1(dwi, result.T, t1, field, { cover: mask });
   if (times) times.resample = performance.now() - t1Done;
   const sz = rigidSize(result.T);
   const doubt = sz.mm > DOUBTFUL.mm || sz.degrees > DOUBTFUL.degrees ? `it had to move ${sz.mm.toFixed(0)} mm and ${sz.degrees.toFixed(0)}°, more than within one visit`

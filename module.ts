@@ -17,8 +17,9 @@
 //    or within a distance of it -- or from a point clicked in a view.
 //  - IN THE SCENE (green band: what exists): the tract groups, each with its eye and its ✕, drawn as tubes (Ron:
 //    "tubes" first) or lines, and as dots where they cross the slices (drawSliceCrossings), ends shortened (drawn()).
-// Tracking: UKF two-tensor on the graphics card (ukf-gpu.ts) by the current tracking rule (tracking-rules.ts; rule 2 since
-// 2026-10-03, Mike Halle's tractline: plain two-tensor, the shell nearest b = 3000, every brain voxel a seed), or one
+// Tracking: UKF two-tensor on the graphics card (ukf-gpu.ts) by the current tracking rule (tracking-rules.ts; rule 3 since
+// 2026-10-04: Mike Halle's tractline -- plain two-tensor, the shell nearest b = 3000, every brain voxel a seed -- inside the
+// brain SynthStrip finds on the MRI of the anatomy, asked of the segmentation server, brainFor), or one
 // tensor (tracking.ts). Names: RapidParc
 // (rapidparc/; TractCloud's tractcloud/ until 2026-10-03, its table still shared), from whole-brain tracking; the named tracts near the chosen structure are shown whole (makeNamedTracts).
 // NOT YET: the tract groups are the module's, not scene nodes -- Scene does not list them and a saved scene does not keep
@@ -45,7 +46,7 @@ import { applyField, type FieldFit } from "./distortion.ts";
 /** "Stop below FA"'s default under Advanced (the single-tensor tracker's; the UKF's comes from the tracking rule). */
 const ADV_MIN_FA = 0.15;
 import { DCM2NIIX_VERSION, secondOpinion, type SecondOpinion } from "./second-opinion.ts";
-import { assetUrl, holdDrawing, seriesDicomFiles, startPlacing, synthstripBrainMask } from "albula";
+import { assetUrl, holdDrawing, seriesDicomFiles, startPlacing, startSegmentationServer, synthstripBrainMask, type BrainMaskResult } from "albula";
 import { createSegmentation, growIntoSegmentation, openDicomDatabase, openLoadFromDisk, paintInto, registerProbeRows, registerRayHits, runAction, saveSegmentationToDicom, showHideAllState } from "albula";
 import { buildTractIndex, tractsNear, type TractIndex } from "./tract-index.ts";
 import { sliceCrossings, trimEnds } from "./tract-slice.ts";
@@ -67,7 +68,11 @@ interface Scan { browserId: string; name: string; frameIds: string[]; bValues: n
   /** The scanner's record of the phase-encoding direction (diffusion-vendors.ts phaseEncodingOf: "j-", or "ROW" / "COL"). */
   phaseEncoding?: string }
 /** What has been computed for a scan, kept while the scan is in the scene. */
-interface Computed { dwi: DiffusionSeries; fit: TensorFit; maxB: number; corrected: string; partnerId: string; /** The anatomy MRI the scan was aligned to ("" none). */ anatomyId?: string; /** The tracking rule the brain mask was made for (tracking-rules.ts): the default, or 2 when rule 3's brain could not be had. */ rule: TrackingRuleId; faId?: string; colorFaId?: string; ukf?: UkfData; fod?: FodVolume }
+interface Computed { dwi: DiffusionSeries; fit: TensorFit; maxB: number; corrected: string; partnerId: string; /** The anatomy MRI the scan was aligned to ("" none). */ anatomyId?: string; /** The tracking rule the fit's brain mask serves (tracking-rules.ts): 2 until rule 3's brain is put in (brainFor). */ rule: TrackingRuleId; /** Rule 3's brain: what was used, in words, and why not when it was not. */ brain: BrainState; faId?: string; colorFaId?: string; ukf?: UkfData; fod?: FodVolume }
+/** RULE 3's BRAIN for a fitted scan (critic, 2026-10-04, findings 2, 4, 8, 9): asked of the segmentation server when the
+ *  maps are made but not waited for -- the maps do not use it -- and waited for by the tracking (brainFor). A failure
+ *  that can go away (no server, a server without SynthStrip, a failed job) is asked again at the next tracking. */
+interface BrainState { note: string; reason?: "no-anatomy" | "moved" | "doubt" | "no-server" | "no-synthstrip" | "failed"; ask?: Promise<BrainMaskResult> }
 /** A reversed phase-encoding scan for a diffusion scan: b = 0 images of the same study, on its own grid (aligned by the scanner's coordinates). */
 interface Partner { id: string; name: string; frameIds: string[]; dims: number[]; ijkToRAS: number[]; phaseEncoding?: string }
 /** A node's recorded phase-encoding direction, as the diffusion interpreter read it. */
@@ -90,6 +95,7 @@ interface TractGroup {
 /** The last whole-brain run for a scan, kept so "Add lines" can name new streamlines in its context and measure them
  *  against the same structure. */
 interface Run { sl: Float32Array[]; named: Named; sorted: Sorted; structure: Structure; label: string; withinMm: number; method: Method;
+  /** The tracking rule the whole-brain run was made under, and its brain in words (BrainState.note). */ rule?: TrackingRuleId; brain?: string;
   /** The tracts ("tract:side") Add lines has already added to: a second press would start from the same points and
    *  draw the same lines again, so they are skipped (Ron, 2026-10-01: he pressed it, then saw the corticospinal tract
    *  was not on). */
@@ -447,42 +453,34 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     const times: StageTimes = { read: performance.now() - t0 };
     const field: { fit?: FieldFit; sign?: 1 | -1 } = {};
     let corrected = partner ? await correctDistortion(dwi, partner, times, scan.phaseEncoding, anatOk ? field : undefined) : correct ? "not corrected (no reversed phase-encoding scan of this study is loaded)" : "not corrected (switched off)";
-    // RULE 3's BRAIN (tracking-rules.ts): SynthStrip's mask of the MRI of the anatomy, from the segmentation server. Without
-    // it (no anatomy MRI, no server, a doubtful alignment) the brain is made from the diffusion scan as in rule 2, and the
-    // status line says so.
-    let rule: TrackingRuleId = TRACKING_RULE;
-    let brainT1: { dims: number[]; ijkToRAS: number[]; data: ArrayLike<number> } | undefined, brainNote = "";
-    if (TRACKING_RULES[rule].brain === "t1-synthstrip") {
-      if (!anatOk) { rule = 2; brainNote = "the brain was taken from the diffusion scan (no MRI of the anatomy is loaded)"; }
-      else {
-        say("Finding the brain on the MRI of the anatomy…");
-        const r = await synthstripBrainMask(live, anatOk.id, (line) => say(`Finding the brain on the MRI of the anatomy: ${line}`));
-        if (r.ok) { brainT1 = r.mask; brainNote = "the brain was found on the MRI of the anatomy (SynthStrip)"; }
-        else { rule = 2; brainNote = `the brain was taken from the diffusion scan, because ${r.message}`; }
-      }
-    }
+    let aligned = false;
     if (anatOk) {
       say("Aligning the diffusion scan to the MRI of the anatomy…");
       const z = await fetchZarrVolumeNative(live.blobBase(), anatOk.zarr as ZarrDesc);
-      const a = await alignToT1(dwi, { dims: anatOk.dims as [number, number, number], ijkToRAS: anatOk.ijkToRAS as number[], data: z.data as ArrayLike<number> }, field.fit ? { fit: field.fit, sign: field.sign ?? -1 } : undefined, times, brainT1 ? { brainT1 } : {});
+      const a = await alignToT1(dwi, { dims: anatOk.dims as [number, number, number], ijkToRAS: anatOk.ijkToRAS as number[], data: z.data as ArrayLike<number> }, field.fit ? { fit: field.fit, sign: field.sign ?? -1 } : undefined, times);
       if (a.doubt) {
         // A DOUBTFUL ALIGNMENT IS NOT USED (until aligning by hand is built): the scanner's placement stands, the
         // correction is applied as before, and the person is told.
         if (field.fit) for (const v of dwi.volumes) { v.data = applyField(field.fit, v.data as ArrayLike<number>, field.sign ?? -1); v.dtype = "<f4"; }
         corrected += `; not aligned to the MRI of the anatomy: the automatic alignment looked wrong (${a.doubt}), so the scanner's placement is used`;
-        if (brainT1) { brainT1 = undefined; rule = 2; brainNote = "the brain was taken from the diffusion scan, because the scan is not aligned to the MRI of the anatomy"; }
-      } else { dwi = a.dwi; corrected += `; ${a.said}`; }
+        aligned = false;
+      } else { dwi = a.dwi; corrected += `; ${a.said}`; aligned = true; }
     }
     const t1 = performance.now();
     say("Fitting the diffusion tensor…");
     await new Promise((r) => setTimeout(r, 0));
-    let fit = fitTensors(dwi, { maxB: adv.maxB });
-    if (brainT1) fit = withBrainFromT1(fit, brainT1);
-    if (brainNote) corrected += `; ${brainNote}`;
+    const fit = fitTensors(dwi, { maxB: adv.maxB });
     times.fit = performance.now() - t1;
     times.total = performance.now() - t0;
     fitTimes = times;
-    const c: Computed = { dwi, fit, maxB: adv.maxB, corrected, partnerId: partner?.id ?? "", anatomyId: anatOk?.id ?? "", rule };
+    const wantT1 = TRACKING_RULES[TRACKING_RULE].brain === "t1-synthstrip";
+    const fromScan = "the brain was taken from the diffusion scan, because ";
+    const brain: BrainState = !wantT1 ? { note: "" }
+      : !anat ? { note: fromScan + "no MRI of the anatomy is loaded", reason: "no-anatomy" }
+      : !anatOk ? { note: fromScan + "the MRI of the anatomy has a transform (Transforms module): harden or remove it", reason: "moved" }
+      : !aligned ? { note: fromScan + "the scan could not be aligned to the MRI of the anatomy", reason: "doubt" }
+      : { note: "", ask: askBrain(anatOk.id) };
+    const c: Computed = { dwi, fit, maxB: adv.maxB, corrected, partnerId: partner?.id ?? "", anatomyId: anatOk?.id ?? "", rule: wantT1 ? 2 : TRACKING_RULE, brain };
     computed.set(scan.browserId, c);
     say(`Maps made from ${fit.used.length} volumes up to b = ${adv.maxB}; distortion ${corrected}. ${stageText(times)}.`);
     return c;
@@ -596,7 +594,28 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
    */
   /** The last tracking's breakdown, for the status line (planning.ts TrackTiming, plus the signal's preparation). */
   let lastTiming: (TrackTiming & { data: number }) | undefined;
+  /** Rule 3's brain into a fit, waited for here -- the tracking is what uses it. Asked again when the last answer was a
+   *  failure that can go away (the server was not running, ran without SynthStrip, or the job failed). */
+  let waitingForBrain = false, brainLine = "";
+  const askBrain = (anatomyId: string) => synthstripBrainMask(live, anatomyId, (line) => { brainLine = line; if (waitingForBrain) say(`Finding the brain on the MRI of the anatomy: ${line}…`); });
+  async function brainFor(c: Computed): Promise<void> {
+    const b = c.brain;
+    if (c.rule === TRACKING_RULE || !c.anatomyId) return;
+    if (b.reason === "no-anatomy" || b.reason === "moved" || b.reason === "doubt") return;
+    b.ask ??= askBrain(c.anatomyId);
+    waitingForBrain = true;
+    say(`Finding the brain on the MRI of the anatomy${brainLine ? `: ${brainLine}` : ""}…`);
+    const r = await b.ask.finally(() => { waitingForBrain = false; });
+    b.ask = undefined;
+    if (r.ok) {
+      const w = withBrainFromT1(c.fit, r.mask);
+      c.fit = w.fit; c.ukf = undefined; c.rule = TRACKING_RULE;
+      b.reason = undefined;
+      b.note = "the brain was found on the MRI of the anatomy (SynthStrip)" + (w.outsideGridMl >= 1 ? `; ${w.outsideGridMl.toFixed(0)} mL of it lies outside the diffusion scan's grid and is not tracked` : "");
+    } else { b.reason = r.reason; b.note = `the brain was taken from the diffusion scan, because ${r.message}`; }
+  }
   async function trackUkf(c: Computed, seedsRAS: number[][]): Promise<Float32Array[]> {
+    await brainFor(c);
     const t0 = performance.now();
     // THE TRACKING RULE (tracking-rules.ts): the shell, the mask and the thresholds. "Stop below FA" under Advanced shows
     // and sets the two-tensor tracker's own value when that tracker is chosen (adv.ukfStopFA, the rule's 0.08 to start
@@ -676,6 +695,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       const c = await ensureFit(scan);
       const times: StageTimes = takeFitTimes(), before = times.total ?? 0;
       const t0 = performance.now();
+      if (method === "ukf") await brainFor(c);
       const seeds = method === "ukf" ? seedsFor(c.fit, TRACKING_RULES[c.rule]) : wholeBrainSeeds(c.fit);
       times.seeds = performance.now() - t0;
       say(`Following tracts through the whole brain from ${seeds.length.toLocaleString()} starting points…`);
@@ -703,7 +723,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       // A NEW RUN REPLACES THE LAST ONE for this scan (critic, finding 5: a second press doubled every tract).
       groups.splice(0, groups.length, ...withoutLastRun(groups, scan.browserId));   // face.ts
       const pick = (idx: number[]) => idx.map((i) => sl[i]);
-      runs.set(scan.browserId, { sl, named, sorted, structure, label: target.label, withinMm, method, added: new Set(), dist, maxB: c.maxB, partnerId: c.partnerId, anatomyId: c.anatomyId ?? "" });
+      runs.set(scan.browserId, { sl, named, sorted, structure, label: target.label, withinMm, method, added: new Set(), dist, maxB: c.maxB, partnerId: c.partnerId, anatomyId: c.anatomyId ?? "", rule: method === "ukf" ? c.rule : undefined, brain: method === "ukf" ? c.brain.note : "" });
       // The anatomy behind the slices, where the tracts' crossings are drawn (Yogesh Rathi via Ron, 2026-10-01), and over
       // it this scan's own map -- never another patient's left from before (critic, 2026-10-01, finding 3).
       const anat = anatomyFor(scan);
@@ -1069,6 +1089,18 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     go.disabled = !!busy || !scan || !faceNear || seeding || !!outline;
     go.onclick = () => { if (method === "single") method = "ukf"; near = faceNear; void makeTracts(); };   // the face names tracts, from a tumor
     face.append(go);
+    // THE SERVER, WHERE THE PERSON IS (critic, 2026-10-04, finding 9): when the last tracking took the brain from the
+    // diffusion scan because the segmentation server was not running, the button that starts it is here.
+    const cNow = scan ? computed.get(scan.browserId) : undefined;
+    if (cNow?.brain.reason === "no-server") {
+      const st = document.createElement("button");
+      st.textContent = "Start the segmentation server";
+      st.title = "Starts the program that finds the brain on the MRI of the anatomy, so the next run follows tracts through all of it (the first start takes a minute or two).";
+      st.style.cssText = "width:100%;margin:0 0 4px";
+      st.disabled = !!busy;
+      st.onclick = () => { void runAction(st, async () => { const r = await startSegmentationServer((l) => say(l)); say(r.ok ? `${r.message[0].toUpperCase()}${r.message.slice(1)}. Press the button above again.` : `The segmentation server did not start: ${r.message}.`); if (r.ok) cNow.brain.reason = undefined; render(); }, { busyLabel: "Starting…", doneLabel: "Started", failedLabel: "Did not start" }).catch(() => {}); };
+      face.append(st);
+    }
     if (!scan || !faceNear) { const p = document.createElement("p"); p.className = "sl-hint"; p.textContent = "Waits until the case has all three."; face.append(p); }
     if (note) { const p = document.createElement("p"); p.className = "sl-hint"; p.style.margin = "4px 0 0"; p.textContent = note; face.append(p); }
     const listBox = document.createElement("div");
@@ -1287,6 +1319,9 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
         const cav = document.createElement("p"); cav.className = "sl-hint";
         cav.textContent = "A tract that looks thin or missing on the tumor's side may be destroyed by the tumor, or still there but hidden by swelling (edema). Compare it with the other side, and press Add lines for a closer look.";
         listBox.append(cav);
+        // Which brain these tracts were followed in, kept with the run (critic, 2026-10-04, finding 9).
+        const runNow = runs.get(scan.browserId);
+        if (runNow?.brain) { const bl = document.createElement("p"); bl.className = "sl-hint"; bl.textContent = `${runNow.brain[0].toUpperCase()}${runNow.brain.slice(1)}.`; listBox.append(bl); }
       }
       const as = document.createElement("div");
       as.style.cssText = "display:flex;gap:3px";

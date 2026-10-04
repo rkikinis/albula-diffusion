@@ -36,8 +36,9 @@ export interface CaseResult {
   method: "ukf" | "ptt";
   /** tracking-rules.ts: the rule the case was tracked by, and the shell it used (undefined: every shell). */
   trackingRule?: TrackingRuleId; shell?: number;
-  /** What the brain mask (seeds and tracking boundary) was made from (TensorFit.seedMaskRule). */
-  brain?: string;
+  /** What the brain mask (seeds and tracking boundary) was made from (TensorFit.seedMaskRule), and for rule 3 how much of
+   *  the T1's brain (mL) lay outside the diffusion grid. */
+  brain?: string; brainOutsideGridMl?: number;
   /** registration.ts: the move from the diffusion scan to the T1 the case was tracked on, and a doubt about it. */
   alignment?: { T: Rigid; doubt?: string };
   seconds: { read_correct_fit: number; csd: number; track: number; name: number; total: number };
@@ -80,9 +81,9 @@ export async function runCase(ds: string, id: string, device: GPUDevice, model: 
   const t1Vol = opts.onT1 === false ? undefined : await (async () => { try { return (await parseNiftiVolumes(rd(`anat/sub-${id}_ses-preop_T1w.nii.gz`)))[0]; } catch { return undefined; } })();
   // RULE 3's BRAIN (tracking-rules.ts): SynthStrip's mask of the T1, made beforehand by Contents/tools/synthstrip-masks.ts
   // (haversack). A case run asked for rule 3 without it stops and says so rather than tracking under another rule.
-  const rule = TRACKING_RULES[opts.trackingRule ?? TRACKING_RULE];
+  const asked = TRACKING_RULES[opts.trackingRule ?? TRACKING_RULE];
   let brainT1: MaskGrid | undefined;
-  if (method === "ukf" && rule.brain === "t1-synthstrip") {
+  if (method === "ukf" && asked.brain === "t1-synthstrip") {
     if (!t1Vol) throw new Error(`${id}: tracking rule 3 needs the T1 (onT1 is false or the case has none)`);
     const f = synthstripMaskPath(ds, id);
     try { const m = (await parseNiftiVolumes(Deno.readFileSync(f)))[0]; brainT1 = { dims: m.dims, ijkToRAS: m.ijkToRAS, data: m.data as ArrayLike<number> }; }
@@ -96,7 +97,7 @@ export async function runCase(ds: string, id: string, device: GPUDevice, model: 
       phaseEncoding: { scan: sidecarPE(`dwi/sub-${id}_ses-preop_acq-AP_dwi.json`), partner: sidecarPE(`dwi/sub-${id}_ses-preop_acq-PA_dwi.json`) } });
   let alignment: { T: Rigid; doubt?: string } | undefined;
   if (t1Vol) {
-    const a = await alignToT1(dwi, { dims: t1Vol.dims as [number, number, number], ijkToRAS: t1Vol.ijkToRAS, data: t1Vol.data as ArrayLike<number> }, field.fit ? { fit: field.fit, sign: field.sign ?? -1 } : undefined, stages, brainT1 ? { brainT1 } : {});
+    const a = await alignToT1(dwi, { dims: t1Vol.dims as [number, number, number], ijkToRAS: t1Vol.ijkToRAS, data: t1Vol.data as ArrayLike<number> }, field.fit ? { fit: field.fit, sign: field.sign ?? -1 } : undefined, stages);
     // A doubtful alignment is not used (as in the module): the scanner's placement stands, the field applied as before.
     if (a.doubt) { if (field.fit) for (const v of dwi.volumes) { v.data = applyField(field.fit, v.data as ArrayLike<number>, field.sign ?? -1); v.dtype = "<f4"; } corrected += `; not aligned to the T1: ${a.doubt}`; }
     else { dwi = a.dwi; corrected += `; ${a.said}`; }
@@ -104,8 +105,11 @@ export async function runCase(ds: string, id: string, device: GPUDevice, model: 
   }
   const tFit = performance.now();
   let fit = fitTensors(dwi, { maxB: CASE_DEFAULTS.maxB, maskMethod: opts.maskMethod, seedMask: opts.seedMask });
-  // On the T1-aligned grid only: a doubtful alignment left the scan in the scanner's place, where a T1 mask does not fit.
-  if (brainT1 && alignment && !alignment.doubt) fit = withBrainFromT1(fit, brainT1);
+  // On the T1-aligned grid only: a doubtful alignment left the scan in the scanner's place, where a T1 mask does not fit,
+  // and the case is then tracked under rule 2 and recorded so (critic, 2026-10-04, finding 10).
+  let rule = TRACKING_RULES[opts.trackingRule ?? TRACKING_RULE], outsideGridMl: number | undefined;
+  if (brainT1 && alignment && !alignment.doubt) ({ fit, outsideGridMl } = withBrainFromT1(fit, brainT1));
+  else if (rule.brain === "t1-synthstrip") rule = TRACKING_RULES[2];
   const t1 = performance.now();
   stages.fit = t1 - tFit;
   const detail: TrackTiming = { prepare: 0, gpu: 0, assemble: 0, between: 0 };
@@ -150,6 +154,6 @@ export async function runCase(ds: string, id: string, device: GPUDevice, model: 
   const t3 = performance.now();
   stages.distances = t3 - tDist;
   stages.total = t3 - t0;
-  return { id, corrected, ...(alignment ? { alignment } : {}), trackingRule: method === "ukf" ? rule.id : undefined, brain: fit.seedMaskRule ?? fit.maskRule, shell, stages, stagesText: stageText(stages), ...(opts.keep ? { kept: { sl, named } } : {}), ...(added !== undefined ? { noiseSigma: +added.toFixed(2) } : {}), streamlines: sl.length, short, other, named: sl.length - short - other, tumorVoxels, method,
+  return { id, corrected, ...(alignment ? { alignment } : {}), trackingRule: method === "ukf" ? rule.id : undefined, brain: fit.seedMaskRule ?? fit.maskRule, ...(outsideGridMl !== undefined ? { brainOutsideGridMl: +outsideGridMl.toFixed(1) } : {}), shell, stages, stagesText: stageText(stages), ...(opts.keep ? { kept: { sl, named } } : {}), ...(added !== undefined ? { noiseSigma: +added.toFixed(2) } : {}), streamlines: sl.length, short, other, named: sl.length - short - other, tumorVoxels, method,
     seconds: { read_correct_fit: +((t1 - t0) / 1000).toFixed(1), csd: +csdSeconds.toFixed(1), track: +((t2 - t1 - csdSeconds * 1000) / 1000).toFixed(1), name: +named.seconds.toFixed(1), total: +((t3 - t0) / 1000).toFixed(1) }, tracts };
 }

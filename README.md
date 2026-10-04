@@ -46,6 +46,12 @@ This extension adds diffusion MRI, from the scanner's files to the tracts near a
   (`csd-volume.ts`). Parallel transport tractography (`ptt.ts`; Aydogan & Shi 2021) on the processor's workers, each
   seed with its own seeded generator. Compared with UKF on 15 cases: about as many streamlines inside meningiomas
   (where none belong), a few more named tracts near gliomas, about three times the time.
+- **How the whole brain is tracked** is a numbered rule (`tracking-rules.ts`). Rule 3, the default since 2026-10-04:
+  Mike Halle's tractline settings (plain two-tensor UKF on the shell nearest b = 3000, a seed in every brain voxel, the
+  ORG atlas's thresholds) inside the brain as SynthStrip (Hoopes et al. 2022) finds it on the MRI of the anatomy, asked
+  of the haversack server through the SDK; the diffusion scan is aligned to that MRI first (`registration.ts`). Rule 2
+  is the same inside DIPY's median_otsu mask of the diffusion scan, which leaves out the lower temporal lobes and part
+  of the cerebellum; the module falls back to it, and says so, without an MRI of the anatomy or a server.
 - **Planning**: tracking through the whole brain, naming, and showing every named tract that comes within a margin of
   a segmented tumor — whole — in its own color, with its closest distance to the tumor; a tract counts as near when at
   least 5 of its streamlines come within the margin (`planning.ts`, MIN_NEAR_STREAMLINES). Tracts that come within the
@@ -106,7 +112,8 @@ reader functions; its test against the processor version (`ukf-gpu.test.ts`) run
 
 Tests that need data are skipped when it is not on disk. Public: OpenNeuro ds001226 and the dcm2niix test sets. Made
 from public data by Albula's own tools: the TractCloud reference (`tractcloud-reference.py`, from PAT16's streamlines)
-and the CSD reference. Albula's `Contents/data/test-data.json` lists each collection and how to make it.
+and the CSD reference, and the SynthStrip brain masks of ds001226 (`synthstrip-masks.ts`, through haversack). Albula's
+`Contents/data/test-data.json` lists each collection and how to make it.
 
 Some comments name documents of the Albula workspace (`Contents/docs/…`) that are not published; they record the
 reasoning behind a choice and are not needed to build or run anything.

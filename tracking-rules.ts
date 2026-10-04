@@ -49,9 +49,10 @@ export const TRACKING_RULES: Record<TrackingRuleId, TrackingRule> = {
   2: { id: 2, ukf: { freeWater: false, seedingThreshold: 0.1, stoppingFA: 0.08, stoppingThreshold: 0.06, recordLength: 1.8 }, shellNear: 3000, seeding: "every-voxel", trackIn: "brain", brain: "median-otsu" },
   3: { id: 3, ukf: { freeWater: false, seedingThreshold: 0.1, stoppingFA: 0.08, stoppingThreshold: 0.06, recordLength: 1.8 }, shellNear: 3000, seeding: "every-voxel", trackIn: "brain", brain: "t1-synthstrip" },
 };
-/** The default. Stays 2 until the module can get SynthStrip's mask from haversack (rule 3 is used by the case runs first,
- *  to measure what it changes). */
-export const TRACKING_RULE: TrackingRuleId = 2;
+/** The default: 3 since 2026-10-04 (Ron: "yes, make rule 3 the default"), after the comparison with rule 2 on the
+ *  twelve (Contents/tools/dmri-rule3-compare.ts) and of both with rule 3's own run-to-run variation on three of them
+ *  (Contents/tools/dmri-rule3-noise.ts): the list changes are about the size of that variation (dmri-review, 2026-10-04). */
+export const TRACKING_RULE: TrackingRuleId = 3;
 
 /** The b-value of the shell nearest `near` (shells: b-values over 50, grouped within 50 of each other). */
 export function shellNearest(bValues: number[], near: number): number | undefined {
@@ -111,7 +112,29 @@ export function brainFromT1(fit: Pick<TensorFit, "dims" | "ijkToRAS">, mask: Mas
   return out;
 }
 
-/** The fit with its brain mask (seedMask) taken from a T1-space mask: tracking rule 3. */
-export function withBrainFromT1(fit: TensorFit, mask: MaskGrid, what = "SynthStrip's brain mask of the T1"): TensorFit {
-  return { ...fit, seedMask: brainFromT1(fit, mask), seedMaskRule: what };
+/** The fit with its brain mask (seedMask) taken from a T1-space mask: tracking rule 3. Kept only where the diffusion scan
+ *  has data (the fit's own mask, TensorFit.mask): SynthStrip's brain runs down the brainstem, below a slab that stops
+ *  short (critic, 2026-10-04, finding 6: PAT29, 3,447 voxels of zero fill). Also says how much of the T1's brain lies
+ *  outside the diffusion grid altogether (mL), which the grid's margin is meant to keep at zero. */
+export function withBrainFromT1(fit: TensorFit, mask: MaskGrid, what = "SynthStrip's brain mask of the T1"): { fit: TensorFit; outsideGridMl: number } {
+  const t1 = brainFromT1(fit, mask), seedMask = new Uint8Array(t1.length);
+  for (let v = 0; v < t1.length; v++) seedMask[v] = t1[v] && fit.mask[v] ? 1 : 0;
+  return { fit: { ...fit, seedMask, seedMaskRule: what }, outsideGridMl: maskOutsideGrid(fit, mask) };
+}
+
+/** The volume (mL) of a mask's inside voxels whose centers fall outside a grid. */
+export function maskOutsideGrid(grid: Pick<TensorFit, "dims" | "ijkToRAS">, mask: MaskGrid): number {
+  const [nx, ny, nz] = grid.dims, M = grid.ijkToRAS, [mx, my, mz] = mask.dims, A = mask.ijkToRAS;
+  const a = M[0], b = M[1], c = M[2], d = M[4], e = M[5], f = M[6], g = M[8], h = M[9], i9 = M[10];
+  const det = a * (e * i9 - f * h) - b * (d * i9 - f * g) + c * (d * h - e * g);
+  const Ri = [(e * i9 - f * h) / det, (c * h - b * i9) / det, (b * f - c * e) / det, (f * g - d * i9) / det, (a * i9 - c * g) / det, (c * d - a * f) / det, (d * h - e * g) / det, (b * g - a * h) / det, (a * e - b * d) / det];
+  const voxMl = Math.abs(A[0] * (A[5] * A[10] - A[6] * A[9]) - A[1] * (A[4] * A[10] - A[6] * A[8]) + A[2] * (A[4] * A[9] - A[5] * A[8])) / 1000;
+  let out = 0;
+  for (let k = 0; k < mz; k++) for (let j = 0; j < my; j++) for (let i = 0; i < mx; i++) {
+    if (!(mask.data[(k * my + j) * mx + i] > 0)) continue;
+    const x0 = A[0] * i + A[1] * j + A[2] * k + A[3] - M[3], x1 = A[4] * i + A[5] * j + A[6] * k + A[7] - M[7], x2 = A[8] * i + A[9] * j + A[10] * k + A[11] - M[11];
+    const p = Math.round(Ri[0] * x0 + Ri[1] * x1 + Ri[2] * x2), q = Math.round(Ri[3] * x0 + Ri[4] * x1 + Ri[5] * x2), r = Math.round(Ri[6] * x0 + Ri[7] * x1 + Ri[8] * x2);
+    if (p < 0 || q < 0 || r < 0 || p >= nx || q >= ny || r >= nz) out++;
+  }
+  return out * voxMl;
 }
