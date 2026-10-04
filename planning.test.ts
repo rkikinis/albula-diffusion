@@ -84,7 +84,7 @@ Deno.test("a partner phase-encoded along another axis, or the same way, is refus
   const dims: [number, number, number] = [4, 4, 2], data = new Float32Array(32).fill(100);
   const dwi = { volumes: [{ dims, ijkToRAS: [2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 1], data, dtype: "<f4" }], bValues: [0], gradients: [[0, 0, 0]], ijkToRAS: [2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 1], source: "test", convention: 1 } as unknown as DiffusionSeries;
   const left = await correctWithReversed(dwi, [data], "PA", undefined, { phaseEncoding: { scan: "j-", partner: "i-" } });
-  assert(left.startsWith("not corrected") && left.includes("along the rows") && left.includes("along the columns"), left);
+  assert(left.startsWith("not corrected") && left.includes("left-right") && left.includes("front-back"), left);
   // DICOM's form (axis only): another axis is refused, the same axis is not judged by sign.
   const dicom = await correctWithReversed(dwi, [data], "PA", undefined, { phaseEncoding: { scan: "COL", partner: "ROW" } });
   assert(dicom.startsWith("not corrected"), dicom);
@@ -93,4 +93,17 @@ Deno.test("a partner phase-encoded along another axis, or the same way, is refus
   const same = await correctWithReversed(dwi, [data], "PA", undefined, { phaseEncoding: { scan: "j-", partner: "j-" } });
   assert(same.startsWith("not corrected") && same.includes("same direction"), same);
   assertEquals(dwi.volumes[0].data, data, "the scan is untouched");
+});
+
+// THE RECORDS COMPARED IN THE PATIENT (critic, 2026-10-03, finding 2): a partner stored transposed (its i along the
+// patient's front-back) and recorded "ROW" is the same line as the scan's "COL" -- not refused; and a partner whose
+// label matches but whose axis is physically another is refused.
+Deno.test("phase-encoding records are compared as directions in the patient, through each scan's own grid", async () => {
+  const dims: [number, number, number] = [4, 4, 2], data = new Float32Array(32).fill(100);
+  const M = [2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 1], T = [0, 2, 0, 0, 2, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 1];
+  const dwi = { volumes: [{ dims, ijkToRAS: M, data, dtype: "<f4" }], bValues: [0], gradients: [[0, 0, 0]], ijkToRAS: M, source: "test", convention: 1 } as unknown as DiffusionSeries;
+  const transposedSameLine = await correctWithReversed(dwi, [data], "PA", undefined, { partnerGrid: { dims, ijkToRAS: T }, phaseEncoding: { scan: "COL", partner: "ROW" } });
+  assert(!transposedSameLine.includes("not a reversed pair"), transposedSameLine);
+  const sameLabelOtherLine = await correctWithReversed(dwi, [data], "PA", undefined, { partnerGrid: { dims, ijkToRAS: T }, phaseEncoding: { scan: "COL", partner: "COL" } });
+  assert(sameLabelOtherLine.includes("not a reversed pair"), sameLabelOtherLine);
 });

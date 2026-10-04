@@ -97,7 +97,9 @@ interface Run { sl: Float32Array[]; named: Named; sorted: Sorted; structure: Str
   /** Each run streamline's distance to the structure (mm, measured out to the margin and 2 mm beyond). */
   dist: Float64Array;
   /** The fit it was tracked on (critic, 2026-10-01, finding 5): Add lines on a different fit is refused. */
-  maxB: number; partnerId: string }
+  maxB: number; partnerId: string;
+  /** The anatomy MRI the scan was aligned to when the run was made ("" none): Add lines tracks in the same space only. */
+  anatomyId: string }
 /** How tracts are followed: one tensor per voxel (fast, the classic), or the two-tensor UKF (ukf.ts; crossing fibers;
  *  the method SlicerDMRI uses for tumor planning), with the settings of the current tracking rule (tracking-rules.ts). */
 /** "ptt": fiber distributions from multi-shell CSD (csd.ts, responses from the scan) and parallel transport tracking
@@ -190,7 +192,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
   let chosen = "";                                          // browser id of the scan the panel is about
   let near = "", withinMm = 8, busy = "", seeding = false, note = "";
   let cancelSeeding: (() => void) | undefined;
-  const adv: Required<Pick<TrackingOptions, "minFA" | "maxAngleDeg" | "stepVoxels">> & { maxB: number } = { minFA: ADV_MIN_FA, maxAngleDeg: 45, stepVoxels: 0.5, maxB: 1500 };
+  const adv: Required<Pick<TrackingOptions, "minFA" | "maxAngleDeg" | "stepVoxels">> & { maxB: number } & { ukfStopFA: number } = { minFA: ADV_MIN_FA, maxAngleDeg: 45, stepVoxels: 0.5, maxB: 1500, ukfStopFA: TRACKING_RULES[TRACKING_RULE].ukf.stoppingFA };
   let root: HTMLElement | undefined;
   let advOpen = false;
   let moreOpen = false;
@@ -579,12 +581,12 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
   let lastTiming: (TrackTiming & { data: number }) | undefined;
   async function trackUkf(c: Computed, seedsRAS: number[][]): Promise<Float32Array[]> {
     const t0 = performance.now();
-    // THE TRACKING RULE (tracking-rules.ts): the shell, the mask and the thresholds. "Stop below FA" under Advanced still
-    // rules when the user has changed it from its default (that setting also serves the single-tensor tracker, where the
-    // rule's 0.08 would wander into gray matter).
+    // THE TRACKING RULE (tracking-rules.ts): the shell, the mask and the thresholds. "Stop below FA" under Advanced shows
+    // and sets the two-tensor tracker's own value when that tracker is chosen (adv.ukfStopFA, the rule's 0.08 to start
+    // with), the single-tensor tracker's (adv.minFA, 0.15) otherwise (critic, 2026-10-03, finding 14).
     const rule = TRACKING_RULES[TRACKING_RULE];
     c.ukf ??= ukfDataFor(c.dwi, c.fit, rule);
-    const stopFA = adv.minFA !== ADV_MIN_FA ? adv.minFA : rule.ukf.stoppingFA;
+    const stopFA = adv.ukfStopFA;
     const timing: TrackTiming & { data: number } = { prepare: 0, gpu: 0, assemble: 0, between: 0, data: performance.now() - t0 };
     // The 3D view's drawing is held while the card tracks (holdDrawing: macOS's watchdog took the card when tracking ran
     // beside the solid anatomy, Ron's window, 2026-10-03 build 16:45).
@@ -684,7 +686,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       // A NEW RUN REPLACES THE LAST ONE for this scan (critic, finding 5: a second press doubled every tract).
       groups.splice(0, groups.length, ...withoutLastRun(groups, scan.browserId));   // face.ts
       const pick = (idx: number[]) => idx.map((i) => sl[i]);
-      runs.set(scan.browserId, { sl, named, sorted, structure, label: target.label, withinMm, method, added: new Set(), dist, maxB: c.maxB, partnerId: c.partnerId });
+      runs.set(scan.browserId, { sl, named, sorted, structure, label: target.label, withinMm, method, added: new Set(), dist, maxB: c.maxB, partnerId: c.partnerId, anatomyId: c.anatomyId ?? "" });
       // The anatomy behind the slices, where the tracts' crossings are drawn (Yogesh Rathi via Ron, 2026-10-01), and over
       // it this scan's own map -- never another patient's left from before (critic, 2026-10-01, finding 3).
       const anat = anatomyFor(scan);
@@ -734,8 +736,9 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     busy = "Making tracts…"; adding = true; render();
     try {
       const c = await ensureFit(scan), t0 = performance.now();
-      if (c.maxB !== run.maxB || c.partnerId !== run.partnerId) {
-        say("The maps were made again since these tracts were found (Highest b, or the distortion correction, changed): press “Show the fiber tracts near the tumor” again first.");
+      // THE SAME SPACE (critic, 2026-10-03, finding 1): the scan aligned to the same anatomy MRI, or to none, as the run.
+      if (c.maxB !== run.maxB || c.partnerId !== run.partnerId || (c.anatomyId ?? "") !== run.anatomyId) {
+        say("The maps were made again since these tracts were found (Highest b, the distortion correction, or the MRI of the anatomy changed): press “Show the fiber tracts near the tumor” again first.");
         return;
       }
       const all = [...run.sorted.near, ...run.sorted.far];
@@ -1136,10 +1139,10 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       i.onchange = () => { const v = Number(i.value); if (Number.isFinite(v) && v >= lo && v <= hi) set(v); else { say(`${label}: between ${lo} and ${hi}.`); i.value = String(get()); } };
       shell.row(ad, label).append(i);
     };
-    num("Stop below FA", "A tract ends where the white matter becomes this faint.", () => adv.minFA, (v) => { adv.minFA = v; }, 0.05, 0.05, 0.9);
+    num("Stop below FA", "A tract ends where the white matter becomes this faint (for the tracker chosen above).", () => (method === "ukf" ? adv.ukfStopFA : adv.minFA), (v) => { if (method === "ukf") adv.ukfStopFA = v; else adv.minFA = v; }, 0.01, 0.01, 0.9);
     num("Largest turn (°)", "A tract ends where it would bend more sharply than this.", () => adv.maxAngleDeg, (v) => { adv.maxAngleDeg = v; }, 5, 5, 90);
     num("Step (voxels)", "How finely a tract follows the white matter: smaller is smoother and slower.", () => adv.stepVoxels, (v) => { adv.stepVoxels = v; }, 0.1, 0.1, 2);
-    num("Highest b used", "Which part of the scan the maps and tracts are made from: its images up to this b-value. Changing it makes the maps again.", () => adv.maxB, (v) => {
+    num("Highest b used", "Which images the maps (FA, Color FA) and the single-tensor tracts are made from: those up to this b-value. Two-tensor tracts use the scan's images nearest b = 3000, as the atlas behind the tract names was made. Changing it makes the maps again.", () => adv.maxB, (v) => {
       adv.maxB = v;
       const s = scans().find((x) => x.browserId === chosen), was = shownNow(s);
       for (const c of computed.values()) dropMaps(c);

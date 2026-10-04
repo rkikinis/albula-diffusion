@@ -7,11 +7,12 @@
 // WHAT IT SHOWED (2026-10-03, PAT16 / PAT05 / PAT03 / PAT08): the geometry is the same (topup's field fits best at scale
 // 1.0 and shift 0; the line totals are kept by both), and the 2-4% left per volume is the INTERPOLATION: applytopup
 // interpolates with cubic splines -- except the FIRST volume of the file, which it interpolates linearly, as we do:
-// volume 0 agrees within 1.1%, the others 2.4-3.9% (with a cubic B-spline along the line, the others agree within
+// volume 0 agrees within 1.3-1.4% (this test's brain mask; 1.1% in the b = 0 mask), the others 4.0-4.7% median (with a
+// cubic B-spline along the line, the others agree within
 // 0.75-0.98% and volume 0 then differs by 4.2%; PAT16, measured in a scratch script). topup's own corrected b = 0
 // (--iout) is NOT a reference for the applying: it differs from applytopup's by 7.4% (its intensity scaling, b02b0.cnf).
-// PAT03 (the head moved 1.8° between its two scans) agrees less well even with the same interpolation (first volume 3.4%
-// in the b = 0 brain mask): the difference sits at the brain's edge along the phase-encoding axis, where its field is
+// PAT03 agrees less well even with the same interpolation (first volume 7.5% here, 3.4% in the b = 0 brain mask; its
+// "PA" is not a reversed pair at all -- phase-encoded left-right, found later the same day): the difference sits at the brain's edge along the phase-encoding axis, where its field is
 // steepest and FSL takes the stretch from its spline's derivative, we from differences (from the field at the centers
 // with central differences: 2.9%; PAT16 0.97%). So, as in distortion-topup.test.ts, the close match is required where
 // the head held still and measured elsewhere.

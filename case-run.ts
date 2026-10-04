@@ -59,6 +59,18 @@ export async function runCase(ds: string, id: string, device: GPUDevice, model: 
   stages.read = performance.now() - t0;
   // THE PARTNER ON ITS OWN GRID: 11 of the 29 have a PA slab placed 2.3 mm and 0.8° away; until 2026-10-02 it was paired
   // voxel by voxel here (Mike Halle's pipeline aligns it by the scanner's coordinates; so does this now).
+  let added: number | undefined;
+  if (opts.noiseSeed !== undefined) {
+    // THE SCAN'S OWN NOISE AGAIN (agreement.ts): measured from the background outside the brain on the scan's own grid,
+    // added to the scan AS ACQUIRED, before the correction and the resampling onto the T1 (critic, 2026-10-03, finding
+    // 10: added after the resampling it was 57-70% of the real noise -- interpolation smooths, a third was zero fill).
+    const m = fitTensors(dwi, { maxB: CASE_DEFAULTS.maxB, maskMethod: opts.maskMethod, seedMask: false }).mask;
+    added = noiseSigma(dwi, m);
+    const noisy = addScanNoise(dwi, added, opts.noiseSeed);
+    dwi.volumes = noisy.volumes;
+    // The reversed scan too (a second acquisition is noisy on both): the same σ (same scanner and visit), its own draw.
+    rev.volumes = addScanNoise(rev, added, opts.noiseSeed + 7919).volumes;
+  }
   // THE T1 (2026-10-03, Ron: "Number three, go"; registration.ts): when the case has one, the field is not applied here
   // but with the move to the T1, in one resampling, and everything after is in the T1's space.
   const t1Vol = opts.onT1 === false ? undefined : await (async () => { try { return (await parseNiftiVolumes(rd(`anat/sub-${id}_ses-preop_T1w.nii.gz`)))[0]; } catch { return undefined; } })();
@@ -75,14 +87,6 @@ export async function runCase(ds: string, id: string, device: GPUDevice, model: 
     if (a.doubt) { if (field.fit) for (const v of dwi.volumes) { v.data = applyField(field.fit, v.data as ArrayLike<number>, field.sign ?? -1); v.dtype = "<f4"; } corrected += `; not aligned to the T1: ${a.doubt}`; }
     else { dwi = a.dwi; corrected += `; ${a.said}`; }
     alignment = { T: a.T, ...(a.doubt ? { doubt: a.doubt } : {}) };
-  }
-  let added: number | undefined;
-  if (opts.noiseSeed !== undefined) {
-    // THE SCAN'S OWN NOISE AGAIN (agreement.ts): measured from the background outside the brain, added to every volume.
-    const m = fitTensors(dwi, { maxB: CASE_DEFAULTS.maxB, maskMethod: opts.maskMethod, seedMask: false }).mask;
-    added = noiseSigma(dwi, m);
-    const noisy = addScanNoise(dwi, added, opts.noiseSeed);
-    dwi.volumes = noisy.volumes;
   }
   const tFit = performance.now();
   const fit = fitTensors(dwi, { maxB: CASE_DEFAULTS.maxB, maskMethod: opts.maskMethod, seedMask: opts.seedMask });

@@ -95,13 +95,24 @@ export function stageText(t: StageTimes): string {
 export async function correctWithReversed(dwi: DiffusionSeries, reversed: ArrayLike<number>[], name: string, progress?: (s: string) => void, opts: { partnerGrid?: Grid; times?: StageTimes; /** distortion.ts DISTORTION_RULE; default 2. */ rule?: 1 | 2; /** The recorded phase-encoding directions, BIDS style ("j-"), when known. */ phaseEncoding?: { scan?: string; partner?: string }; /** false: the field is found but not applied; it is handed back in `field` (registration.ts resampleOntoT1 applies it with the move to the T1, in one resampling). */ apply?: boolean; field?: { fit?: FieldFit; sign?: 1 | -1 } } = {}): Promise<string> {
   // Either form: BIDS's signed voxel axis ("j-"), or DICOM's In-plane Phase Encoding Direction (ROW = the voxel axis i,
   // COL = j; no sign -- then only the axis is checked). diffusion-vendors.ts phaseEncodingOf reads both from a file.
+  // COMPARED IN THE PATIENT, NOT BY NAME (critic, 2026-10-03, finding 2): each record names an axis of ITS OWN grid; the
+  // partner may be stored on another one (partnerGrid), so each is turned into a direction in patient space through its
+  // own grid before they are compared, and only then is the scan's own voxel axis taken for the fit.
   const pe = opts.phaseEncoding, axisOf = (d: string) => d === "ROW" ? 0 : d === "COL" ? 1 : "ijk".indexOf(d[0]), signed = (d: string) => /^[ijk]-?$/.test(d);
+  const scanGrid = dwi.volumes[0].ijkToRAS;
+  /** The record's direction in patient space (unit; the sign only for a signed record). */
+  const dirOf = (d: string, M: number[]) => { const c = axisOf(d); if (c < 0) return undefined; const v = [M[c], M[4 + c], M[8 + c]], l = Math.hypot(v[0], v[1], v[2]) || 1, s = d.endsWith("-") ? -1 : 1; return v.map((x) => s * x / l); };
   let recordedAxis: 0 | 1 | 2 | undefined;
   if (pe?.scan && pe.partner) {
-    const a = axisOf(pe.scan), b = axisOf(pe.partner), both = signed(pe.scan) && signed(pe.partner), same = both && pe.scan.endsWith("-") === pe.partner.endsWith("-");
-    const words = (d: string) => `${["along the rows", "along the columns", "across the slices"][axisOf(d)] ?? d}`;
-    if (a >= 0 && b >= 0 && (a !== b || same)) return `not corrected: the scanner's record says ${name} was taken with its distortion ${a === b ? "in the same direction as" : `${words(pe.partner)}, against ${words(pe.scan)} for`} this scan, so the two are not a reversed pair`;
-    if (a >= 0 && a === b) recordedAxis = a as 0 | 1 | 2;
+    const ds = dirOf(pe.scan, scanGrid), dp = dirOf(pe.partner, opts.partnerGrid?.ijkToRAS ?? scanGrid);
+    if (ds && dp) {
+      const dot = ds[0] * dp[0] + ds[1] * dp[1] + ds[2] * dp[2];
+      // Along one line in the patient: within 30°. A reversed pair: opposite, when both records carry a sign.
+      const parallel = Math.abs(dot) >= Math.cos(Math.PI / 6), same = signed(pe.scan) && signed(pe.partner) && dot > 0;
+      const words = (d: number[]) => { const k = [0, 1, 2].reduce((m, i) => (Math.abs(d[i]) > Math.abs(d[m]) ? i : m), 0); return ["left-right", "front-back", "top-bottom"][k]; };
+      if (!parallel || same) return `not corrected: the scanner's record says ${name} was taken with its distortion ${parallel ? "in the same direction as" : `${words(dp)}, against ${words(ds)} for`} this scan, so the two are not a reversed pair`;
+      recordedAxis = axisOf(pe.scan) as 0 | 1 | 2;
+    }
   }
   const meanOf = (vols: ArrayLike<number>[]) => { const o = new Float32Array(vols[0].length); for (const d of vols) for (let v = 0; v < o.length; v++) o[v] += d[v] / vols.length; return o; };
   const grid: Grid = { dims: dwi.volumes[0].dims, ijkToRAS: dwi.volumes[0].ijkToRAS };
@@ -120,7 +131,7 @@ export async function correctWithReversed(dwi: DiffusionSeries, reversed: ArrayL
   const tf = performance.now();
   let best: FieldFit | undefined, bestLeft = Infinity;
   for (const axis of (recordedAxis !== undefined ? [recordedAxis] : [0, 1]) as (0 | 1 | 2)[]) {
-    progress?.(`Correcting distortion with ${name}: trying phase encoding along ${axis ? "the columns" : "the rows"}…`);
+    progress?.(`Correcting distortion with ${name}: trying phase encoding ${["along the rows", "along the columns", "across the slices"][axis]}…`);
     await yieldNow();
     const f = estimateField({ dims, plus, minus, axis });
     const left = f.levels.at(-1)?.residual ?? Infinity;
@@ -133,8 +144,9 @@ export async function correctWithReversed(dwi: DiffusionSeries, reversed: ArrayL
     const M0 = grid.ijkToRAS, voxel = [0, 1, 2].map((c) => Math.hypot(M0[c], M0[4 + c], M0[8 + c])) as [number, number, number];
     const f = estimateFieldWithMotion({ dims, plus, minus, axis: best.axis, voxel });
     best = f; bestLeft = f.levels.at(-1)?.residual ?? bestLeft;
-    const mm = Math.hypot(...f.motion.t), deg = Math.max(...f.motion.r.map((x) => Math.abs(x))) * 180 / Math.PI;
-    moved = `; ${name} had moved ${mm.toFixed(1)} mm and ${deg.toFixed(1)}° from this scan, allowed for`;
+    // The movement itself is not reported: the fit is not a measurement of it (critic, 2026-10-03, finding 12: a known
+    // movement came back at 3-45% on the phantom); what it improves is the field.
+    moved = `; movement between the two scans allowed for`;
   }
   if (opts.times) opts.times.field = performance.now() - tf;
   if (!best || bestLeft > 0.5) return `not corrected: ${name} and this scan do not look like a reversed pair (${Math.round(bestLeft * 100)}% of their difference would remain)${aligned}`;

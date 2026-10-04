@@ -93,7 +93,10 @@ function worldGradient(img: Float32Array, g: Grid3): Float32Array {
 /** Trilinear sample of a field with `ch` channels per voxel at voxel position (x, y, z); zeros outside. */
 function sampleAt(f: ArrayLike<number>, dims: [number, number, number], ch: number, x: number, y: number, z: number, out: Float64Array): boolean {
   const [nx, ny, nz] = dims;
-  if (!(x >= 0 && y >= 0 && z >= 0 && x <= nx - 1 && y <= ny - 1 && z <= nz - 1)) { out.fill(0); return false; }
+  // Zero beyond half a voxel past the outermost voxel centers; within it, the edge voxel (each face of the scan kept
+  // whole: critic, 2026-10-03, finding 18).
+  if (!(x >= -0.5 && y >= -0.5 && z >= -0.5 && x <= nx - 0.5 && y <= ny - 0.5 && z <= nz - 0.5)) { out.fill(0); return false; }
+  x = Math.min(Math.max(x, 0), nx - 1); y = Math.min(Math.max(y, 0), ny - 1); z = Math.min(Math.max(z, 0), nz - 1);
   const i0 = Math.min(Math.floor(x), nx - 2 < 0 ? 0 : nx - 2), j0 = Math.min(Math.floor(y), ny - 2 < 0 ? 0 : ny - 2), k0 = Math.min(Math.floor(z), nz - 2 < 0 ? 0 : nz - 2);
   const fx = x - i0, fy = y - j0, fz = z - k0, sx = nx > 1 ? 1 : 0, sy = ny > 1 ? nx : 0, sz = nz > 1 ? nx * ny : 0, v = (k0 * ny + j0) * nx + i0;
   for (let c = 0; c < ch; c++) {
@@ -200,15 +203,21 @@ export async function rigidToT1(moving: Grid3, fixedFull: Grid3, mask: Uint8Arra
  * correction distortion.ts applyField makes, with its stretch), and the scan as acquired is read there. Target grid: the
  * T1's axes at the scan's own spacing, over the box the scan covers once moved. Gradients turned by the rotation.
  */
-export async function resampleOntoT1(dwi: DiffusionSeries, T: Rigid, t1: Pick<Grid3, "dims" | "ijkToRAS">, field?: { fit: FieldFit; sign: 1 | -1 }): Promise<DiffusionSeries> {
+export async function resampleOntoT1(dwi: DiffusionSeries, T: Rigid, t1: Pick<Grid3, "dims" | "ijkToRAS">, field?: { fit: FieldFit; sign: 1 | -1 }, opts: { /** The scan's voxels to cover (the brain, on the scan's grid): the box is theirs plus a margin, not the whole field of view. */ cover?: Uint8Array; marginMm?: number } = {}): Promise<DiffusionSeries> {
   const src = dwi.volumes[0], [sx, sy, sz] = src.dims, Ms = src.ijkToRAS, Si = inv4(Ms), sp = spacingOf(Ms);
   const Mt = t1.ijkToRAS, tsp = spacingOf(Mt), axes = [0, 1, 2].map((c) => [Mt[c] / tsp[c], Mt[4 + c] / tsp[c], Mt[8 + c] / tsp[c]]);
-  const h = Math.min(...sp);
-  // The box: the scan's corners moved into T1 space, in the T1's axes.
-  const corners: number[][] = [];
-  for (const a of [0, sx - 1]) for (const b of [0, sy - 1]) for (const c of [0, sz - 1]) corners.push(applyRigid(T, [0, 1, 2].map((r) => Ms[4 * r] * a + Ms[4 * r + 1] * b + Ms[4 * r + 2] * c + Ms[4 * r + 3])));
-  const lo = [0, 1, 2].map((ax) => Math.min(...corners.map((p) => p[0] * axes[ax][0] + p[1] * axes[ax][1] + p[2] * axes[ax][2])));
-  const hi = [0, 1, 2].map((ax) => Math.max(...corners.map((p) => p[0] * axes[ax][0] + p[1] * axes[ax][1] + p[2] * axes[ax][2])));
+  // THE SPACING keeps the scan's voxel volume (critic, 2026-10-03, finding 7: the smallest spacing in all three directions
+  // made a 0.9 × 0.9 × 5 mm scan six times as many voxels -- and, every voxel a seed, six times the tracking): the cube
+  // root of the three spacings, which is the spacing itself for an isotropic scan.
+  const h = Math.cbrt(sp[0] * sp[1] * sp[2]);
+  // THE BOX: the scan's voxels to cover (opts.cover, the brain; else every voxel) moved into T1 space, in the T1's axes,
+  // grown by a margin -- a third of the field-of-view box was zero fill (PAT16).
+  const pts: number[][] = [], cov = opts.cover;
+  if (cov) { for (let k = 0; k < sz; k++) for (let j = 0; j < sy; j++) for (let i = 0; i < sx; i++) if (cov[(k * sy + j) * sx + i]) pts.push(applyRigid(T, [0, 1, 2].map((r) => Ms[4 * r] * i + Ms[4 * r + 1] * j + Ms[4 * r + 2] * k + Ms[4 * r + 3]))); }
+  if (!pts.length) for (const a of [0, sx - 1]) for (const b of [0, sy - 1]) for (const c of [0, sz - 1]) pts.push(applyRigid(T, [0, 1, 2].map((r) => Ms[4 * r] * a + Ms[4 * r + 1] * b + Ms[4 * r + 2] * c + Ms[4 * r + 3])));
+  const margin = cov ? (opts.marginMm ?? 2 * h) : 0;
+  const lo = [0, 1, 2].map((ax) => { let m = Infinity; for (const p of pts) m = Math.min(m, p[0] * axes[ax][0] + p[1] * axes[ax][1] + p[2] * axes[ax][2]); return m - margin; });
+  const hi = [0, 1, 2].map((ax) => { let m = -Infinity; for (const p of pts) m = Math.max(m, p[0] * axes[ax][0] + p[1] * axes[ax][1] + p[2] * axes[ax][2]); return m + margin; });
   const dims = [0, 1, 2].map((ax) => Math.floor((hi[ax] - lo[ax]) / h) + 1) as [number, number, number];
   const origin = [0, 1, 2].map((r) => lo[0] * axes[0][r] + lo[1] * axes[1][r] + lo[2] * axes[2][r]);
   const M = [axes[0][0] * h, axes[1][0] * h, axes[2][0] * h, origin[0], axes[0][1] * h, axes[1][1] * h, axes[2][1] * h, origin[1], axes[0][2] * h, axes[1][2] * h, axes[2][2] * h, origin[2], 0, 0, 0, 1];
@@ -271,10 +280,10 @@ export async function alignToT1(dwi: DiffusionSeries, t1: Grid3, field?: { fit: 
   const result = await rigidToT1({ dims: src.dims as [number, number, number], ijkToRAS: src.ijkToRAS, data: b0 }, t1, mask);
   const t1Done = performance.now();
   if (times) times.register = t1Done - t0;
-  const out = await resampleOntoT1(dwi, result.T, t1, field);
+  const out = await resampleOntoT1(dwi, result.T, t1, field, { cover: mask });
   if (times) times.resample = performance.now() - t1Done;
   const sz = rigidSize(result.T);
   const doubt = sz.mm > DOUBTFUL.mm || sz.degrees > DOUBTFUL.degrees ? `it had to move ${sz.mm.toFixed(0)} mm and ${sz.degrees.toFixed(0)}°, more than within one visit`
-    : !(result.cost < result.costAtStart) ? "the match did not improve" : undefined;
+    : result.cost > result.costAtStart + 1e-4 ? "the match got worse" : undefined;     // equal: the scan was already in place (critic, finding 18)
   return { dwi: out, T: result.T, result, said: `aligned to the MRI of the anatomy (moved ${sz.mm.toFixed(1)} mm and ${sz.degrees.toFixed(1)}°)`, ...(doubt ? { doubt } : {}) };
 }

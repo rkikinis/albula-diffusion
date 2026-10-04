@@ -374,8 +374,11 @@ export function gaussSmooth(img: ArrayLike<number>, dims: [number, number, numbe
  *  with a 1.5-voxel blur of both nearly all. WHY NOT: with the field estimated too, the blurred fit was unstable (the
  *  rotations the field can mimic -- the two that move points partly along the phase-encoding axis -- wandered: −0.85°
  *  for +0.3°) and its fields were worse (phantom field error 0.27-0.46 mm median against 0.23 without). Fitting the
- *  movement on HALF-SIZE images (fitMotion's halfSize) averages both images alike, takes most of the bias out (PAT16's
- *  and PAT08's movements then close to topup's own estimates), and is eight times cheaper. */
+ *  movement on HALF-SIZE images (fitMotion's halfSize) averages both images alike, gives the better FIELD (against topup,
+ *  and on the split halves), and is eight times cheaper. WHAT IT DOES NOT DO (critic, 2026-10-03, finding 12): recover the movement itself -- on the
+ *  phantom (distortion-topup.test.ts) a known movement came back at 3-45% of its size, the rotation about the
+ *  phase-encoding axis at 0.01° of 0.30°. What it improves, measured, is the FIELD (against topup on four cases, and on
+ *  the phantom), which is what the correction uses; the movement is not reported as a measurement anywhere. */
 const MOTION_BLUR = 0;
 
 /** The reversed image's movement with the field held (Gauss-Newton on the corrected images' difference, five parameters). */

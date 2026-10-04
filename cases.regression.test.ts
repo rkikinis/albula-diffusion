@@ -1,4 +1,4 @@
-// @full-tier -- the FIXED COHORT, whole brain on the graphics card (about 40 s a case, twelve cases): the rebuild runs it
+// @full-tier -- the FIXED COHORT, whole brain on the graphics card (46-70 s a case with tracking rule 2 and the T1 alignment, 2026-10-03; twelve cases): the rebuild runs it
 // only in the full tier (Contents/tools/Rebuild SlicerAlbula App.command).
 //
 // THE CASE LIBRARY DOES NOT DRIFT (Ron, 2026-10-01: "Are there tests that you can add/improve now?"; Mike: an algorithm

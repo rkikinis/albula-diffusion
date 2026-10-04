@@ -581,6 +581,8 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) l
 
 const packCache = new WeakMap<UkfData, Map<GPUDevice, { lo: number[]; cd: number[]; sig32: boolean; sigBuf: GPUBuffer; maskBuf: GPUBuffer; gBuf: GPUBuffer }>>();
 const pipeCache = new WeakMap<GPUDevice, Map<string, GPUComputePipeline>>();
+/** Steps per dispatch the card last handled within the time cap (see the dispatch loop). */
+const stepMemo = new WeakMap<GPUDevice, number>();
 
 export interface GpuUkfResult {
   fibers: { points: Float32Array; fa: Float32Array; freeWater: Float32Array; seed: number }[];
@@ -591,7 +593,7 @@ export interface GpuUkfResult {
 }
 
 /** Track from every seed (voxel coordinates) in both directions on the graphics card. */
-export async function trackUkfGpu(device: GPUDevice, data: UkfData, seeds: number[][], opts: UkfOptions & { batch?: number; stepsPerDispatch?: number; /** Hold each dispatch near this many milliseconds (steps set from the last one's time; see the dispatch loop). */ targetMsPerDispatch?: number; /** The Cholesky in one thread (one barrier) instead of column by column (22). */ cholOneThread?: boolean; /** The signal model's per-sigma-point values computed once a step, not once per gradient. */ prePredict?: boolean; /** The inversions' scratch in workgroup memory. */ wgInverse?: boolean; /** The per-gradient sums in one pass, without per-thread arrays (needs prePredict). */ onePass?: boolean; /** The two inversions a step in parallel over the workgroup (needs wgInverse). */ parInverse?: boolean; /** Pack the signal and compile the shader every call, as before 2026-10-01 night (benchmarking only). */ noCache?: boolean; /** Checking only: stop after one dispatch and return the states (with stepsPerDispatch 1: one filter step). */ debugOneDispatch?: boolean } = {}): Promise<GpuUkfResult> {
+export async function trackUkfGpu(device: GPUDevice, data: UkfData, seeds: number[][], opts: UkfOptions & { batch?: number; stepsPerDispatch?: number; /** Hold each dispatch near this many milliseconds (steps set from the last one's time; see the dispatch loop). */ targetMsPerDispatch?: number; /** Halve the steps after a dispatch longer than this (default 500 ms). */ maxMsPerDispatch?: number; /** The Cholesky in one thread (one barrier) instead of column by column (22). */ cholOneThread?: boolean; /** The signal model's per-sigma-point values computed once a step, not once per gradient. */ prePredict?: boolean; /** The inversions' scratch in workgroup memory. */ wgInverse?: boolean; /** The per-gradient sums in one pass, without per-thread arrays (needs prePredict). */ onePass?: boolean; /** The two inversions a step in parallel over the workgroup (needs wgInverse). */ parInverse?: boolean; /** Pack the signal and compile the shader every call, as before 2026-10-01 night (benchmarking only). */ noCache?: boolean; /** Checking only: stop after one dispatch and return the states (with stepsPerDispatch 1: one filter step). */ debugOneDispatch?: boolean } = {}): Promise<GpuUkfResult> {
   const t0 = performance.now();
   const fw = opts.freeWater ?? true, N = fw ? 11 : 10;
   if (!fw && opts.onePass) throw new Error("onePass is written for the free-water model's 11 state values");
@@ -710,10 +712,15 @@ export async function trackUkfGpu(device: GPUDevice, data: UkfData, seeds: numbe
     // as on 2026-09-23). With `targetMsPerDispatch` each dispatch is timed and the next one's steps set to stay near it:
     // short while every fiber is alive, longer as they stop. The steps a dispatch takes do not change the fibers (the
     // same steps run either way; checked bit for bit, planning.ts trackUkfSeeds).
-    const target = opts.targetMsPerDispatch;
-    let k = target ? Math.min(K, 2) : K, stepsDone = 0;
+    const target = opts.targetMsPerDispatch, capMs = opts.maxMsPerDispatch ?? 500;
+    // A SLOWER CARD (critic, 2026-10-03, finding 5): each batch starts at 16 steps (its first dispatch is its heaviest:
+    // every fiber alive) and doubles up to K; a dispatch that took longer than capMs halves the next. On this M1 Max
+    // nothing changes but a few more dispatches; on a smaller card the dispatches stay short of the watchdog.
+    // The step count the card last handled is remembered per device, so only the first call ramps (a fast card), and a
+    // slow card stays short on every call.
+    let k = target ? Math.min(K, 2) : Math.min(K, stepMemo.get(device) ?? 16), stepsDone = 0;
     for (; stepsDone <= maxSteps + k; ) {
-      if (target) device.queue.writeBuffer(pBuf, 84, Uint32Array.of(k));
+      device.queue.writeBuffer(pBuf, 84, Uint32Array.of(k));
       const ts = performance.now();
       const enc = device.createCommandEncoder();
       enc.clearBuffer(aliveBuf);
@@ -725,7 +732,11 @@ export async function trackUkfGpu(device: GPUDevice, data: UkfData, seeds: numbe
       aliveRead.unmap();
       stepsDone += k;
       if (n === 0 || opts.debugOneDispatch) break;
-      if (target) { const ms = performance.now() - ts; k = Math.max(1, Math.min(256, Math.round(k * Math.min(2, Math.max(0.25, target / Math.max(ms, 0.5)))))); }
+      const ms = performance.now() - ts;
+      if (target) k = Math.max(1, Math.min(256, Math.round(k * Math.min(2, Math.max(0.25, target / Math.max(ms, 0.5))))));
+      else if (ms > capMs) k = Math.max(4, k >> 1);
+      else if (ms < capMs / 4 && k < K) k = Math.min(K, k * 2);
+      if (!target) stepMemo.set(device, k);
     }
     // Read back the recorded points and the record counts.
     const read = async (buf: GPUBuffer, size: number) => { const r = device.createBuffer({ size, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }); const e = device.createCommandEncoder(); e.copyBufferToBuffer(buf, 0, r, 0, size); device.queue.submit([e.finish()]); await r.mapAsync(GPUMapMode.READ); const a = new Float32Array(r.getMappedRange().slice(0)); r.unmap(); r.destroy(); return a; };
