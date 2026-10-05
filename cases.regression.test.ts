@@ -1,10 +1,11 @@
-// @full-tier -- the FIXED COHORT, whole brain on the graphics card (44-71 s a case with tracking rule 3 and the T1 alignment, 2026-10-04; twelve cases): the rebuild runs it
+// @full-tier -- the FIXED COHORT, whole brain on the graphics card (42-69 s a case with tracking rule 3 and the T1 alignment, 2026-10-04; twelve cases): the rebuild runs it
 // only in the full tier (Contents/tools/Rebuild SlicerAlbula App.command).
 //
 // THE CASE LIBRARY DOES NOT DRIFT (Ron, 2026-10-01: "Are there tests that you can add/improve now?"; Mike: an algorithm
 // is not implemented if it isn't tested). Every case with a stored result (test/cases/<id>-ukf.json) is rerun through
 // case-run.ts -- the code the batch tool uses -- and compared with it: the same number of streamlines (within 0.5%), the
-// same named tracts near the tumor (at least 5 streamlines within 8 mm), and each tract's count near the tumor within 10%.
+// same named tracts near the tumor (at least 5 streamlines within 6 mm, the list the app shows; since 2026-10-04) and
+// within 8 mm (where its gray band ends), each tract's count within 10%, and the same streamlines outside the brain.
 // The cases: PAT16 since 2026-10-01; since 2026-10-03 the twelve of Mike Halle's tractline cohort (validation step 5:
 // "a fixed cohort that every change is checked against"), written by Contents/tools/dmri-cohort.ts. A change that moves
 // them on purpose reruns that tool, rewriting the reference files in the same commit, and says why.
@@ -14,6 +15,8 @@ import { assert, assertEquals } from "jsr:@std/assert";
 import { ABSENT, testData } from "albula/testing";
 import { runCase, synthstripMaskPath } from "./case-run.ts";
 import { TRACKING_RULE, TRACKING_RULES } from "./tracking-rules.ts";
+import { GRAY_BAND_MM, NEAR_MM } from "./planning.ts";
+import { OUTSIDE_RULE } from "./outside-brain.ts";
 import { loadModel, type ModelJson } from "./tractcloud/tractcloud.ts";
 
 const DS = (testData("openneuro-ds001226", "") ?? ABSENT).replace(/\/$/, "");
@@ -29,16 +32,25 @@ for (const id of CASES) Deno.test({ name: `${id}, two-tensor: the same streamlin
   try {
     const M = new URL("./tractcloud/model/", import.meta.url);
     const model = loadModel(Deno.readFileSync(new URL("weights.f32", M)).buffer, JSON.parse(Deno.readTextFileSync(new URL("model.json", M))) as ModelJson);
-    const ref = JSON.parse(Deno.readTextFileSync(new URL(`./test/cases/${id}-ukf.json`, import.meta.url))) as { streamlines: number; near8: { tract: string; within8: number }[]; trackingRule?: number };
+    const ref = JSON.parse(Deno.readTextFileSync(new URL(`./test/cases/${id}-ukf.json`, import.meta.url))) as { streamlines: number; near6: { tract: string; within6: number }[]; near8: { tract: string; within8: number }[]; trackingRule?: number; outsideBrain?: number; outsideRule?: number };
+    // The stored lists are at 6 and 8 mm: the app's distance and the end of its gray band. A change of either constant
+    // must come with new references (critic, 2026-10-04, finding 4).
+    assertEquals([NEAR_MM, NEAR_MM + GRAY_BAND_MM], [6, 8], "planning.ts NEAR_MM or GRAY_BAND_MM changed: the references are at 6 and 8 mm");
+    assertEquals(ref.outsideRule ?? 0, OUTSIDE_RULE.on ? OUTSIDE_RULE.id : 0, "the stored result was made with the outside-the-brain test in another state: rerun Contents/tools/dmri-cohort.ts");
     // A reference made under another rule is a stale file, not a regression (critic, 2026-10-04, finding 10).
     assertEquals(ref.trackingRule, TRACKING_RULE, `the stored result was made under tracking rule ${ref.trackingRule}, the default is ${TRACKING_RULE}: rerun Contents/tools/dmri-cohort.ts`);
     const r = await runCase(DS, id, device, model, "ukf");
     console.log(`${id}: ${r.streamlines} streamlines (stored ${ref.streamlines}), ${r.seconds.total} s`);
     assert(Math.abs(r.streamlines - ref.streamlines) <= ref.streamlines * 0.005, `streamlines ${r.streamlines} against ${ref.streamlines}`);
-    const near = new Map(r.tracts.filter((t) => t.within8 >= 5).map((t) => [t.tract, t.within8]));
-    const want = new Map(ref.near8.map((t) => [t.tract, t.within8]));
+    // The list the app shows: at least 5 streamlines within 6 mm (planning.ts NEAR_MM, since 2026-10-04; 8 before).
+    const near = new Map(r.tracts.filter((t) => t.within6 >= 5).map((t) => [t.tract, t.within6]));
+    const want = new Map(ref.near6.map((t) => [t.tract, t.within6]));
+    assertEquals(r.outsideBrain, ref.outsideBrain, "the streamlines outside the brain (outside-brain.ts) changed");
     const gained = [...near.keys()].filter((k) => !want.has(k)), lost = [...want.keys()].filter((k) => !near.has(k));
     assertEquals({ gained, lost }, { gained: [], lost: [] }, "the named tracts near the tumor changed");
-    for (const [k, n] of want) assert(Math.abs(near.get(k)! - n) <= Math.max(2, n * 0.1), `${k}: ${near.get(k)} streamlines within 8 mm, stored ${n}`);
+    for (const [k, n] of want) assert(Math.abs(near.get(k)! - n) <= Math.max(2, n * 0.1), `${k}: ${near.get(k)} streamlines within 6 mm, stored ${n}`);
+    // Within 8 mm: what the gray band lists.
+    const near8 = new Map(r.tracts.filter((t) => t.within8 >= 5).map((t) => [t.tract, t.within8])), want8 = new Map(ref.near8.map((t) => [t.tract, t.within8]));
+    assertEquals({ gained: [...near8.keys()].filter((k) => !want8.has(k)), lost: [...want8.keys()].filter((k) => !near8.has(k)) }, { gained: [], lost: [] }, "the named tracts within 8 mm changed");
   } finally { device.destroy(); }
 }});

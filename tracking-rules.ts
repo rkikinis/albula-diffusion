@@ -6,7 +6,7 @@
 // drawn among brain voxels above FA 0.2, seed FA 0.18, stop at FA 0.15 or mean signal 0.1, a point every 0.9 mm, tracked
 // inside the head mask.
 //
-// RULE 2 (2026-10-03, the default; Ron: "Number one, please follow Mike's lead. I think what he's doing makes sense to
+// RULE 2 (2026-10-03, the default until 2026-10-04; Ron: "Number one, please follow Mike's lead. I think what he's doing makes sense to
 // me"): Mike Halle's tractline, which is the ORG atlas's tracking -- the conditions the naming networks (TractCloud,
 // RapidParc) were trained on: plain two-tensor UKF (no free water), the b = 0 images and ONE shell, the one nearest the
 // atlas's b = 3000 (ds001226: 2800, 50 directions), every voxel of the brain mask a seed, seed FA 0.1, stop at FA 0.08
@@ -22,6 +22,12 @@
 // run by haversack on the T1 the scan is aligned to -- as the seeds and the tracking boundary. FastSurfer was tried and
 // not taken: it labels most of a large tumor and much of the tissue around every tumor as not brain. Needs a T1 and its
 // SynthStrip mask; without them the caller falls back to rule 2 and says so.
+//
+// RULE 4 (2026-10-04, tried and set aside the same evening): rule 3 without the fluid. SynthStrip's mask holds the CSF around the brain, and in
+// PAT29 rule 3 followed the left trigeminal nerve through the cistern and named it uncinate (Ron: "Looks more like the
+// trigeminus nerve"; "I prefer tight, if we don't lose too much"). Voxels whose mean diffusivity says fluid
+// (fluidMdMax) are left out of the brain: the cisterns and the nerves lying in them, the ventricles, the sulci; edema,
+// whose diffusivity is lower, stays.
 import type { DiffusionSeries } from "./dwi.ts";
 import type { TensorFit } from "./tensor.ts";
 import { prepareUkfData, type UkfData, type UkfOptions } from "./ukf.ts";
@@ -41,15 +47,27 @@ export interface TrackingRule {
   /** What the brain mask (TensorFit.seedMask) is: median_otsu on the scan's b = 0, or SynthStrip's mask of the T1 put on
    *  the scan's grid (withBrainFromT1). */
   brain: "median-otsu" | "t1-synthstrip";
+  /** Rule 4: voxels of the brain whose mean diffusivity is above this (mm²/s) are fluid and left out -- the cisterns
+   *  with the cranial nerves in them, the ventricles, the sulci. */
+  fluidMdMax?: number;
+  /** Rule 5: the fluid is left out only within this many voxels of the brain's outer edge (the cisterns, the sulci), not
+   *  deep (the ventricles, whose roof shares voxels with the corpus callosum; tumors). */
+  fluidShellVoxels?: number;
 }
 
-export type TrackingRuleId = 1 | 2 | 3;
+export type TrackingRuleId = 1 | 2 | 3 | 4 | 5;
 export const TRACKING_RULES: Record<TrackingRuleId, TrackingRule> = {
   1: { id: 1, ukf: { freeWater: true, seedingThreshold: 0.18, stoppingFA: 0.15, stoppingThreshold: 0.1, recordLength: 0.9 }, seeding: "sample", trackIn: "head", brain: "median-otsu" },
   2: { id: 2, ukf: { freeWater: false, seedingThreshold: 0.1, stoppingFA: 0.08, stoppingThreshold: 0.06, recordLength: 1.8 }, shellNear: 3000, seeding: "every-voxel", trackIn: "brain", brain: "median-otsu" },
   3: { id: 3, ukf: { freeWater: false, seedingThreshold: 0.1, stoppingFA: 0.08, stoppingThreshold: 0.06, recordLength: 1.8 }, shellNear: 3000, seeding: "every-voxel", trackIn: "brain", brain: "t1-synthstrip" },
+  4: { id: 4, ukf: { freeWater: false, seedingThreshold: 0.1, stoppingFA: 0.08, stoppingThreshold: 0.06, recordLength: 1.8 }, shellNear: 3000, seeding: "every-voxel", trackIn: "brain", brain: "t1-synthstrip", fluidMdMax: 2.5e-3 },
+  5: { id: 5, ukf: { freeWater: false, seedingThreshold: 0.1, stoppingFA: 0.08, stoppingThreshold: 0.06, recordLength: 1.8 }, shellNear: 3000, seeding: "every-voxel", trackIn: "brain", brain: "t1-synthstrip", fluidMdMax: 2.5e-3, fluidShellVoxels: 3 },
 };
-/** The default: 3 since 2026-10-04 (Ron: "yes, make rule 3 the default"), after the comparison with rule 2 on the
+/** The default: 3 (Ron, 2026-10-04: "yes, make rule 3 the default"). Rules 4 and 5 -- the fluid left out of the mask --
+ *  were tried that evening and set aside: rule 4 took about a quarter of the corpus callosum's streamlines and cut into
+ *  tumors, rule 5 a band along the cortex and a surface tumor's cyst (Ron: "treatment worse than the problem"). The
+ *  trigeminal nerve that rule 3 can track keeps a wrong name for now: the test that would take it out of the tracts
+ *  (outside-brain.ts) is built but off. Earlier wording, kept: rule 3 (Ron: "yes, make rule 3 the default"), after the comparison with rule 2 on the
  *  twelve (Contents/tools/dmri-rule3-compare.ts) and of both with rule 3's own run-to-run variation on three of them
  *  (Contents/tools/dmri-rule3-noise.ts): the list changes are about the size of that variation (dmri-review, 2026-10-04). */
 export const TRACKING_RULE: TrackingRuleId = 3;
@@ -116,9 +134,14 @@ export function brainFromT1(fit: Pick<TensorFit, "dims" | "ijkToRAS">, mask: Mas
  *  has data (the fit's own mask, TensorFit.mask): SynthStrip's brain runs down the brainstem, below a slab that stops
  *  short (critic, 2026-10-04, finding 6: PAT29, 3,447 voxels of zero fill). Also says how much of the T1's brain lies
  *  outside the diffusion grid altogether (mL), which the grid's margin is meant to keep at zero. */
-export function withBrainFromT1(fit: TensorFit, mask: MaskGrid, what = "SynthStrip's brain mask of the T1"): { fit: TensorFit; outsideGridMl: number } {
+export function withBrainFromT1(fit: TensorFit, mask: MaskGrid, what = "SynthStrip's brain mask of the T1", fluidMdMax?: number, fluidShellVoxels?: number): { fit: TensorFit; outsideGridMl: number } {
   const t1 = brainFromT1(fit, mask), seedMask = new Uint8Array(t1.length);
   for (let v = 0; v < t1.length; v++) seedMask[v] = t1[v] && fit.mask[v] ? 1 : 0;
+  if (fluidMdMax !== undefined) {
+    // Rule 5: only in the outer shell -- the voxels within fluidShellVoxels of the brain's outside (6-neighbor steps).
+    const shell = fluidShellVoxels !== undefined ? outerShell(seedMask, fit.dims, fluidShellVoxels) : undefined;
+    for (let v = 0; v < seedMask.length; v++) if (seedMask[v] && fit.md[v] > fluidMdMax && (!shell || shell[v])) seedMask[v] = 0;
+  }
   return { fit: { ...fit, seedMask, seedMaskRule: what }, outsideGridMl: maskOutsideGrid(fit, mask) };
 }
 
@@ -137,4 +160,27 @@ export function maskOutsideGrid(grid: Pick<TensorFit, "dims" | "ijkToRAS">, mask
     if (p < 0 || q < 0 || r < 0 || p >= nx || q >= ny || r >= nz) out++;
   }
   return out * voxMl;
+}
+
+/** The voxels of a mask within `k` 6-neighbor steps of its outside (a voxel at the grid's edge counts as next to it). */
+export function outerShell(mask: Uint8Array, dims: number[], k: number): Uint8Array {
+  const [nx, ny, nz] = dims, n = mask.length, depth = new Int16Array(n).fill(-1), queue = new Int32Array(n);
+  let head = 0, tail = 0;
+  for (let z = 0; z < nz; z++) for (let y = 0; y < ny; y++) for (let x = 0; x < nx; x++) {
+    const v = (z * ny + y) * nx + x;
+    if (!mask[v]) continue;
+    const edge = x === 0 || y === 0 || z === 0 || x === nx - 1 || y === ny - 1 || z === nz - 1 ||
+      !mask[v - 1] || !mask[v + 1] || !mask[v - nx] || !mask[v + nx] || !mask[v - nx * ny] || !mask[v + nx * ny];
+    if (edge) { depth[v] = 1; queue[tail++] = v; }
+  }
+  while (head < tail) {
+    const v = queue[head++], d = depth[v];
+    if (d >= k) continue;
+    const x = v % nx, y = Math.floor(v / nx) % ny, z = Math.floor(v / (nx * ny));
+    for (const [w, ok] of [[v - 1, x > 0], [v + 1, x < nx - 1], [v - nx, y > 0], [v + nx, y < ny - 1], [v - nx * ny, z > 0], [v + nx * ny, z < nz - 1]] as [number, boolean][])
+      if (ok && mask[w] && depth[w] < 0) { depth[w] = d + 1; queue[tail++] = w; }
+  }
+  const out = new Uint8Array(n);
+  for (let v = 0; v < n; v++) out[v] = depth[v] > 0 ? 1 : 0;
+  return out;
 }

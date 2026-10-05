@@ -1,5 +1,5 @@
 {
- "about": "PAT20 of OpenNeuro ds001226 (CC0), two-tensor UKF named by RapidParc, one of the twelve patients of the fixed cohort (Mike Halle's tractline's; Contents/tools/dmri-cohort.ts wrote it with the commit that adds distortion rule 2, 2026-10-03). The regression test (cases.regression.test.ts) reruns the case and compares; a deliberate change that moves these numbers rewrites this file in the same commit, with the reason. Rule 2 of the distortion correction (distortion.ts): the field estimated together with the PA scan's movement between the two scans, alpha 500 (validation step 4; Ron, 2026-10-03: \"Build\"). Rewritten 2026-10-04: Tracking rule 2 (tracking-rules.ts; Ron, 2026-10-03: 'please follow Mike's lead'): plain two-tensor UKF, the shell nearest b = 3000, every brain voxel a seed, seed FA 0.1, stop at FA 0.08 or mean signal 0.06, a point every 1.8 mm, inside the brain mask -- Mike Halle's tractline's, the ORG atlas's. Rewritten 2026-10-04: Aligned to the T1 (registration.ts, Ron 2026-10-03: 'Number three, go'): the corrected b = 0 aligned rigidly to the case's T1 on normalized gradient fields (as Mike Halle's tractline), and the scan read once onto the T1's axes through the move and the distortion field; tracked by tracking rule 2. Rewritten 2026-10-03: After the critic (qa/2026-10-03-dmri-rule2-registration.md): the T1-aligned grid keeps the scan's voxel volume and covers the brain plus a margin; the scan's edge voxels are kept. Rewritten 2026-10-04: tracking rule 3 is the default (2026-10-04): the brain from SynthStrip on the T1 Rewritten 2026-10-04: rule 3 after the critic's round (2026-10-04): the brain only where the scan has data, a fixed 4-voxel box margin",
+ "about": "PAT20 of OpenNeuro ds001226 (CC0), two-tensor UKF named by RapidParc, one of the twelve patients of the fixed cohort (Mike Halle's tractline's; Contents/tools/dmri-cohort.ts wrote it with the commit that adds distortion rule 2, 2026-10-03). The regression test (cases.regression.test.ts) reruns the case and compares; a deliberate change that moves these numbers rewrites this file in the same commit, with the reason. Rule 2 of the distortion correction (distortion.ts): the field estimated together with the PA scan's movement between the two scans, alpha 500 (validation step 4; Ron, 2026-10-03: \"Build\"). Rewritten 2026-10-04: Tracking rule 2 (tracking-rules.ts; Ron, 2026-10-03: 'please follow Mike's lead'): plain two-tensor UKF, the shell nearest b = 3000, every brain voxel a seed, seed FA 0.1, stop at FA 0.08 or mean signal 0.06, a point every 1.8 mm, inside the brain mask -- Mike Halle's tractline's, the ORG atlas's. Rewritten 2026-10-04: Aligned to the T1 (registration.ts, Ron 2026-10-03: 'Number three, go'): the corrected b = 0 aligned rigidly to the case's T1 on normalized gradient fields (as Mike Halle's tractline), and the scan read once onto the T1's axes through the move and the distortion field; tracked by tracking rule 2. Rewritten 2026-10-03: After the critic (qa/2026-10-03-dmri-rule2-registration.md): the T1-aligned grid keeps the scan's voxel volume and covers the brain plus a margin; the scan's edge voxels are kept. Rewritten 2026-10-04: tracking rule 3 is the default (2026-10-04): the brain from SynthStrip on the T1 Rewritten 2026-10-04: rule 3 after the critic's round (2026-10-04): the brain only where the scan has data, a fixed 4-voxel box margin Rewritten 2026-10-04: tracking rule 4 is the default (2026-10-04 evening): rule 3 without the fluid; within6 added Rewritten 2026-10-04: rule 3 with the outside-the-brain naming (outside-brain.ts) and the 6 mm list (2026-10-04 evening) Rewritten 2026-10-04: rule 3, the 6 mm list with the gray band; the outside-the-brain naming built but off (2026-10-04 night) Rewritten 2026-10-04: rule 3, the 6 mm list with the gray band, the outside-the-brain test off (recorded as 0); after the critic's round on the build (2026-10-04 night)",
  "id": "PAT20",
  "method": "ukf",
  "streamlines": 42635,
@@ -86,6 +86,74 @@
    "within8": 6
   }
  ],
+ "near6": [
+  {
+   "tract": "superior longitudinal fasciculus III, right",
+   "within6": 85
+  },
+  {
+   "tract": "corpus callosum 6",
+   "within6": 54
+  },
+  {
+   "tract": "inferior longitudinal fasciculus, right",
+   "within6": 45
+  },
+  {
+   "tract": "middle longitudinal fasciculus, right",
+   "within6": 15
+  },
+  {
+   "tract": "superficial parietal-temporal, right",
+   "within6": 30
+  },
+  {
+   "tract": "superficial parietal, right",
+   "within6": 31
+  },
+  {
+   "tract": "external capsule, right",
+   "within6": 29
+  },
+  {
+   "tract": "superior longitudinal fasciculus II, right",
+   "within6": 20
+  },
+  {
+   "tract": "extreme capsule, right",
+   "within6": 11
+  },
+  {
+   "tract": "corticospinal tract, right",
+   "within6": 10
+  },
+  {
+   "tract": "thalamo-parietal, right",
+   "within6": 13
+  },
+  {
+   "tract": "corpus callosum 7",
+   "within6": 13
+  },
+  {
+   "tract": "striato-parietal, right",
+   "within6": 5
+  },
+  {
+   "tract": "arcuate fasciculus, right",
+   "within6": 21
+  },
+  {
+   "tract": "corpus callosum 5",
+   "within6": 5
+  },
+  {
+   "tract": "superficial temporal, right",
+   "within6": 10
+  }
+ ],
+ "outsideBrain": 0,
+ "outsideRule": 0,
  "tracts": [
   {
    "tract": "superior longitudinal fasciculus III, right",
@@ -95,6 +163,7 @@
    "closest": 0,
    "within0": 70,
    "within5": 85,
+   "within6": 85,
    "within8": 86
   },
   {
@@ -105,6 +174,7 @@
    "closest": 0,
    "within0": 37,
    "within5": 52,
+   "within6": 54,
    "within8": 71
   },
   {
@@ -115,6 +185,7 @@
    "closest": 0,
    "within0": 14,
    "within5": 43,
+   "within6": 45,
    "within8": 55
   },
   {
@@ -125,6 +196,7 @@
    "closest": 0,
    "within0": 3,
    "within5": 10,
+   "within6": 15,
    "within8": 53
   },
   {
@@ -135,6 +207,7 @@
    "closest": 0,
    "within0": 3,
    "within5": 21,
+   "within6": 30,
    "within8": 49
   },
   {
@@ -145,6 +218,7 @@
    "closest": 0,
    "within0": 8,
    "within5": 24,
+   "within6": 31,
    "within8": 45
   },
   {
@@ -155,6 +229,7 @@
    "closest": 0,
    "within0": 22,
    "within5": 28,
+   "within6": 29,
    "within8": 44
   },
   {
@@ -165,6 +240,7 @@
    "closest": 0,
    "within0": 3,
    "within5": 18,
+   "within6": 20,
    "within8": 32
   },
   {
@@ -175,6 +251,7 @@
    "closest": 0,
    "within0": 2,
    "within5": 10,
+   "within6": 11,
    "within8": 16
   },
   {
@@ -185,6 +262,7 @@
    "closest": 0,
    "within0": 2,
    "within5": 9,
+   "within6": 10,
    "within8": 15
   },
   {
@@ -195,6 +273,7 @@
    "closest": 0,
    "within0": 4,
    "within5": 11,
+   "within6": 13,
    "within8": 15
   },
   {
@@ -205,6 +284,7 @@
    "closest": 0,
    "within0": 8,
    "within5": 13,
+   "within6": 13,
    "within8": 14
   },
   {
@@ -215,6 +295,7 @@
    "closest": 0,
    "within0": 1,
    "within5": 4,
+   "within6": 4,
    "within8": 7
   },
   {
@@ -225,6 +306,7 @@
    "closest": 0,
    "within0": 2,
    "within5": 5,
+   "within6": 5,
    "within8": 6
   },
   {
@@ -235,6 +317,7 @@
    "closest": 1.41,
    "within0": 0,
    "within5": 3,
+   "within6": 4,
    "within8": 5
   },
   {
@@ -245,6 +328,7 @@
    "closest": 2.45,
    "within0": 0,
    "within5": 13,
+   "within6": 21,
    "within8": 21
   },
   {
@@ -255,6 +339,7 @@
    "closest": 2.45,
    "within0": 0,
    "within5": 2,
+   "within6": 5,
    "within8": 12
   },
   {
@@ -265,6 +350,7 @@
    "closest": 2.45,
    "within0": 0,
    "within5": 1,
+   "within6": 1,
    "within8": 2
   },
   {
@@ -275,6 +361,7 @@
    "closest": 2.83,
    "within0": 0,
    "within5": 5,
+   "within6": 10,
    "within8": 20
   },
   {
@@ -285,6 +372,7 @@
    "closest": 4.36,
    "within0": 0,
    "within5": 1,
+   "within6": 1,
    "within8": 1
   },
   {
@@ -295,6 +383,7 @@
    "closest": 4.9,
    "within0": 0,
    "within5": 1,
+   "within6": 1,
    "within8": 1
   },
   {
@@ -305,6 +394,7 @@
    "closest": 5.1,
    "within0": 0,
    "within5": 0,
+   "within6": 2,
    "within8": 6
   },
   {
@@ -315,6 +405,7 @@
    "closest": 5.48,
    "within0": 0,
    "within5": 0,
+   "within6": 2,
    "within8": 3
   },
   {
@@ -325,6 +416,7 @@
    "closest": 6.4,
    "within0": 0,
    "within5": 0,
+   "within6": 0,
    "within8": 1
   },
   {
@@ -335,15 +427,16 @@
    "closest": 6.4,
    "within0": 0,
    "within5": 0,
+   "within6": 0,
    "within8": 1
   }
  ],
  "seconds": {
-  "read_correct_fit": 13.9,
+  "read_correct_fit": 14,
   "csd": 0,
-  "track": 33.5,
+  "track": 30.9,
   "name": 1.3,
-  "total": 48.9
+  "total": 46.4
  },
  "trackingRule": 3,
  "brain": "SynthStrip's brain mask of the T1",

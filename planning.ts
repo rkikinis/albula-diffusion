@@ -273,20 +273,29 @@ export async function streamlineDistances(s: Structure, sl: Float32Array[], padM
 /** One named tract (a tract on one side): its streamlines, its closest distance, and how many come within the margin. */
 export interface NearTract { tract: number; side: number; idx: number[]; d: number; within: number }
 /** `faint`: the far tracts that DO come within the margin, with fewer than the minimum of streamlines (shown in gray,
- *  hidden; Ron, 2026-10-01: the right uncinate came within reach with 4). `total`: a tract's streamlines on one side, for
- *  comparing sides. */
-export interface Sorted { near: NearTract[]; far: NearTract[]; faint: NearTract[]; unnamedNear: number[]; unnamedFar: number[]; total: (tract: number, side: number) => number }
+ *  hidden; Ron, 2026-10-01: the right uncinate came within reach with 4), and those that come within `grayMm` but not
+ *  within the margin (since 2026-10-04: the 6-8 mm band). `total`: a tract's streamlines on one side, for comparing
+ *  sides. */
+export interface Sorted { near: NearTract[]; far: NearTract[]; faint: NearTract[]; unnamedNear: number[]; unnamedFar: number[];
+  /** The streamlines that cross the fluid at the brain's edge (outside-brain.ts, when it is on), kept out of every tract. */
+  outsideNear: number[]; outsideFar: number[]; total: (tract: number, side: number) => number }
 
 /** How many of a tract's streamlines must come within the margin for it to count as near (Ron, 2026-10-01: "yes for
  *  now", on the case library's development half: 43% of the tracts listed with "any streamline" had fewer than 5). */
 export const MIN_NEAR_STREAMLINES = 5;
+/** How close a tract must come to the tumor to be listed: 6 mm since 2026-10-04 (8 before). Ron, after the lists at 5 /
+ *  6 / 7 / 8 mm on the twelve and on seven library cases (dmri-review, 2026-10-04): "6mm with gray" -- the tracts that come
+ *  within the next GRAY_BAND_MM are listed after the near ones, in gray and hidden, so a corticospinal tract listed only
+ *  at 8 mm (PAT06's left) is not missed. */
+export const NEAR_MM = 6, GRAY_BAND_MM = 2;
 
 /** Sort a named whole-brain tractography by distance to a structure: the named tracts at least `minStreamlines` of
  *  whose streamlines come within `withinMm` (closest first), the others, and the unnamed streamlines (TractCloud's
  *  Other, and those too short to name). */
-export function sortByDistance(model: TractCloudModel, named: Named, dist: Float64Array, withinMm: number, minStreamlines = MIN_NEAR_STREAMLINES): Sorted {
-  const OTHER = model.json.tracts.length - 1, by = new Map<string, NearTract>(), unnamedNear: number[] = [], unnamedFar: number[] = [];
+export function sortByDistance(model: TractCloudModel, named: Named, dist: Float64Array, withinMm: number, minStreamlines = MIN_NEAR_STREAMLINES, grayMm = withinMm, outside?: Uint8Array): Sorted {
+  const OTHER = model.json.tracts.length - 1, by = new Map<string, NearTract>(), unnamedNear: number[] = [], unnamedFar: number[] = [], outsideNear: number[] = [], outsideFar: number[] = [];
   for (let i = 0; i < named.tract.length; i++) {
+    if (outside?.[i]) { (dist[i] <= withinMm ? outsideNear : outsideFar).push(i); continue; }
     const t = named.tract[i];
     if (t === SHORT || t === OTHER) { (dist[i] <= withinMm ? unnamedNear : unnamedFar).push(i); continue; }
     const key = `${t}:${named.side[i]}`;
@@ -295,8 +304,8 @@ export function sortByDistance(model: TractCloudModel, named: Named, dist: Float
   }
   const all = [...by.values()];
   const isNear = (e: NearTract) => e.d <= withinMm && e.within >= minStreamlines;
-  const far = all.filter((e) => !isNear(e)), faint = far.filter((e) => e.d <= withinMm && e.within > 0).sort((a, b) => a.d - b.d || b.within - a.within);
-  return { near: all.filter(isNear).sort((a, b) => a.d - b.d || b.within - a.within), far, faint, unnamedNear, unnamedFar,
+  const far = all.filter((e) => !isNear(e)), faint = far.filter((e) => e.d <= Math.max(withinMm, grayMm)).sort((a, b) => a.d - b.d || b.within - a.within);
+  return { near: all.filter(isNear).sort((a, b) => a.d - b.d || b.within - a.within), far, faint, unnamedNear, unnamedFar, outsideNear, outsideFar,
     total: (tract, side) => by.get(`${tract}:${side}`)?.idx.length ?? 0 };
 }
 

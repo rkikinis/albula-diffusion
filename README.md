@@ -51,11 +51,18 @@ This extension adds diffusion MRI, from the scanner's files to the tracts near a
   ORG atlas's thresholds) inside the brain as SynthStrip (Hoopes et al. 2022) finds it on the MRI of the anatomy, asked
   of the haversack server through the SDK; the diffusion scan is aligned to that MRI first (`registration.ts`). Rule 2
   is the same inside DIPY's median_otsu mask of the diffusion scan, which leaves out the lower temporal lobes and part
-  of the cerebellum; the module falls back to it, and says so, without an MRI of the anatomy or a server.
+  of the cerebellum; the module falls back to it, and says so, without an MRI of the anatomy or a server. SynthStrip's
+  brain holds the fluid around the brain, so rule 3 can follow a cranial nerve through its cistern, and the naming
+  network, which knows only the brain's tracts, gives it the nearest tract's name (PAT29's trigeminal nerve, called
+  uncinate). Rules 4 and 5 (the fluid left out of the brain) and a test that would take such streamlines out of the
+  tracts (`outside-brain.ts`) were tried and are not used: they also took the corpus callosum's edge, parts of tumors,
+  or corticospinal fibers running along the medulla.
 - **Planning**: tracking through the whole brain, naming, and showing every named tract that comes within a margin of
   a segmented tumor — whole — in its own color, with its closest distance to the tumor; a tract counts as near when at
-  least 5 of its streamlines come within the margin (`planning.ts`, MIN_NEAR_STREAMLINES). Tracts that come within the
-  margin with fewer are listed after them in gray, hidden; every tract with a side shows the other side's count.
+  least 5 of its streamlines come within the margin (`planning.ts`, MIN_NEAR_STREAMLINES), 6 mm by default since
+  2026-10-04 (`NEAR_MM`; 8 before). Listed after them, in gray and hidden: the tracts that come within the next 2 mm
+  (`GRAY_BAND_MM`), and those that come within the margin with fewer streamlines; every tract with a side shows the
+  other side's count.
   **Add lines** follows many more streamlines in the tracts shown, on both sides: 20 starting points in every voxel they
   pass through (O'Donnell et al. 2017 seeded tumor patients at 20 a voxel), at most 25,000 a press (`denseSeeds`), named
   in the whole-brain run's context (`tractcloud/name-tracts.ts` `nameAgainst`; a copy of a run's streamline gets that

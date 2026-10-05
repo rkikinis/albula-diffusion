@@ -25,6 +25,12 @@ Deno.test("every brain voxel a seed, at its center; with a draw, jittered inside
   for (const [p, c] of a.map((p, i) => [p, everyBrainVoxel(fit)[i]] as const)) for (let k = 0; k < 3; k++) assertEquals(Math.abs(p[k] - c[k]) <= 1, true);
 });
 
+Deno.test("rule 4 is rule 3 without the fluid (mean diffusivity above 2.5e-3 mm²/s)", () => {
+  const { fluidMdMax, id, ...r4 } = TRACKING_RULES[4], { id: i3, ...r3 } = TRACKING_RULES[3];
+  assertEquals([id, i3, fluidMdMax], [4, 3, 2.5e-3]);
+  assertEquals(r4, r3);
+});
+
 Deno.test("rule 3 is rule 2 with the brain taken from the T1 (SynthStrip)", () => {
   const { brain, id, ...r3 } = TRACKING_RULES[3], { brain: b2, id: i2, ...r2 } = TRACKING_RULES[2];
   assertEquals([id, brain, i2, b2], [3, "t1-synthstrip", 2, "median-otsu"]);

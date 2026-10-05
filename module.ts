@@ -40,6 +40,7 @@ import type { Volume } from "albula";
 import { FiberField, type RGBA, type Strand } from "albula";
 import { colorFA, fitTensors, type TensorFit } from "./tensor.ts";
 import { type UkfData } from "./ukf.ts";
+import { edgeFluid, OUTSIDE_RULE, outsideBrain } from "./outside-brain.ts";
 import { seedsFor, TRACKING_RULE, TRACKING_RULES, ukfDataFor, withBrainFromT1, type TrackingRuleId } from "./tracking-rules.ts";
 import { alignToT1 } from "./registration.ts";
 import { applyField, type FieldFit } from "./distortion.ts";
@@ -55,7 +56,7 @@ import { faceNear as nearOnFace, isTumorName, matchesSearch, patientOf, pickAnat
 import { loadModel, type ModelJson, type TractCloudModel } from "./tractcloud/tractcloud.ts";
 import { nameAgainst, nameTracts, type Named } from "./tractcloud/name-tracts.ts";
 import { loadRapidParc, type RapidParcModel } from "./rapidparc/rapidparc.ts";
-import { correctWithReversed, denseSeeds, MIN_NEAR_STREAMLINES, otherSide, sortByDistance, stageText, streamlineDistances, tractName, trackUkfSeeds, wholeBrainSeeds, type Sorted, type StageTimes, type Structure, type TrackTiming } from "./planning.ts";
+import { correctWithReversed, denseSeeds, MIN_NEAR_STREAMLINES, NEAR_MM, GRAY_BAND_MM, otherSide, sortByDistance, stageText, streamlineDistances, tractName, trackUkfSeeds, wholeBrainSeeds, type Sorted, type StageTimes, type Structure, type TrackTiming } from "./planning.ts";
 import { tractColor, UNNAMED } from "./tractcloud/tract-colors.ts";
 import { seedsInSphere, trackFromSeeds, type Streamline, type TrackingOptions } from "./tracking.ts";
 import { DIFFUSION_REFERENCES } from "./references.ts";
@@ -87,6 +88,8 @@ interface TractGroup {
   run?: boolean;
   /** Within reach of the structure, with fewer streamlines than the minimum: listed in gray, hidden (Ron, 2026-10-01). */
   faint?: boolean;
+  /** Streamlines that cross the fluid at the brain's edge (outside-brain.ts): possibly a cranial nerve, never a tract. */
+  outside?: boolean;
   /** The same tract's streamlines on the other side, for comparing sides (undefined for a tract across the midline). */
   otherSide?: number;
   /** Streamlines "Add lines" added to this group. */
@@ -196,7 +199,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
   })().catch((e) => { rpModel = undefined; throw e; });
   let field: FiberField | undefined;
   let chosen = "";                                          // browser id of the scan the panel is about
-  let near = "", withinMm = 8, busy = "", seeding = false, note = "";
+  let near = "", withinMm = NEAR_MM, busy = "", seeding = false, note = "";
   let cancelSeeding: (() => void) | undefined;
   const adv: Required<Pick<TrackingOptions, "minFA" | "maxAngleDeg" | "stepVoxels">> & { maxB: number } & { ukfStopFA: number } = { minFA: ADV_MIN_FA, maxAngleDeg: 45, stepVoxels: 0.5, maxB: 1500, ukfStopFA: TRACKING_RULES[TRACKING_RULE].ukf.stoppingFA };
   let root: HTMLElement | undefined;
@@ -608,7 +611,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     const r = await b.ask.finally(() => { waitingForBrain = false; });
     b.ask = undefined;
     if (r.ok) {
-      const w = withBrainFromT1(c.fit, r.mask);
+      const w = withBrainFromT1(c.fit, r.mask, undefined, TRACKING_RULES[TRACKING_RULE].fluidMdMax, TRACKING_RULES[TRACKING_RULE].fluidShellVoxels);
       c.fit = w.fit; c.ukf = undefined; c.rule = TRACKING_RULE;
       b.reason = undefined;
       b.note = "the brain was found on the MRI of the anatomy (SynthStrip)" + (w.outsideGridMl >= 1 ? `; ${w.outsideGridMl.toFixed(0)} mL of it lies outside the diffusion scan's grid and is not tracked` : "");
@@ -714,8 +717,12 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       busy = "Measuring distances…"; render();
       const z = await fetchZarrVolumeNative(live.blobBase(), target.seg.zarr as ZarrDesc), lab = z.data;
       const structure: Structure = { dims: target.seg.dims as number[], ijkToRAS: target.seg.ijkToRAS as number[], inside: (v) => Number(lab[v]) === target.labelValue };
-      const dist = await streamlineDistances(structure, sl, withinMm + 2);
-      const sorted = sortByDistance(model, named, dist, withinMm), nearTracts = sorted.near;
+      const grayMm = withinMm + GRAY_BAND_MM;
+      const dist = await streamlineDistances(structure, sl, grayMm + 2);
+      // Streamlines that cross the fluid at the brain's edge would keep no tract's name (outside-brain.ts; Ron, 2026-10-04:
+      // "The only bad thing is mislabeling them"). OFF: it also took corticospinal fibers along the medulla.
+      const outside = OUTSIDE_RULE.on ? outsideBrain(sl, c.fit, edgeFluid(c.fit)) : undefined;
+      const sorted = sortByDistance(model, named, dist, withinMm, MIN_NEAR_STREAMLINES, grayMm, outside), nearTracts = sorted.near;
       times.distances = performance.now() - tDist;
       const tDraw = performance.now();
       // STILL WANTED? A scan removed while this ran leaves nothing behind (critic, 2026-10-01, finding 8; CONSTRAINTS).
@@ -739,14 +746,15 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
           tract: e.tract, side: e.side, distanceMm: e.d, within: e.within, run: true, faint, otherSide: e.side ? sorted.total(e.tract, otherSide(e.side)) : undefined });
       }
       // The rest: the unnamed far ones and the far tracts not listed as faint (a faint tract is its own row).
-      const unnamedNear = sorted.unnamedNear, faintSet = new Set(sorted.faint), rest = [...sorted.unnamedFar, ...sorted.far.filter((e) => !faintSet.has(e)).flatMap((e) => e.idx)];
+      const unnamedNear = sorted.unnamedNear, faintSet = new Set(sorted.faint), rest = [...sorted.unnamedFar, ...sorted.outsideFar, ...sorted.far.filter((e) => !faintSet.has(e)).flatMap((e) => e.idx)];
+      if (sorted.outsideNear.length) groups.push({ id: ++groupSeq, name: `Outside the brain, possibly a cranial nerve, within ${withinMm} mm of ${target.label}`, scan: scan.browserId, strands: pick(sorted.outsideNear), visible: true, method, unnamed: true, run: true, outside: true });
       if (unnamedNear.length) groups.push({ id: ++groupSeq, name: `Not named, within ${withinMm} mm of ${target.label}`, scan: scan.browserId, strands: pick(unnamedNear), visible: true, method, unnamed: true, run: true });
       if (rest.length) groups.push({ id: ++groupSeq, name: "Rest of the brain", scan: scan.browserId, strands: pick(rest), visible: false, method, unnamed: true, run: true });
       redraw3d();
       const t2 = performance.now();
       times.draw = t2 - tDraw;
       times.total = before + (t2 - t0);
-      say(`${nearTracts.length} named tracts come within ${withinMm} mm of ${target.label} (at least ${MIN_NEAR_STREAMLINES} streamlines each)${sorted.faint.length ? `; ${sorted.faint.length} more come that close with fewer (listed in gray, hidden)` : ""}${unnamedNear.length ? `, and ${unnamedNear.length.toLocaleString()} streamlines no name fits` : ""}. ` +
+      say(`${nearTracts.length} named tracts come within ${withinMm} mm of ${target.label} (at least ${MIN_NEAR_STREAMLINES} streamlines each)${sorted.faint.length ? `; ${sorted.faint.length} more come that close with fewer, or within ${grayMm} mm (listed in gray, hidden)` : ""}${unnamedNear.length ? `, and ${unnamedNear.length.toLocaleString()} streamlines no name fits` : ""}${sorted.outsideNear.length ? `; ${sorted.outsideNear.length.toLocaleString()} streamlines that close run outside the brain (possibly a cranial nerve) and keep no tract's name` : ""}. ` +
         `${sl.length.toLocaleString()} streamlines through the whole brain. Step by step: ${stageText(times)}.`);
     } catch (e) { say(`Tracts could not be made: ${(e as Error).message}`); }
     finally { busy = ""; render(); }
@@ -794,13 +802,14 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       const model = await tractCloud();
       const rp = await rapidParc(), releaseN = holdDrawing("naming tracts");
       const r = await nameAgainst(device, model, run.sl, sl2, { rapidParc: rp }).finally(releaseN);
+      const outside2 = OUTSIDE_RULE.on ? outsideBrain(sl2, c.fit, edgeFluid(c.fit)) : new Uint8Array(sl2.length);   // added lines that cross the fluid join no tract
       times.name = r.added.seconds * 1000;
       const tDist = performance.now();
       if (!scans().some((s) => s.browserId === scanId) || runs.get(scanId!) !== run) return;   // left, or run again, meanwhile
       let total = 0;
       busy = "Measuring distances…"; render();
       for (const { tract, side: sd } of want.values()) {
-        const mine = [...sl2.keys()].filter((i) => r.added.tract[i] === tract && r.added.side[i] === sd).map((i) => sl2[i]);
+        const mine = [...sl2.keys()].filter((i) => !outside2[i] && r.added.tract[i] === tract && r.added.side[i] === sd).map((i) => sl2[i]);
         if (!mine.length) continue;
         const d = await streamlineDistances(run.structure, mine, run.withinMm + 2);
         let h = groups.find((x) => x.scan === scanId && x.run && x.tract === tract && x.side === sd);
@@ -822,7 +831,9 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
         h.within = (h.within ?? 0) + [...d].filter((x) => x <= run.withinMm).length;
         h.distanceMm = Math.min(h.distanceMm ?? Infinity, ...d);
         // Faint by the module's own rule, every time (critic, 2026-10-01, finding 11): within reach, fewer than the minimum.
-        h.faint = (h.within ?? 0) > 0 && (h.within ?? 0) < MIN_NEAR_STREAMLINES;
+        // Gray as the run made it: a band row (none within the distance) stays gray until 5 come within it; a row added for
+        // comparison (the other side) is gray only when some, but fewer than 5, come within it (critic, 2026-10-04, finding 6).
+        h.faint = (h.within ?? 0) < MIN_NEAR_STREAMLINES && (!!h.faint || (h.within ?? 0) > 0);
         // Shown or hidden as it was: only what the person turned on is shown.
         total += mine.length;
       }
@@ -1085,7 +1096,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     go.textContent = busy && !adding && !busy.startsWith("Grow") && !busy.startsWith("Comput") ? busy : "Show the fiber tracts near the tumor";
     // Says the cut (critic, finding 4: "every" was not true): a named tract is listed when at least 5 of its fibers come
     // that close.
-    go.title = `Finds the brain's main nerve fiber tracts, names them, and shows each named tract with at least ${MIN_NEAR_STREAMLINES} of its fibers within ${withinMm} mm of the tumor — whole, in its own color, with how close it comes. ${method === "ptt" ? "About three minutes (Smooth curves, chosen under Advanced)." : method === "single" ? "Uses Two-tensor: Single tensor (chosen under Advanced) does not name tracts. About half a minute." : "About half a minute."}`;
+    go.title = `Finds the brain's main nerve fiber tracts, names them, and shows each named tract with at least ${MIN_NEAR_STREAMLINES} of its fibers within ${withinMm} mm of the tumor — whole, in its own color, with how close it comes. ${method === "ptt" ? "About three minutes (Smooth curves, chosen under Advanced)." : method === "single" ? "Uses Two-tensor: Single tensor (chosen under Advanced) does not name tracts. About half a minute." : "About half a minute."} Tracts that come within 2 mm more, or close with fewer fibers, are listed after them in gray, hidden.`;
     go.disabled = !!busy || !scan || !faceNear || seeding || !!outline;
     go.onclick = () => { if (method === "single") method = "ukf"; near = faceNear; void makeTracts(); };   // the face names tracts, from a tumor
     face.append(go);
@@ -1163,9 +1174,9 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     nearSel.onchange = () => { near = nearSel.value; };
     shell.row(tr, "Near").append(nearSel);
     const mm = document.createElement("input");
-    mm.type = "number"; mm.min = "0"; mm.max = "60"; mm.step = "5"; mm.value = String(withinMm);
+    mm.type = "number"; mm.min = "0"; mm.max = "60"; mm.step = "1"; mm.value = String(withinMm);
     mm.style.cssText = "flex:0 0 4.5em;width:4.5em;min-width:0";
-    mm.title = method === "ukf" ? "How close a tract must come to the structure to be shown, in millimeters (0: only tracts reaching into it)." : "How far around the structure tracts may start, in millimeters (0: only inside it).";
+    mm.title = method === "ukf" ? `How close a tract must come to the structure to be shown, in millimeters (0: only tracts reaching into it). Tracts within ${GRAY_BAND_MM} mm more are listed in gray, hidden.` : "How far around the structure tracts may start, in millimeters (0: only inside it).";
     mm.onchange = () => { withinMm = Math.max(0, Math.min(60, Number(mm.value) || 0)); mm.value = String(withinMm); };
     const mmWrap = document.createElement("span"); mmWrap.style.cssText = "display:inline-flex;align-items:center;gap:6px"; mmWrap.append(mm, "mm");
     shell.row(tr, "Within").append(mmWrap);
@@ -1261,7 +1272,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
         for (const g of members) {
         const row = document.createElement("div");
         row.style.cssText = "display:flex;align-items:center;gap:8px;min-width:0;padding:1px 0";
-        const name = document.createElement("span"); name.textContent = g.name; name.title = g.name;
+        const name = document.createElement("span"); name.textContent = g.name; name.title = g.outside ? `${g.name}\nFibers that leave the brain, run through the fluid around it and come back. They are not one of the brain's tracts, so they get no tract's name; at the skull base they are often a cranial nerve, such as the trigeminal nerve.` : g.name;
         // READ MORE (Ron, 2026-10-01): the paper that describes the tract, opened in the browser from the name.
         const abbr = /\(([^)]+)\)$/.exec(g.name)?.[1];
         if (g.tract !== undefined && abbr) {
@@ -1287,7 +1298,9 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
         }
         if (g.faint) {
           name.style.opacity = "0.55"; n.style.opacity = "0.45";
-          name.title += `\nOnly ${g.within ?? 0} of its streamlines come within the distance — fewer than ${MIN_NEAR_STREAMLINES}, so it is listed but hidden. It may be thin here, or hidden by swelling. Show it and press Add lines to see it better.`;
+          name.title += (g.within ?? 0) > 0
+            ? `\nOnly ${g.within} of its streamlines come within the distance — fewer than ${MIN_NEAR_STREAMLINES}, so it is listed but hidden. It may be thin here, or hidden by swelling. Show it and press Add lines to see it better.`
+            : `\nIt comes ${Number.isFinite(g.distanceMm ?? Infinity) ? `within ${(g.distanceMm as number).toFixed(1)} mm` : "no closer than the distance measured"} — farther than the distance chosen, so it is listed but hidden. Show it to see how it passes the structure.`;
         }
         if (g.tract !== undefined || g.unnamed) {
           // The tract's own color, as it is drawn (and as its card will show it).
@@ -1397,7 +1410,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     title: "Diffusion",
     groups: ["Display"],
     tip: "Which of the brain's fiber tracts run near a tumor, for planning an operation.",
-    help: "<p><b>For preparing a case.</b> The module needs three things, and ticks each off when it is there: the <b>diffusion MRI</b> (the scan that shows the brain's wiring; often named DTI, DWI or diffusion), the <b>MRI of the anatomy</b> (usually the T1 with contrast), and the <b>tumor's outline</b>. <b>Open a patient…</b> opens the DICOM database; <b>Scans on this computer…</b> opens Load / Save, where a folder from a CD, a USB stick or an export is added to the database. Without an outline, draw a few <b>Tumor</b> strokes inside it and a few <b>Not tumor</b> strokes around it, on a few slices, then <b>Grow the outline</b>, check it, correct with more strokes, and press <b>Done</b>. Then <b>Show the fiber tracts near the tumor</b>: each named tract with at least 5 of its fibers within 8 mm of the tumor (the distance can be changed under Advanced) is shown whole, in its own color, with how close it comes; pressing it again replaces the list. Tracts that come that close with fewer fibers are listed after them in gray, hidden. Each tract shows how many fibers the same tract has on the other side. Turn on the tracts you care about and press <b>Add lines</b>: it follows many more fibers in the tracts shown that have none added yet, on both sides (the other side stays hidden unless it is on), to see a thin tract better and compare the sides (about as long as the first run). A tract that looks thin or missing on the tumor's side may be destroyed by the tumor, or still there but hidden by swelling (edema). Only an outline named as a tumor (or made here) counts. Everything stays on this computer.</p><p><b>Advanced</b> holds the maps and the settings behind that button:</p><p>Shows what a diffusion MRI scan measures: <b>FA</b>, how strongly water moves along one direction (bright in white matter tracts), and <b>Color FA</b>, that direction as a color (red left-right, green front-back, blue up-down). A diffusion scan shows Color FA when it loads. When the case has an MRI of the anatomy, FA and Color FA are shown over it at half opacity; otherwise they fill the slice views. The gear in each slice view chooses the image, the one over it and how much shows through.</p><p><b>Tracts</b> follow the main direction of water movement from voxel to voxel. Under Advanced, <b>Make tracts</b> with <b>Single tensor</b> starts them in the white matter inside and around the chosen structure; with <b>Two-tensor</b> or <b>Smooth curves</b> it does what the face's button does, from the structure chosen there; <b>Seed where I click…</b> starts them at one point. <b>Smooth curves</b> follows fibers as gently bending lines from a model of every direction in each voxel (CSD and parallel transport tracking): about three minutes, an option. Tracts are drawn in 3D as tubes or lines, and as a dot in the tract's color wherever a shown tract crosses a slice, with the MRI of the anatomy behind it. Each tract is drawn 2 voxels shorter at each end, where fibers fan out (<b>Shorten ends</b>; 0 draws them whole); the tracts themselves stay whole. Each group can be hidden or removed.</p><p><b>Two-tensor</b> (UKF, the default) follows two fiber directions, from a starting point in every voxel of the brain, with the settings of the atlas the tract names come from (as Mike Halle's tractline does), so tracts reach into the swelling around a tumor; it runs on the graphics card and agrees with the original UKFTractography program (on a whole brain, 93% of fibers end within 0.1 mm of the original's from the same starting points). <b>Single tensor</b> follows one direction per voxel; where tracts cross, that direction is an average, and a tract may stop or turn. With <b>Two-tensor</b>, <b>Make tracts</b> follows tracts through the whole brain and names them with RapidParc (Bisten, Schultz et al., University of Bonn), a network trained on an atlas of 800 fiber clusters (Zhang, O'Donnell et al.); each named tract that comes within the distance of the chosen structure is shown whole, in its own color, with its closest distance to the structure. Streamlines no name fits and pass close are shown in gray; the rest of the brain is kept, hidden.</p><p><b>Licenses.</b> Research software: not reviewed or approved by the FDA or any other agency; clinical applications are neither recommended nor advised. The two-tensor tracking is a port of UKFTractography (authors: Yogesh Rathi, Stefan Lienhard, Yinpeng Li, Martin Styner, Ipek Oguz, Yundi Shi, Christian Baumgartner, Ryan Eckbo, Tashrif Billah and Dheshan Mohandass; github.com/pnlbwh/ukftractography). All or portions of this licensed product (such portions are the \"Software\") have been obtained under license from The Brigham and Women's Hospital, Inc. and are subject to the following terms and conditions: <a href=\"./vendor/diffusion/licenses/LICENSE-UKF.txt\" target=\"_blank\">the UKF Tractography Contribution and Software License Agreement</a> (this is a modified version: translated to TypeScript and WGSL). RapidParc's trained network is under <a href=\"./vendor/diffusion/rapidparc/LICENSE.txt\" target=\"_blank\">its BSD license</a> (University of Bonn); TractCloud's table of tract names under <a href=\"./vendor/diffusion/tractcloud/LICENSE.txt\" target=\"_blank\">3D Slicer's license</a>; dcm2niix under <a href=\"./vendor/diffusion/dcm2niix/LICENSE.txt\" target=\"_blank\">its own (BSD)</a>; the rest of this extension under the <a href=\"./vendor/diffusion/licenses/LICENSE\" target=\"_blank\">Apache License 2.0</a> (<a href=\"./vendor/diffusion/licenses/NOTICE\" target=\"_blank\">NOTICE</a>).</p>",
+    help: "<p><b>For preparing a case.</b> The module needs three things, and ticks each off when it is there: the <b>diffusion MRI</b> (the scan that shows the brain's wiring; often named DTI, DWI or diffusion), the <b>MRI of the anatomy</b> (usually the T1 with contrast), and the <b>tumor's outline</b>. <b>Open a patient…</b> opens the DICOM database; <b>Scans on this computer…</b> opens Load / Save, where a folder from a CD, a USB stick or an export is added to the database. Without an outline, draw a few <b>Tumor</b> strokes inside it and a few <b>Not tumor</b> strokes around it, on a few slices, then <b>Grow the outline</b>, check it, correct with more strokes, and press <b>Done</b>. Then <b>Show the fiber tracts near the tumor</b>: each named tract with at least 5 of its fibers within 6 mm of the tumor (the distance can be changed under Advanced) is shown whole, in its own color, with how close it comes; the tracts that come within 2 mm more, or that come close with fewer fibers, are listed after them in gray, hidden; pressing it again replaces the list. Each tract shows how many fibers the same tract has on the other side. Turn on the tracts you care about and press <b>Add lines</b>: it follows many more fibers in the tracts shown that have none added yet, on both sides (the other side stays hidden unless it is on), to see a thin tract better and compare the sides (about as long as the first run). A tract that looks thin or missing on the tumor's side may be destroyed by the tumor, or still there but hidden by swelling (edema). Only an outline named as a tumor (or made here) counts. Everything stays on this computer.</p><p><b>Advanced</b> holds the maps and the settings behind that button:</p><p>Shows what a diffusion MRI scan measures: <b>FA</b>, how strongly water moves along one direction (bright in white matter tracts), and <b>Color FA</b>, that direction as a color (red left-right, green front-back, blue up-down). A diffusion scan shows Color FA when it loads. When the case has an MRI of the anatomy, FA and Color FA are shown over it at half opacity; otherwise they fill the slice views. The gear in each slice view chooses the image, the one over it and how much shows through.</p><p><b>Tracts</b> follow the main direction of water movement from voxel to voxel. Under Advanced, <b>Make tracts</b> with <b>Single tensor</b> starts them in the white matter inside and around the chosen structure; with <b>Two-tensor</b> or <b>Smooth curves</b> it does what the face's button does, from the structure chosen there; <b>Seed where I click…</b> starts them at one point. <b>Smooth curves</b> follows fibers as gently bending lines from a model of every direction in each voxel (CSD and parallel transport tracking): about three minutes, an option. Tracts are drawn in 3D as tubes or lines, and as a dot in the tract's color wherever a shown tract crosses a slice, with the MRI of the anatomy behind it. Each tract is drawn 2 voxels shorter at each end, where fibers fan out (<b>Shorten ends</b>; 0 draws them whole); the tracts themselves stay whole. Each group can be hidden or removed.</p><p><b>Two-tensor</b> (UKF, the default) follows two fiber directions, from a starting point in every voxel of the brain, with the settings of the atlas the tract names come from (as Mike Halle's tractline does), so tracts reach into the swelling around a tumor; it runs on the graphics card and agrees with the original UKFTractography program (on a whole brain, 93% of fibers end within 0.1 mm of the original's from the same starting points). <b>Single tensor</b> follows one direction per voxel; where tracts cross, that direction is an average, and a tract may stop or turn. With <b>Two-tensor</b>, <b>Make tracts</b> follows tracts through the whole brain and names them with RapidParc (Bisten, Schultz et al., University of Bonn), a network trained on an atlas of 800 fiber clusters (Zhang, O'Donnell et al.); each named tract that comes within the distance of the chosen structure is shown whole, in its own color, with its closest distance to the structure. Streamlines no name fits and pass close are shown in gray; the rest of the brain is kept, hidden.</p><p><b>Licenses.</b> Research software: not reviewed or approved by the FDA or any other agency; clinical applications are neither recommended nor advised. The two-tensor tracking is a port of UKFTractography (authors: Yogesh Rathi, Stefan Lienhard, Yinpeng Li, Martin Styner, Ipek Oguz, Yundi Shi, Christian Baumgartner, Ryan Eckbo, Tashrif Billah and Dheshan Mohandass; github.com/pnlbwh/ukftractography). All or portions of this licensed product (such portions are the \"Software\") have been obtained under license from The Brigham and Women's Hospital, Inc. and are subject to the following terms and conditions: <a href=\"./vendor/diffusion/licenses/LICENSE-UKF.txt\" target=\"_blank\">the UKF Tractography Contribution and Software License Agreement</a> (this is a modified version: translated to TypeScript and WGSL). RapidParc's trained network is under <a href=\"./vendor/diffusion/rapidparc/LICENSE.txt\" target=\"_blank\">its BSD license</a> (University of Bonn); TractCloud's table of tract names under <a href=\"./vendor/diffusion/tractcloud/LICENSE.txt\" target=\"_blank\">3D Slicer's license</a>; dcm2niix under <a href=\"./vendor/diffusion/dcm2niix/LICENSE.txt\" target=\"_blank\">its own (BSD)</a>; the rest of this extension under the <a href=\"./vendor/diffusion/licenses/LICENSE\" target=\"_blank\">Apache License 2.0</a> (<a href=\"./vendor/diffusion/licenses/NOTICE\" target=\"_blank\">NOTICE</a>).</p>",
     acknowledgements: DIFFUSION_REFERENCES.map((r) => `${r.cite}${r.link ? ` ${r.link}` : ""} — ${r.usedFor}${r.verified ? "" : " (citation to be checked)"}`),
     mount(el) { root = el; render(); },
     onShow() { render(); },

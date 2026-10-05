@@ -57,6 +57,17 @@ Deno.test("faint tracts: within reach with fewer than the minimum; every side's 
   assertEquals(r.unnamedNear.length, 1);
 });
 
+Deno.test("the gray band: at 6 mm, a tract whose closest streamline is at 7 mm is listed gray; one at 9 mm is not", () => {
+  const model = { json: { tracts: [{}, {}, {}, {}] } } as unknown as TractCloudModel;
+  // Tract 0: 6 streamlines at 3 mm (near). Tract 1: 10 at 7 mm (the band). Tract 2: 10 at 9 mm (beyond it).
+  const spec: [number, number, number][] = [...Array(6).fill([0, 1, 3]), ...Array(10).fill([1, 1, 7]), ...Array(10).fill([2, 1, 9])];
+  const named = { tract: Int32Array.from(spec.map((x) => x[0])), side: Int8Array.from(spec.map((x) => x[1])), draws: 1, seconds: 0 } as Named;
+  const r = sortByDistance(model, named, Float64Array.from(spec.map((x) => x[2])), 6, 5, 8);
+  assertEquals(r.near.map((e) => e.tract), [0]);
+  assertEquals(r.faint.map((e) => [e.tract, e.within]), [[1, 0]]);
+  assertEquals(sortByDistance(model, named, Float64Array.from(spec.map((x) => x[2])), 6).faint.length, 0);   // no band asked for
+});
+
 Deno.test("a partner on its own grid is sampled onto the scan's grid through the scanner's coordinates", async () => {
   const { resampleInto, sameGrid } = await import("./planning.ts");
   const dims = [6, 5, 4], n = 6 * 5 * 4;
