@@ -40,8 +40,10 @@ export const MOTION_RULES = {
   2: "rule 1 and eddy currents: each diffusion-weighted image also stretched and sheared along the phase-encoding axis (a shift linear in position, three numbers an image), estimated with its movement",
 } as const;
 export type MotionRuleId = keyof typeof MOTION_RULES;
-/** The rule in use: 0 until Ron has seen rule 1's numbers against FSL's eddy (2026-10-05). */
-export const MOTION_RULE: MotionRuleId = 0;
+/** The rule in use. Rule 1 (Ron, 2026-10-05: "A now"), after the comparison with FSL's eddy (movement 0.20-0.30 mm root mean
+ *  square on PAT16 and PAT25); eddy currents (rule 2) left out, their per-image estimates being noise beyond one axis on
+ *  ds001226's scanner (dmri-review, 2026-10-05 night). */
+export const MOTION_RULE: MotionRuleId = 1;
 
 type Field = { fit: FieldFit; sign: 1 | -1 };
 /** A move with, for a diffusion-weighted image under rule 2, its eddy-current shift along the phase-encoding axis e (a
