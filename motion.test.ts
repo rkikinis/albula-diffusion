@@ -118,14 +118,14 @@ Deno.test("a moving head: each image's move is found again (root mean square wit
   assert(e < 0.2 * eRaw, "putting the images back did not bring the first and last b = 0 together");
 });
 
-Deno.test("eddy currents: with rule 2 every brain point is read where it was, far closer than with movement alone", async () => {
+Deno.test("eddy currents: with rules 2 and 3 every brain point is read where it was, far closer than with movement alone; rule 3's slopes nearer the truth", async () => {
   const { bValues, gradients } = protocol(), c: [number, number, number] = [0, 0, 0];
   let seed = 11; const rnd = () => { seed = (seed * 69069 + 1) % 4294967296; return seed / 4294967296 - 0.5; };
   const truth = bValues.map((_, v) => { const u = v / 101; return move([1.0 * u + 0.2 * rnd(), -0.6 * u + 0.2 * rnd(), 0.8 * u + 0.2 * rnd()], [0.8 * u + 0.2 * rnd(), 0.5 * u + 0.2 * rnd(), -1.0 * u + 0.2 * rnd()], c); });
-  // Eddy currents grow with b and follow the gradient's direction (a fixed 3×3 coupling, mm of shift per 100 mm), along the
-  // phase-encoding axis j (+A here), with a constant part too; none at b = 0.
+  // Eddy currents follow the gradient pulse: its direction through a fixed 3×3 coupling (mm of shift per 100 mm), its
+  // strength as √b (fixed timing); along the phase-encoding axis j (+A here), with a constant part too; none at b = 0.
   const K = [[1.2, 0.3, 0], [0.2, 1.5, 0.1], [0, 0.4, 0.8]], e: [number, number, number] = [0, 1, 0];
-  const eddy: Eddy = { e, g: gradients.map((d, v) => K.map((row) => (bValues[v] / 2800) * (row[0] * d[0] + row[1] * d[1] + row[2] * d[2]))), d0: gradients.map((d, v) => (bValues[v] / 2800) * 0.8 * d[1]) };
+  const eddy: Eddy = { e, g: gradients.map((d, v) => K.map((row) => Math.sqrt(bValues[v] / 2800) * (row[0] * d[0] + row[1] * d[1] + row[2] * d[2]))), d0: gradients.map((d, v) => Math.sqrt(bValues[v] / 2800) * 0.8 * d[1]) };
   const dwi = scan(truth, bValues, gradients, 4, eddy);
   // Where each brain point of the reference was read from, by the truth and by an estimate (gauge-free: the common offset
   // of the b = 0 images taken out point by point).
@@ -144,7 +144,11 @@ Deno.test("eddy currents: with rule 2 every brain point is read where it was, fa
   const t0 = performance.now();
   const r2 = await estimateMotion(dwi, undefined, { rule: 2, peAxis: 1 });
   const ms = performance.now() - t0;
-  const e1 = errorOf(r1.moves), e2 = errorOf(r2.moves);
+  const r3 = await estimateMotion(dwi, undefined, { rule: 3, peAxis: 1 });
+  const e1 = errorOf(r1.moves), e2 = errorOf(r2.moves), e3 = errorOf(r3.moves);
+  // The slopes themselves against the truth (root mean square over the diffusion-weighted images, mm per 100 mm).
+  const slopeError = (moves: Move[]) => Math.sqrt(dw.reduce((s, v) => { const g = moves[v].ec?.g ?? [0, 0, 0]; return s + (g[0] - eddy.g[v][0]) ** 2 + (g[1] - eddy.g[v][1]) ** 2 + (g[2] - eddy.g[v][2]) ** 2; }, 0) / dw.length);
+  const s2 = slopeError(r2.moves), s3 = slopeError(r3.moves);
   // The stretch part only (the constant part is a movement along e and is reported as one).
   let trueMax = 0; for (const v of dw) for (const x of pts) { const g = eddy.g[v]; trueMax = Math.max(trueMax, Math.abs((g[0] * x[0] + g[1] * x[1] + g[2] * x[2]) / 100)); }
   console.log(`  where brain points are read from, root mean square error: movement only ${e1.toFixed(3)} mm, with eddy currents ${e2.toFixed(3)} mm; eddy shift up to ${r2.eddyMm} mm found (${trueMax.toFixed(2)} put in); residual ${r2.residual.before.toFixed(4)} → ${r2.residual.after.toFixed(4)} (movement only ${r1.residual.after.toFixed(4)}); ${(ms / 1000).toFixed(1)} s`);
@@ -152,4 +156,8 @@ Deno.test("eddy currents: with rule 2 every brain point is read where it was, fa
   assert(e2 < 0.25, `with eddy currents, points read ${e2.toFixed(3)} mm from where they were`);
   assert(e2 < 0.6 * e1, `the eddy-current model did not help: ${e2.toFixed(3)} against ${e1.toFixed(3)} mm`);
   assert(r2.residual.after < r1.residual.after, "the images do not agree better with the eddy-current model");
+  // Rule 3 (the slopes tied to the gradient): the slopes nearer the truth than rule 2's, the points read no worse.
+  console.log(`  rule 3: points ${e3.toFixed(3)} mm; slopes off by ${s3.toFixed(3)} (rule 2 ${s2.toFixed(3)}) mm per 100 mm`);
+  assert(r3.rule === 3 && s3 < s2, `tying the slopes to the gradient did not bring them nearer the truth: ${s3.toFixed(3)} against ${s2.toFixed(3)}`);
+  assert(e3 < e2 + 0.02, `rule 3 reads points worse than rule 2: ${e3.toFixed(3)} against ${e2.toFixed(3)} mm`);
 });
