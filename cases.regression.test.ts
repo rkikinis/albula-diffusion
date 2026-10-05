@@ -17,6 +17,7 @@ import { runCase, synthstripMaskPath } from "./case-run.ts";
 import { TRACKING_RULE, TRACKING_RULES } from "./tracking-rules.ts";
 import { GRAY_BAND_MM, NEAR_MM } from "./planning.ts";
 import { OUTSIDE_RULE } from "./outside-brain.ts";
+import { MOTION_RULE } from "./motion.ts";
 import { loadModel, type ModelJson } from "./tractcloud/tractcloud.ts";
 
 const DS = (testData("openneuro-ds001226", "") ?? ABSENT).replace(/\/$/, "");
@@ -39,6 +40,7 @@ for (const id of CASES) Deno.test({ name: `${id}, two-tensor: the same streamlin
     assertEquals(ref.outsideRule ?? 0, OUTSIDE_RULE.on ? OUTSIDE_RULE.id : 0, "the stored result was made with the outside-the-brain test in another state: rerun Contents/tools/dmri-cohort.ts");
     // A reference made under another rule is a stale file, not a regression (critic, 2026-10-04, finding 10).
     assertEquals(ref.trackingRule, TRACKING_RULE, `the stored result was made under tracking rule ${ref.trackingRule}, the default is ${TRACKING_RULE}: rerun Contents/tools/dmri-cohort.ts`);
+    assertEquals(ref.motionRule ?? 0, MOTION_RULE, `the stored result was made under head-movement rule ${ref.motionRule ?? 0}, the default is ${MOTION_RULE}: rerun Contents/tools/dmri-cohort.ts`);
     const r = await runCase(DS, id, device, model, "ukf");
     console.log(`${id}: ${r.streamlines} streamlines (stored ${ref.streamlines}), ${r.seconds.total} s`);
     assert(Math.abs(r.streamlines - ref.streamlines) <= ref.streamlines * 0.005, `streamlines ${r.streamlines} against ${ref.streamlines}`);

@@ -30,8 +30,8 @@ export interface Grid3 { dims: [number, number, number]; ijkToRAS: number[]; dat
 /** A rigid move y = R (x − c) + c + t in RAS mm, from the diffusion scan's space to the T1's. */
 export interface Rigid { R: number[]; t: [number, number, number]; c: [number, number, number] }
 
-const spacingOf = (M: number[]): [number, number, number] => [0, 1, 2].map((c) => Math.hypot(M[c], M[4 + c], M[8 + c])) as [number, number, number];
-function inv4(M: number[]): number[] {
+export const spacingOf = (M: number[]): [number, number, number] => [0, 1, 2].map((c) => Math.hypot(M[c], M[4 + c], M[8 + c])) as [number, number, number];
+export function inv4(M: number[]): number[] {
   const a = [[M[0], M[1], M[2]], [M[4], M[5], M[6]], [M[8], M[9], M[10]]];
   const det = a[0][0] * (a[1][1] * a[2][2] - a[1][2] * a[2][1]) - a[0][1] * (a[1][0] * a[2][2] - a[1][2] * a[2][0]) + a[0][2] * (a[1][0] * a[2][1] - a[1][1] * a[2][0]);
   const c = (r: number, k: number) => { const rr = [0, 1, 2].filter((x) => x !== r), cc = [0, 1, 2].filter((x) => x !== k); return ((r + k) % 2 ? -1 : 1) * (a[rr[0]][cc[0]] * a[rr[1]][cc[1]] - a[rr[0]][cc[1]] * a[rr[1]][cc[0]]); };
@@ -77,7 +77,7 @@ export function blur(img: ArrayLike<number>, dims: [number, number, number], sig
 const blurMm = (g: Grid3, fwhmMm: number) => { const s = spacingOf(g.ijkToRAS), sig = fwhmMm / (2 * Math.sqrt(2 * Math.log(2))); return blur(g.data, g.dims, s.map((v) => sig / v) as [number, number, number]); };
 
 /** The image's gradient in RAS mm (central differences on its grid, turned into world axes). */
-function worldGradient(img: Float32Array, g: Grid3): Float32Array {
+export function worldGradient(img: Float32Array, g: Grid3): Float32Array {
   const [nx, ny, nz] = g.dims, M = g.ijkToRAS, out = new Float32Array(3 * img.length);
   // ∇_world = J⁻ᵀ ∇_ijk with J the ijk → RAS linear part.
   const I = inv4(M);
@@ -91,7 +91,7 @@ function worldGradient(img: Float32Array, g: Grid3): Float32Array {
   return out;
 }
 /** Trilinear sample of a field with `ch` channels per voxel at voxel position (x, y, z); zeros outside. */
-function sampleAt(f: ArrayLike<number>, dims: [number, number, number], ch: number, x: number, y: number, z: number, out: Float64Array): boolean {
+export function sampleAt(f: ArrayLike<number>, dims: [number, number, number], ch: number, x: number, y: number, z: number, out: Float64Array): boolean {
   const [nx, ny, nz] = dims;
   // Zero beyond half a voxel past the outermost voxel centers; within it, the edge voxel (each face of the scan kept
   // whole: critic, 2026-10-03, finding 18).
@@ -197,13 +197,20 @@ export async function rigidToT1(moving: Grid3, fixedFull: Grid3, mask: Uint8Arra
   return { T: toRigid(p), cost, costAtStart, levels, ms: performance.now() - t0 };
 }
 
+/** The field at cell centers (voxels along its axis) and its slope along the axis (the stretch), for sampling anywhere. */
+export function fieldWithSlope(fit: FieldFit): { b: Float32Array; slope: Float32Array } {
+  const fc = fieldAtCenters(fit), ax = fit.axis, [sx, sy] = fit.dims, slope = new Float32Array(fc.length), stride = [1, sx, sx * sy][ax], m = fit.dims[ax];
+  for (let v = 0; v < fc.length; v++) { const q = Math.floor(v / stride) % m, up = q + 1 < m ? fc[v + stride] : fc[v], dn = q > 0 ? fc[v - stride] : fc[v]; slope[v] = (up - dn) / ((q + 1 < m ? 1 : 0) + (q > 0 ? 1 : 0) || 1); }
+  return { b: fc, slope };
+}
+
 /**
  * THE DIFFUSION SCAN ON A GRID LINED UP WITH THE T1, read once per volume: each target voxel goes back through the rigid
  * move (T1 space → scan space) and, when a distortion field is given, along the phase-encoding axis through it (the
  * correction distortion.ts applyField makes, with its stretch), and the scan as acquired is read there. Target grid: the
  * T1's axes at the scan's own spacing, over the box the scan covers once moved. Gradients turned by the rotation.
  */
-export async function resampleOntoT1(dwi: DiffusionSeries, T: Rigid, t1: Pick<Grid3, "dims" | "ijkToRAS">, field?: { fit: FieldFit; sign: 1 | -1 }, opts: { /** The scan's voxels to cover (the brain, on the scan's grid): the box is theirs plus a margin, not the whole field of view. */ cover?: Uint8Array; marginMm?: number } = {}): Promise<DiffusionSeries> {
+export async function resampleOntoT1(dwi: DiffusionSeries, T: Rigid, t1: Pick<Grid3, "dims" | "ijkToRAS">, field?: { fit: FieldFit; sign: 1 | -1 }, opts: { /** The scan's voxels to cover (the brain, on the scan's grid): the box is theirs plus a margin, not the whole field of view. */ cover?: Uint8Array; marginMm?: number; /** Head movement (motion.ts): per volume, the move from the scan's reference to where the head was. */ motion?: Rigid[] } = {}): Promise<DiffusionSeries> {
   const src = dwi.volumes[0], [sx, sy, sz] = src.dims, Ms = src.ijkToRAS, Si = inv4(Ms), sp = spacingOf(Ms);
   const Mt = t1.ijkToRAS, tsp = spacingOf(Mt), axes = [0, 1, 2].map((c) => [Mt[c] / tsp[c], Mt[4 + c] / tsp[c], Mt[8 + c] / tsp[c]]);
   // THE SPACING keeps the scan's voxel volume (critic, 2026-10-03, finding 7: the smallest spacing in all three directions
@@ -230,49 +237,61 @@ export async function resampleOntoT1(dwi: DiffusionSeries, T: Rigid, t1: Pick<Gr
   // Inverse rigid (T1 space → scan space): x = Rᵀ (y − c − t) + c.
   const R = T.R, inv = (y: number[]) => { const d = [y[0] - T.c[0] - T.t[0], y[1] - T.c[1] - T.t[1], y[2] - T.c[2] - T.t[2]]; return [R[0] * d[0] + R[3] * d[1] + R[6] * d[2] + T.c[0], R[1] * d[0] + R[4] * d[1] + R[7] * d[2] + T.c[1], R[2] * d[0] + R[5] * d[1] + R[8] * d[2] + T.c[2]]; };
   // The field at cell centers (voxels along its axis) and its derivative along the axis, for sampling anywhere.
-  const fc = field ? fieldAtCenters(field.fit) : undefined, ax = field?.fit.axis ?? 0;
-  let dfc: Float32Array | undefined;
-  if (fc) {
-    dfc = new Float32Array(fc.length); const stride = [1, sx, sx * sy][ax], m = src.dims[ax];
-    for (let v = 0; v < fc.length; v++) { const q = Math.floor(v / stride) % m, up = q + 1 < m ? fc[v + stride] : fc[v], dn = q > 0 ? fc[v - stride] : fc[v]; dfc[v] = (up - dn) / ((q + 1 < m ? 1 : 0) + (q > 0 ? 1 : 0) || 1); }
-  }
+  const fd = field ? fieldWithSlope(field.fit) : undefined, fc = fd?.b, dfc = fd?.slope, ax = field?.fit.axis ?? 0;
   // Where each target voxel reads (source voxel coordinates) and with what weight (the stretch), once for all volumes.
-  const n = dims[0] * dims[1] * dims[2], pos = new Float32Array(3 * n), wgt = new Float32Array(n), tmp = new Float64Array(1);
+  // With head movement (opts.motion, motion.ts): where it lies in the scan's reference space (x) and the field's shift
+  // there, kept, and each volume reads through its own move. The field is taken where the head is in the reference:
+  // it moves with the head (the susceptibility field is the head's own), as FSL's eddy assumes.
+  const mv = opts.motion, n = dims[0] * dims[1] * dims[2], pos = new Float32Array(3 * n), wgt = new Float32Array(n), tmp = new Float64Array(1);
+  const xs = mv ? new Float32Array(3 * n) : undefined, shift = mv ? new Float32Array(n) : undefined;
   for (let k = 0; k < dims[2]; k++) for (let j = 0; j < dims[1]; j++) for (let i = 0; i < dims[0]; i++) {
     const v = (k * dims[1] + j) * dims[0] + i;
     const y = [0, 1, 2].map((r) => M[4 * r] * i + M[4 * r + 1] * j + M[4 * r + 2] * k + M[4 * r + 3]), x = inv(y);
     const q = [0, 1, 2].map((r) => Si[4 * r] * x[0] + Si[4 * r + 1] * x[1] + Si[4 * r + 2] * x[2] + Si[4 * r + 3]);
-    let w = 1;
+    let w = 1, s = 0;
     if (fc && dfc && field) {
       sampleAt(fc, src.dims, 1, q[0], q[1], q[2], tmp); const b = tmp[0];
       sampleAt(dfc, src.dims, 1, q[0], q[1], q[2], tmp); const db = tmp[0];
-      q[ax] += field.sign * b; w = 1 + field.sign * db;
+      s = field.sign * b; q[ax] += s; w = 1 + field.sign * db;
     }
     pos[3 * v] = q[0]; pos[3 * v + 1] = q[1]; pos[3 * v + 2] = q[2]; wgt[v] = w;
+    if (xs && shift) { xs[3 * v] = x[0]; xs[3 * v + 1] = x[1]; xs[3 * v + 2] = x[2]; shift[v] = s; }
   }
   const one = new Float64Array(1);
   const volumes: DiffusionSeries["volumes"] = [];
-  for (const vol of dwi.volumes) {
-    const out = new Float32Array(n);
-    for (let v = 0; v < n; v++) { sampleAt(vol.data as ArrayLike<number>, src.dims, 1, pos[3 * v], pos[3 * v + 1], pos[3 * v + 2], one); out[v] = one[0] * wgt[v]; }
+  for (const [vi, vol] of dwi.volumes.entries()) {
+    const out = new Float32Array(n), m = mv?.[vi];
+    if (m && xs && shift) {
+      // y = R (x − c) + c + t, then into the scan's voxels, then the field's shift along its axis.
+      const r = m.R, a = [0, 1, 2].map((q) => m.c[q] + m.t[q] - (r[3 * q] * m.c[0] + r[3 * q + 1] * m.c[1] + r[3 * q + 2] * m.c[2]));
+      const A = [0, 1, 2].map((q) => [0, 1, 2].map((p) => Si[4 * q] * r[p] + Si[4 * q + 1] * r[3 + p] + Si[4 * q + 2] * r[6 + p]));
+      const b = [0, 1, 2].map((q) => Si[4 * q] * a[0] + Si[4 * q + 1] * a[1] + Si[4 * q + 2] * a[2] + Si[4 * q + 3]);
+      const [A0, A1, A2] = A;
+      for (let v = 0; v < n; v++) {
+        const x0 = xs[3 * v], x1 = xs[3 * v + 1], x2 = xs[3 * v + 2];
+        const q = [A0[0] * x0 + A0[1] * x1 + A0[2] * x2 + b[0], A1[0] * x0 + A1[1] * x1 + A1[2] * x2 + b[1], A2[0] * x0 + A2[1] * x1 + A2[2] * x2 + b[2]];
+        q[ax] += shift[v];
+        sampleAt(vol.data as ArrayLike<number>, src.dims, 1, q[0], q[1], q[2], one); out[v] = one[0] * wgt[v];
+      }
+    } else for (let v = 0; v < n; v++) { sampleAt(vol.data as ArrayLike<number>, src.dims, 1, pos[3 * v], pos[3 * v + 1], pos[3 * v + 2], one); out[v] = one[0] * wgt[v]; }
     volumes.push({ ...vol, dims, ijkToRAS: M, data: out, dtype: "<f4" } as DiffusionSeries["volumes"][number]);
     if (volumes.length % 8 === 0) await yieldNow();
   }
-  const gradients = dwi.gradients.map((g) => [R[0] * g[0] + R[1] * g[1] + R[2] * g[2], R[3] * g[0] + R[4] * g[1] + R[5] * g[2], R[6] * g[0] + R[7] * g[1] + R[8] * g[2]] as [number, number, number]);
+  // Each gradient turned with the head: into the reference by its volume's move (Rᵥᵀ g), then onto the T1 (R).
+  const gradients = dwi.gradients.map((g0, vi) => {
+    const m = mv?.[vi]?.R, g = m ? [m[0] * g0[0] + m[3] * g0[1] + m[6] * g0[2], m[1] * g0[0] + m[4] * g0[1] + m[7] * g0[2], m[2] * g0[0] + m[5] * g0[1] + m[8] * g0[2]] : g0;
+    return [R[0] * g[0] + R[1] * g[1] + R[2] * g[2], R[3] * g[0] + R[4] * g[1] + R[5] * g[2], R[6] * g[0] + R[7] * g[1] + R[8] * g[2]] as [number, number, number];
+  });
   return { ...dwi, volumes, ijkToRAS: M, gradients, source: `${dwi.source}; onto the T1 (registration rule ${REGISTRATION_RULE})` };
 }
 
 /** A move too large to be the same session's -- the alignment is then shown as doubtful (the person aligns by hand). */
 export const DOUBTFUL = { mm: 10, degrees: 10 };
 
-/**
- * THE WHOLE STEP, for a case run and for the module: the b = 0 images corrected (the field applied to them alone), their
- * mean aligned to the T1 inside the brain (median_otsu of that mean, grown by 2 voxels), and the whole scan read once onto
- * the T1-aligned grid through the move and the field. Returns the new series, the move, and what was done, in words --
- * with a doubt when the move is larger than one session's or the alignment did not improve the match.
- */
-export async function alignToT1(dwi: DiffusionSeries, t1: Grid3, field?: { fit: FieldFit; sign: 1 | -1 }, times?: { register?: number; resample?: number }): Promise<{ dwi: DiffusionSeries; T: Rigid; result: RigidResult; said: string; doubt?: string }> {
-  const t0 = performance.now(), src = dwi.volumes[0], n = src.dims[0] * src.dims[1] * src.dims[2];
+/** The b = 0 images' mean, the field applied to each, and the brain in it (median_otsu, grown by 2 voxels: the edge
+ *  carries the alignment's signal), on the scan's grid. */
+export function scanBrain(dwi: DiffusionSeries, field?: { fit: FieldFit; sign: 1 | -1 }): { b0: Float32Array; mask: Uint8Array } {
+  const src = dwi.volumes[0], n = src.dims[0] * src.dims[1] * src.dims[2];
   const b0i = dwi.bValues.map((b, i) => (b < 50 ? i : -1)).filter((i) => i >= 0);
   const b0 = new Float32Array(n);
   for (const i of b0i.length ? b0i : [0]) { const d = field ? applyField(field.fit, dwi.volumes[i].data as ArrayLike<number>, field.sign) : dwi.volumes[i].data as ArrayLike<number>; for (let v = 0; v < n; v++) b0[v] += Number(d[v]) / Math.max(1, b0i.length); }
@@ -283,10 +302,26 @@ export async function alignToT1(dwi: DiffusionSeries, t1: Grid3, field?: { fit: 
     for (let c = -2; c <= 2 && !on; c++) for (let b = -2; b <= 2 && !on; b++) for (let a = -2; a <= 2 && !on; a++) { const I = i + a, J = j + b, K = k + c; if (I >= 0 && J >= 0 && K >= 0 && I < nx && J < ny && K < nz && brain[(K * ny + J) * nx + I]) on = 1; }
     mask[(k * ny + j) * nx + i] = on;
   }
+  return { b0, mask };
+}
+
+/**
+ * THE WHOLE STEP, for a case run and for the module: the b = 0 images corrected (the field applied to them alone), their
+ * mean aligned to the T1 inside the brain (median_otsu of that mean, grown by 2 voxels), and the whole scan read once onto
+ * the T1-aligned grid through the move and the field. Returns the new series, the move, and what was done, in words --
+ * with a doubt when the move is larger than one session's or the alignment did not improve the match.
+ */
+export async function alignToT1(dwi: DiffusionSeries, t1: Grid3, field?: { fit: FieldFit; sign: 1 | -1 }, times?: { register?: number; resample?: number },
+  /** Head movement (motion.ts): each volume's move, and the b = 0 mean and brain it made (corrected for the field and the movement). */
+  motion?: { moves: Rigid[]; b0: Float32Array; mask: Uint8Array }): Promise<{ dwi: DiffusionSeries; T: Rigid; result: RigidResult; said: string; doubt?: string }> {
+  const t0 = performance.now(), src = dwi.volumes[0];
+  let b0: Float32Array, mask: Uint8Array;
+  if (motion) ({ b0, mask } = motion);
+  else ({ b0, mask } = scanBrain(dwi, field));
   const result = await rigidToT1({ dims: src.dims as [number, number, number], ijkToRAS: src.ijkToRAS, data: b0 }, t1, mask);
   const t1Done = performance.now();
   if (times) times.register = t1Done - t0;
-  const out = await resampleOntoT1(dwi, result.T, t1, field, { cover: mask });
+  const out = await resampleOntoT1(dwi, result.T, t1, field, { cover: mask, ...(motion ? { motion: motion.moves } : {}) });
   if (times) times.resample = performance.now() - t1Done;
   const sz = rigidSize(result.T);
   const doubt = sz.mm > DOUBTFUL.mm || sz.degrees > DOUBTFUL.degrees ? `it had to move ${sz.mm.toFixed(0)} mm and ${sz.degrees.toFixed(0)}°, more than within one visit`

@@ -13,8 +13,10 @@ import { fitTensors } from "./tensor.ts";
 import { prepareUkfData } from "./ukf.ts";
 import { correctWithReversed, sortByDistance, stageText, streamlineDistances, tractName, trackUkfSeeds, wholeBrainSeeds, type StageTimes, type TrackTiming } from "./planning.ts";
 import { everyBrainVoxel, seedsFor, TRACKING_RULE, TRACKING_RULES, ukfDataFor, withBrainFromT1, type MaskGrid, type TrackingRuleId } from "./tracking-rules.ts";
-import { alignToT1, type Rigid } from "./registration.ts";
-import { applyField, type FieldFit } from "./distortion.ts";
+import type { Rigid } from "./registration.ts";
+import type { FieldFit } from "./distortion.ts";
+import { prepareScan } from "./prepare.ts";
+import { MOTION_RULE, type MotionRuleId } from "./motion.ts";
 import { edgeFluid, outsideBrain, OUTSIDE_RULE } from "./outside-brain.ts";
 import type { TractCloudModel } from "./tractcloud/tractcloud.ts";
 import { nameTracts, SHORT, type Named } from "./tractcloud/name-tracts.ts";
@@ -42,6 +44,8 @@ export interface CaseResult {
   brain?: string; brainOutsideGridMl?: number;
   /** registration.ts: the move from the diffusion scan to the T1 the case was tracked on, and a doubt about it. */
   alignment?: { T: Rigid; doubt?: string };
+  /** motion.ts: the head-movement rule the case was put in place by (0: none), and with rule 1 what it found. */
+  motionRule: MotionRuleId; motion?: { largest: { mm: number; degrees: number }; residual: { before: number; after: number } };
   seconds: { read_correct_fit: number; csd: number; track: number; name: number; total: number };
   /** Step by step (planning.ts StageTimes, milliseconds), and the same in words. */
   stages: StageTimes;
@@ -58,7 +62,7 @@ export interface CaseResult {
 }
 
 /** Run case `id` of the BIDS dataset at `ds` (ds001226's layout: ses-preop, acq-AP / acq-PA, derivatives/tumor_masks). */
-export async function runCase(ds: string, id: string, device: GPUDevice, model: TractCloudModel, method: "ukf" | "ptt" = "ukf", opts: { pttWorkerUrl?: URL; csdWorkerUrl?: URL; /** The card tracker's options (checking variants, e.g. onePass). */ ukf?: Record<string, unknown>; /** The naming draw's seed (label noise floor). */ nameSeed?: number; /** Who names: RapidParc (the default since 2026-10-03; its weights) or TractCloud ("tractcloud"). */ labeler?: RapidParcModel | "tractcloud"; /** Add the scan's own noise again, seeded (scan noise floor). */ noiseSeed?: number; /** Return the streamlines and names. */ keep?: boolean; /** How the brain mask is made (tensor.ts). */ maskMethod?: "head" | "median-otsu"; /** Whole-brain starting points (planning.ts WHOLE_BRAIN_SEEDS). */ seeds?: number; /** Their draw's seed (seed noise floor). */ seedDraw?: number; /** false: seeds anywhere in the head mask, as before 2026-10-02. */ seedMask?: boolean; /** One seed at the center of EVERY brain voxel, left to the tracker's own seed threshold (the ORG atlas's tracking, Mike Halle's mail of 2026-10-01; with opts.ukf's freeWater: false and his settings). Checking only: about ten times the seeds. */ seedEveryVoxel?: boolean; /** The distortion correction's rule (distortion.ts DISTORTION_RULE; default 2). */ distortionRule?: 1 | 2; /** tracking-rules.ts TRACKING_RULE; default the current one. */ trackingRule?: TrackingRuleId; /** false: stay in the diffusion scan's space even when the case has a T1 (as before 2026-10-03). */ onT1?: boolean } = {}): Promise<CaseResult> {
+export async function runCase(ds: string, id: string, device: GPUDevice, model: TractCloudModel, method: "ukf" | "ptt" = "ukf", opts: { pttWorkerUrl?: URL; csdWorkerUrl?: URL; /** The card tracker's options (checking variants, e.g. onePass). */ ukf?: Record<string, unknown>; /** The naming draw's seed (label noise floor). */ nameSeed?: number; /** Who names: RapidParc (the default since 2026-10-03; its weights) or TractCloud ("tractcloud"). */ labeler?: RapidParcModel | "tractcloud"; /** Add the scan's own noise again, seeded (scan noise floor). */ noiseSeed?: number; /** Return the streamlines and names. */ keep?: boolean; /** How the brain mask is made (tensor.ts). */ maskMethod?: "head" | "median-otsu"; /** Whole-brain starting points (planning.ts WHOLE_BRAIN_SEEDS). */ seeds?: number; /** Their draw's seed (seed noise floor). */ seedDraw?: number; /** false: seeds anywhere in the head mask, as before 2026-10-02. */ seedMask?: boolean; /** One seed at the center of EVERY brain voxel, left to the tracker's own seed threshold (the ORG atlas's tracking, Mike Halle's mail of 2026-10-01; with opts.ukf's freeWater: false and his settings). Checking only: about ten times the seeds. */ seedEveryVoxel?: boolean; /** The distortion correction's rule (distortion.ts DISTORTION_RULE; default 2). */ distortionRule?: 1 | 2; /** tracking-rules.ts TRACKING_RULE; default the current one. */ trackingRule?: TrackingRuleId; /** false: stay in the diffusion scan's space even when the case has a T1 (as before 2026-10-03). */ onT1?: boolean; /** motion.ts MOTION_RULE; default the current one. */ motionRule?: MotionRuleId } = {}): Promise<CaseResult> {
   const t0 = performance.now(), p = `${ds}/sub-${id}/ses-preop`;
   const rd = (f: string) => Deno.readFileSync(`${p}/${f}`), tx = (f: string) => Deno.readTextFileSync(`${p}/${f}`);
   const sidecarPE = (f: string) => { try { return (JSON.parse(tx(f)) as { PhaseEncodingDirection?: string }).PhaseEncodingDirection; } catch { return undefined; } };
@@ -95,18 +99,17 @@ export async function runCase(ds: string, id: string, device: GPUDevice, model: 
   }
   const field: { fit?: FieldFit; sign?: 1 | -1 } = {};
   let corrected = await correctWithReversed(dwi, rev.volumes.filter((_, i) => rev.bValues[i] < 50).map((v) => v.data), "PA", undefined,
-    { partnerGrid: { dims: rev.volumes[0].dims, ijkToRAS: rev.volumes[0].ijkToRAS }, times: stages, rule: opts.distortionRule, apply: !t1Vol, field,
+    { partnerGrid: { dims: rev.volumes[0].dims, ijkToRAS: rev.volumes[0].ijkToRAS }, times: stages, rule: opts.distortionRule, apply: false, field,
       // The scanner's record of the phase-encoding directions (the BIDS sidecars), when present: PAT03's and CON02's "PA"
       // scans are not reversed pairs (planning.ts correctWithReversed).
       phaseEncoding: { scan: sidecarPE(`dwi/sub-${id}_ses-preop_acq-AP_dwi.json`), partner: sidecarPE(`dwi/sub-${id}_ses-preop_acq-PA_dwi.json`) } });
-  let alignment: { T: Rigid; doubt?: string } | undefined;
-  if (t1Vol) {
-    const a = await alignToT1(dwi, { dims: t1Vol.dims as [number, number, number], ijkToRAS: t1Vol.ijkToRAS, data: t1Vol.data as ArrayLike<number> }, field.fit ? { fit: field.fit, sign: field.sign ?? -1 } : undefined, stages);
-    // A doubtful alignment is not used (as in the module): the scanner's placement stands, the field applied as before.
-    if (a.doubt) { if (field.fit) for (const v of dwi.volumes) { v.data = applyField(field.fit, v.data as ArrayLike<number>, field.sign ?? -1); v.dtype = "<f4"; } corrected += `; not aligned to the T1: ${a.doubt}`; }
-    else { dwi = a.dwi; corrected += `; ${a.said}`; }
-    alignment = { T: a.T, ...(a.doubt ? { doubt: a.doubt } : {}) };
-  }
+  // Head movement, the field and the T1 in one resampling (prepare.ts, the module's path too).
+  const prep = await prepareScan(dwi, { ...(field.fit ? { field: { fit: field.fit, sign: field.sign ?? -1 } } : {}),
+    ...(t1Vol ? { t1: { dims: t1Vol.dims as [number, number, number], ijkToRAS: t1Vol.ijkToRAS, data: t1Vol.data as ArrayLike<number> } } : {}),
+    motionRule: opts.motionRule ?? MOTION_RULE, times: stages });
+  dwi = prep.dwi;
+  if (prep.said) corrected += `; ${prep.said}`;
+  const alignment = prep.alignment;
   const tFit = performance.now();
   let fit = fitTensors(dwi, { maxB: CASE_DEFAULTS.maxB, maskMethod: opts.maskMethod, seedMask: opts.seedMask });
   // On the T1-aligned grid only: a doubtful alignment left the scan in the scanner's place, where a T1 mask does not fit,
@@ -161,6 +164,6 @@ export async function runCase(ds: string, id: string, device: GPUDevice, model: 
   const t3 = performance.now();
   stages.distances = t3 - tDist;
   stages.total = t3 - t0;
-  return { id, corrected, ...(alignment ? { alignment } : {}), trackingRule: method === "ukf" ? rule.id : undefined, brain: fit.seedMaskRule ?? fit.maskRule, ...(outsideGridMl !== undefined ? { brainOutsideGridMl: +outsideGridMl.toFixed(1) } : {}), shell, stages, stagesText: stageText(stages), ...(opts.keep ? { kept: { sl, named, outside } } : {}), ...(added !== undefined ? { noiseSigma: +added.toFixed(2) } : {}), streamlines: sl.length, short, other, named: sl.length - short - other - outsideCount, outsideBrain: outsideCount, outsideRule: OUTSIDE_RULE.on ? OUTSIDE_RULE.id : 0, tumorVoxels, method,
+  return { id, corrected, ...(alignment ? { alignment } : {}), motionRule: prep.motionRule, ...(prep.motion ? { motion: { largest: prep.motion.largest, residual: { before: +prep.motion.residual.before.toFixed(4), after: +prep.motion.residual.after.toFixed(4) } } } : {}), trackingRule: method === "ukf" ? rule.id : undefined, brain: fit.seedMaskRule ?? fit.maskRule, ...(outsideGridMl !== undefined ? { brainOutsideGridMl: +outsideGridMl.toFixed(1) } : {}), shell, stages, stagesText: stageText(stages), ...(opts.keep ? { kept: { sl, named, outside } } : {}), ...(added !== undefined ? { noiseSigma: +added.toFixed(2) } : {}), streamlines: sl.length, short, other, named: sl.length - short - other - outsideCount, outsideBrain: outsideCount, outsideRule: OUTSIDE_RULE.on ? OUTSIDE_RULE.id : 0, tumorVoxels, method,
     seconds: { read_correct_fit: +((t1 - t0) / 1000).toFixed(1), csd: +csdSeconds.toFixed(1), track: +((t2 - t1 - csdSeconds * 1000) / 1000).toFixed(1), name: +named.seconds.toFixed(1), total: +((t3 - t0) / 1000).toFixed(1) }, tracts };
 }
