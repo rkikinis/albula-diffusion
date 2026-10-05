@@ -210,7 +210,7 @@ export function fieldWithSlope(fit: FieldFit): { b: Float32Array; slope: Float32
  * correction distortion.ts applyField makes, with its stretch), and the scan as acquired is read there. Target grid: the
  * T1's axes at the scan's own spacing, over the box the scan covers once moved. Gradients turned by the rotation.
  */
-export async function resampleOntoT1(dwi: DiffusionSeries, T: Rigid, t1: Pick<Grid3, "dims" | "ijkToRAS">, field?: { fit: FieldFit; sign: 1 | -1 }, opts: { /** The scan's voxels to cover (the brain, on the scan's grid): the box is theirs plus a margin, not the whole field of view. */ cover?: Uint8Array; marginMm?: number; /** Head movement (motion.ts): per volume, the move from the scan's reference to where the head was. */ motion?: Rigid[] } = {}): Promise<DiffusionSeries> {
+export async function resampleOntoT1(dwi: DiffusionSeries, T: Rigid, t1: Pick<Grid3, "dims" | "ijkToRAS">, field?: { fit: FieldFit; sign: 1 | -1 }, opts: { /** The scan's voxels to cover (the brain, on the scan's grid): the box is theirs plus a margin, not the whole field of view. */ cover?: Uint8Array; marginMm?: number; /** Head movement (motion.ts): per volume, the move from the scan's reference to where the head was, and its eddy-current shift d = g·(y − c)/100 mm along e. */ motion?: (Rigid & { ec?: { g: number[]; e: number[] } })[] } = {}): Promise<DiffusionSeries> {
   const src = dwi.volumes[0], [sx, sy, sz] = src.dims, Ms = src.ijkToRAS, Si = inv4(Ms), sp = spacingOf(Ms);
   const Mt = t1.ijkToRAS, tsp = spacingOf(Mt), axes = [0, 1, 2].map((c) => [Mt[c] / tsp[c], Mt[4 + c] / tsp[c], Mt[8 + c] / tsp[c]]);
   // THE SPACING keeps the scan's voxel volume (critic, 2026-10-03, finding 7: the smallest spacing in all three directions
@@ -267,11 +267,21 @@ export async function resampleOntoT1(dwi: DiffusionSeries, T: Rigid, t1: Pick<Gr
       const A = [0, 1, 2].map((q) => [0, 1, 2].map((p) => Si[4 * q] * r[p] + Si[4 * q + 1] * r[3 + p] + Si[4 * q + 2] * r[6 + p]));
       const b = [0, 1, 2].map((q) => Si[4 * q] * a[0] + Si[4 * q + 1] * a[1] + Si[4 * q + 2] * a[2] + Si[4 * q + 3]);
       const [A0, A1, A2] = A;
+      // The eddy-current shift (motion rule 2): d = g·(y − c)/100 mm along e, y where the tissue was; in voxels Si·e d;
+      // the brightness corrected for its stretch.
+      const g = m.ec?.g ?? [0, 0, 0], e = m.ec?.e ?? [0, 0, 0], ev = [0, 1, 2].map((q) => Si[4 * q] * e[0] + Si[4 * q + 1] * e[1] + Si[4 * q + 2] * e[2]);
+      const stretch = 1 + (g[0] * e[0] + g[1] * e[1] + g[2] * e[2]) / 100, ecOn = !!m.ec;
       for (let v = 0; v < n; v++) {
         const x0 = xs[3 * v], x1 = xs[3 * v + 1], x2 = xs[3 * v + 2];
         const q = [A0[0] * x0 + A0[1] * x1 + A0[2] * x2 + b[0], A1[0] * x0 + A1[1] * x1 + A1[2] * x2 + b[1], A2[0] * x0 + A2[1] * x1 + A2[2] * x2 + b[2]];
+        if (ecOn) {
+          const d0 = x0 - m.c[0], d1 = x1 - m.c[1], d2 = x2 - m.c[2];
+          const r0 = r[0] * d0 + r[1] * d1 + r[2] * d2 + m.t[0], r1 = r[3] * d0 + r[4] * d1 + r[5] * d2 + m.t[1], r2 = r[6] * d0 + r[7] * d1 + r[8] * d2 + m.t[2];
+          const dd = (g[0] * r0 + g[1] * r1 + g[2] * r2) / 100;
+          q[0] += dd * ev[0]; q[1] += dd * ev[1]; q[2] += dd * ev[2];
+        }
         q[ax] += shift[v];
-        sampleAt(vol.data as ArrayLike<number>, src.dims, 1, q[0], q[1], q[2], one); out[v] = one[0] * wgt[v];
+        sampleAt(vol.data as ArrayLike<number>, src.dims, 1, q[0], q[1], q[2], one); out[v] = one[0] * wgt[v] * stretch;
       }
     } else for (let v = 0; v < n; v++) { sampleAt(vol.data as ArrayLike<number>, src.dims, 1, pos[3 * v], pos[3 * v + 1], pos[3 * v + 2], one); out[v] = one[0] * wgt[v]; }
     volumes.push({ ...vol, dims, ijkToRAS: M, data: out, dtype: "<f4" } as DiffusionSeries["volumes"][number]);

@@ -464,7 +464,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     const z = anatOk ? await fetchZarrVolumeNative(live.blobBase(), anatOk.zarr as ZarrDesc) : undefined;
     const prep = await prepareScan(dwi, { ...(field.fit ? { field: { fit: field.fit, sign: field.sign ?? -1 } } : {}),
       ...(anatOk && z ? { t1: { dims: anatOk.dims as [number, number, number], ijkToRAS: anatOk.ijkToRAS as number[], data: z.data as ArrayLike<number> } } : {}),
-      motionRule, times, say });
+      motionRule, ...(scan.phaseEncoding ? { phaseEncoding: scan.phaseEncoding } : {}), times, say });
     dwi = prep.dwi;
     if (prep.said) corrected += `; ${prep.said}`;
     const aligned = !!prep.alignment && !prep.alignment.doubt;

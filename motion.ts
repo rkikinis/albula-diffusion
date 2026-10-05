@@ -20,8 +20,15 @@
 // point is in the reference (as eddy assumes). The moves go into the ONE resampling (registration.ts resampleOntoT1), so
 // the data are still interpolated once, and each gradient direction turns with its image.
 //
-// Not here yet: eddy currents (an affine stretch along the phase-encoding axis per image, larger at high b), slice-wise
-// movement and signal dropout (eddy's --mporder and --repol).
+// EDDY CURRENTS (motion rule 2): switching the diffusion gradients on induces currents in the scanner's metal whose stray
+// field shifts each diffusion-weighted image along the phase-encoding axis, differently for every image (it follows the
+// gradient's direction and strength). Modeled as eddy's linear model (--flm=linear): the shift is a linear function of
+// where the point is in the scanner, d = g·(y − c) / 100 mm, three numbers g a image, estimated with the movement against
+// the same prediction; the image's brightness is corrected for the stretch (1 + g·e/100, e the phase-encoding axis). The
+// constant part of the shift is the same thing as a movement along e and is left to the movement. Not for b = 0 images
+// (no diffusion gradient, no eddy currents).
+//
+// Not here yet: eddy's quadratic model (its default), slice-wise movement and signal dropout (--mporder, --repol).
 import type { DiffusionSeries } from "./dwi.ts";
 import type { FieldFit } from "./distortion.ts";
 import { coarsen, fieldWithSlope, inv4, rigidSize, sampleAt, scanBrain, spacingOf, worldGradient, type Grid3, type Rigid } from "./registration.ts";
@@ -29,24 +36,31 @@ import { coarsen, fieldWithSlope, inv4, rigidSize, sampleAt, scanBrain, spacingO
 /** The numbered rules (Ron, 2026-09-25: "as modular as possible and also versioned"). */
 export const MOTION_RULES = {
   0: "none: the images are used as they are (a scan corrected before, such as a preprocessed dataset)",
-  1: "rigid per image: the b = 0 images to their mean, each diffusion-weighted image to a prediction from the rest of its shell (left out of its own; degree 4), each shell pinned to the b = 0 images' movement, two rounds",
+  1: "rigid per image: the b = 0 images to their mean, each diffusion-weighted image to a prediction from all the others (the kurtosis model on the log signal, itself left out), the diffusion-weighted images' common offset from their extrapolation to b = 0, two rounds",
+  2: "rule 1 and eddy currents: each diffusion-weighted image also stretched and sheared along the phase-encoding axis (a shift linear in position, three numbers an image), estimated with its movement",
 } as const;
 export type MotionRuleId = keyof typeof MOTION_RULES;
 /** The rule in use: 0 until Ron has seen rule 1's numbers against FSL's eddy (2026-10-05). */
 export const MOTION_RULE: MotionRuleId = 0;
 
 type Field = { fit: FieldFit; sign: 1 | -1 };
+/** A move with, for a diffusion-weighted image under rule 2, its eddy-current shift along the phase-encoding axis e (a
+ *  unit vector in RAS): d(y) = g·(y − c) / 100 mm at the point y where the tissue was. */
+export interface Move extends Rigid { ec?: { g: [number, number, number]; e: [number, number, number] } }
 const yieldNow = () => new Promise<void>((r) => setTimeout(r, 0));
 
 export interface MotionResult {
   rule: MotionRuleId;
-  /** Per image: the move from the reference to where the head was (scan RAS, about the brain's center). */
-  moves: Rigid[];
+  /** Per image: the move from the reference to where the head was (scan RAS, about the brain's center), and under rule 2
+   *  its eddy-current shift. */
+  moves: Move[];
   /** The b = 0 mean, corrected for the field and the movement, and the brain grown by 2 voxels, on the scan's grid. */
   b0: Float32Array; mask: Uint8Array;
   /** Each image's move from the reference (mm at the brain's center, degrees). */
   sizes: { mm: number; degrees: number }[];
   largest: { mm: number; degrees: number };
+  /** Rule 2: the largest eddy-current shift at the brain's edge (mm), over all images. */
+  eddyMm?: number;
   /** How far the diffusion-weighted images are from their predictions over the brain (root mean square, relative to the
    *  signal), as acquired and after the correction: the check that the correction made the images agree better. */
   residual: { before: number; after: number };
@@ -115,16 +129,17 @@ function voxelsRas(grid: { dims: [number, number, number]; ijkToRAS: number[] },
   return { ras: Float64Array.from(xs), idx: Int32Array.from(id) };
 }
 
-/** An image (on the scan's grid) read at the reference points through a move: w · V(m(x) + shift). */
-function readMoved(data: ArrayLike<number>, dims: [number, number, number], Si: number[], P: Points, m: Rigid): Float32Array {
+/** An image (on the scan's grid) read at the reference points through a move: w · V(m(x) + shift + eddy shift). */
+function readMoved(data: ArrayLike<number>, dims: [number, number, number], Si: number[], P: Points, m: Move): Float32Array {
   const out = new Float32Array(P.n), one = new Float64Array(1), R = m.R, c = m.c, t = m.t;
+  const g = m.ec?.g ?? [0, 0, 0], e = m.ec?.e ?? [0, 0, 0], stretch = 1 + (g[0] * e[0] + g[1] * e[1] + g[2] * e[2]) / 100;
   for (let p = 0; p < P.n; p++) {
     const d0 = P.x[3 * p] - c[0], d1 = P.x[3 * p + 1] - c[1], d2 = P.x[3 * p + 2] - c[2];
-    const y0 = R[0] * d0 + R[1] * d1 + R[2] * d2 + c[0] + t[0] + P.shift[3 * p];
-    const y1 = R[3] * d0 + R[4] * d1 + R[5] * d2 + c[1] + t[1] + P.shift[3 * p + 1];
-    const y2 = R[6] * d0 + R[7] * d1 + R[8] * d2 + c[2] + t[2] + P.shift[3 * p + 2];
+    const r0 = R[0] * d0 + R[1] * d1 + R[2] * d2 + t[0], r1 = R[3] * d0 + R[4] * d1 + R[5] * d2 + t[1], r2 = R[6] * d0 + R[7] * d1 + R[8] * d2 + t[2];
+    const dd = (g[0] * r0 + g[1] * r1 + g[2] * r2) / 100;
+    const y0 = r0 + c[0] + P.shift[3 * p] + dd * e[0], y1 = r1 + c[1] + P.shift[3 * p + 1] + dd * e[1], y2 = r2 + c[2] + P.shift[3 * p + 2] + dd * e[2];
     sampleAt(data, dims, 1, Si[0] * y0 + Si[1] * y1 + Si[2] * y2 + Si[3], Si[4] * y0 + Si[5] * y1 + Si[6] * y2 + Si[7], Si[8] * y0 + Si[9] * y1 + Si[10] * y2 + Si[11], one);
-    out[p] = one[0] * P.w[p];
+    out[p] = one[0] * P.w[p] * stretch;
   }
   return out;
 }
@@ -157,62 +172,72 @@ function sample4(f: Float32Array, nx: number, ny: number, nz: number, x: number,
   return true;
 }
 
-/** The sum of squares and (with J) the normal equations for the move R, t and the gain a, offset b. */
-function normalEq(L: Level, img: Float32Array, F: Float32Array, R: number[], t: number[], c: number[], a: number, b: number, H?: Float64Array, g?: Float64Array): { cost: number; n: number } {
-  const P = L.P, Si = L.Si, s4 = new Float64Array(4), J = new Float64Array(8), [nx, ny, nz] = L.grid.dims;
+/** The parameters of one alignment: the move (R, t about c), the gain a and offset b, and the eddy-current slopes g
+ *  along e (when `e` is given). */
+interface Params { R: number[]; t: number[]; a: number; b: number; g: number[] }
+
+/** The sum of squares and (with H, gr) the normal equations: 8 unknowns (rotation, translation, gain, offset), 11 with
+ *  the eddy-current slopes. */
+function normalEq(L: Level, img: Float32Array, F: Float32Array, q: Params, c: number[], e: number[] | undefined, H?: Float64Array, gr?: Float64Array): { cost: number; n: number } {
+  const P = L.P, Si = L.Si, s4 = new Float64Array(4), np = e ? 11 : 8, J = new Float64Array(np), [nx, ny, nz] = L.grid.dims;
+  const { R, t, a, b } = q, g = e ? q.g : [0, 0, 0], E = e ?? [0, 0, 0], stretch = 1 + (g[0] * E[0] + g[1] * E[1] + g[2] * E[2]) / 100;
   let cost = 0, n = 0;
-  if (H) H.fill(0); if (g) g.fill(0);
+  if (H) H.fill(0); if (gr) gr.fill(0);
   for (let p = 0; p < P.n; p++) {
     const d0r = P.x[3 * p] - c[0], d1r = P.x[3 * p + 1] - c[1], d2r = P.x[3 * p + 2] - c[2];
     const d0 = R[0] * d0r + R[1] * d1r + R[2] * d2r, d1 = R[3] * d0r + R[4] * d1r + R[5] * d2r, d2 = R[6] * d0r + R[7] * d1r + R[8] * d2r;
-    const y0 = d0 + c[0] + t[0] + P.shift[3 * p], y1 = d1 + c[1] + t[1] + P.shift[3 * p + 1], y2 = d2 + c[2] + t[2] + P.shift[3 * p + 2];
+    // r: where the tissue was, from the brain's center; then the field's shift and the eddy-current shift along e.
+    const r0 = d0 + t[0], r1 = d1 + t[1], r2 = d2 + t[2], dd = (g[0] * r0 + g[1] * r1 + g[2] * r2) / 100;
+    const y0 = r0 + c[0] + P.shift[3 * p] + dd * E[0], y1 = r1 + c[1] + P.shift[3 * p + 1] + dd * E[1], y2 = r2 + c[2] + P.shift[3 * p + 2] + dd * E[2];
     if (!sample4(img, nx, ny, nz, Si[0] * y0 + Si[1] * y1 + Si[2] * y2 + Si[3], Si[4] * y0 + Si[5] * y1 + Si[6] * y2 + Si[7], Si[8] * y0 + Si[9] * y1 + Si[10] * y2 + Si[11], s4)) continue;
-    const w = P.w[p], V = w * s4[0], g0 = w * s4[1], g1 = w * s4[2], g2 = w * s4[3];
-    const r = a * V + b - F[p];
-    cost += r * r; n++;
-    if (!H || !g) continue;
-    // d(a V(R(x−c)+c+t))/dω = a (d × ∇V) for the update R ← exp([ω]×) R; d/dt = a ∇V; d/da = V; d/db = 1.
-    J[0] = a * (d1 * g2 - d2 * g1); J[1] = a * (d2 * g0 - d0 * g2); J[2] = a * (d0 * g1 - d1 * g0);
-    J[3] = a * g0; J[4] = a * g1; J[5] = a * g2; J[6] = V; J[7] = 1;
-    for (let i = 0; i < 8; i++) { g[i] += J[i] * r; for (let k = i; k < 8; k++) H[i * 8 + k] += J[i] * J[k]; }
+    const w = P.w[p] * stretch, V = w * s4[0], g0 = w * s4[1], g1 = w * s4[2], g2 = w * s4[3];
+    const res = a * V + b - F[p];
+    cost += res * res; n++;
+    if (!H || !gr) continue;
+    // A move of the tissue point also moves where the eddy shift is taken: the effective gradient is ∇V + (∇V·e) g/100.
+    const ge = g0 * E[0] + g1 * E[1] + g2 * E[2], h0 = g0 + ge * g[0] / 100, h1 = g1 + ge * g[1] / 100, h2 = g2 + ge * g[2] / 100;
+    // d/dω = a (d × h) for the update R ← exp([ω]×) R; d/dt = a h; d/da = V; d/db = 1;
+    // d/dg_k = a [(∇V·e)(r_k)/100 + w_field V_raw e_k/100] (the shift, and the stretch's brightness).
+    J[0] = a * (d1 * h2 - d2 * h1); J[1] = a * (d2 * h0 - d0 * h2); J[2] = a * (d0 * h1 - d1 * h0);
+    J[3] = a * h0; J[4] = a * h1; J[5] = a * h2; J[6] = V; J[7] = 1;
+    if (e) { const vr = P.w[p] * s4[0] / 100; J[8] = a * (ge * r0 / 100 + vr * E[0]); J[9] = a * (ge * r1 / 100 + vr * E[1]); J[10] = a * (ge * r2 / 100 + vr * E[2]); }
+    for (let i = 0; i < np; i++) { gr[i] += J[i] * res; for (let k = i; k < np; k++) H[i * np + k] += J[i] * J[k]; }
   }
-  if (H) for (let i = 0; i < 8; i++) for (let k = 0; k < i; k++) H[i * 8 + k] = H[k * 8 + i];
+  if (H) for (let i = 0; i < np; i++) for (let k = 0; k < i; k++) H[i * np + k] = H[k * np + i];
   return { cost: n ? cost / n : Infinity, n };
 }
 
-/** Align one image (scan grid) to its target (values at each level's points), from `start`. */
-function alignOne(data: ArrayLike<number>, full: { dims: [number, number, number]; ijkToRAS: number[] }, levels: Level[], targets: Float32Array[], start: Rigid): Rigid {
-  let R = start.R.slice(), t = [...start.t];
-  const c = start.c, H = new Float64Array(64), g = new Float64Array(8);
+/** Align one image (scan grid) to its target (values at each level's points), from `start`; with `e`, its eddy-current
+ *  slopes along e too. */
+function alignOne(data: ArrayLike<number>, full: { dims: [number, number, number]; ijkToRAS: number[] }, levels: Level[], targets: Float32Array[], start: Move, e?: [number, number, number]): Move {
+  const c = start.c, np = e ? 11 : 8, H = new Float64Array(np * np), gr = new Float64Array(np);
+  let q: Params = { R: start.R.slice(), t: [...start.t], a: 1, b: 0, g: e ? [...(start.ec?.g ?? [0, 0, 0])] : [0, 0, 0] };
   for (const [li, L] of levels.entries()) {
     const G: Grid3 = { dims: full.dims, ijkToRAS: full.ijkToRAS, data };
     const img = packed(L.mm > 0 ? coarsen(G, L.mm) : G), F = targets[li];
-    // Gain and offset by regression at the start (the images match in brightness up to these; at b = 0 a = 1, b = 0).
-    let a = 1, b = 0;
+    // Gain and offset by regression at the start (the images match in brightness up to these; at b = 0 a = 1, b = 0):
+    // one Gauss-Newton step on a and b alone is exactly that regression.
     {
-      const P = L.P, Si = L.Si, s4 = new Float64Array(4); let sv = 0, sf = 0, svv = 0, svf = 0, n = 0;
-      for (let p = 0; p < P.n; p++) {
-        const d0r = P.x[3 * p] - c[0], d1r = P.x[3 * p + 1] - c[1], d2r = P.x[3 * p + 2] - c[2];
-        const y0 = R[0] * d0r + R[1] * d1r + R[2] * d2r + c[0] + t[0] + P.shift[3 * p], y1 = R[3] * d0r + R[4] * d1r + R[5] * d2r + c[1] + t[1] + P.shift[3 * p + 1], y2 = R[6] * d0r + R[7] * d1r + R[8] * d2r + c[2] + t[2] + P.shift[3 * p + 2];
-        if (!sample4(img, L.grid.dims[0], L.grid.dims[1], L.grid.dims[2], Si[0] * y0 + Si[1] * y1 + Si[2] * y2 + Si[3], Si[4] * y0 + Si[5] * y1 + Si[6] * y2 + Si[7], Si[8] * y0 + Si[9] * y1 + Si[10] * y2 + Si[11], s4)) continue;
-        const v = P.w[p] * s4[0]; sv += v; sf += F[p]; svv += v * v; svf += v * F[p]; n++;
-      }
-      const vv = svv - sv * sv / n; if (n > 10 && vv > 0) { a = (svf - sv * sf / n) / vv; b = (sf - a * sv) / n; }
+      const H0 = new Float64Array(np * np), g0 = new Float64Array(np);
+      normalEq(L, img, F, { ...q, a: 1, b: 0 }, c, e, H0, g0);
+      const A2 = new Float64Array([H0[6 * np + 6], H0[6 * np + 7], H0[7 * np + 6], H0[7 * np + 7]]), d = solve(A2, new Float64Array([-g0[6], -g0[7]]), 2);
+      // With a = 1 the derivative in a is V itself, so the step lands on the regression's a and b.
+      if (d && H0[7 * np + 7] > 10) q = { ...q, a: 1 + d[0], b: d[1] };
     }
-    let cur = normalEq(L, img, F, R, t, c, a, b, H, g), lambda = 1e-3;
+    let cur = normalEq(L, img, F, q, c, e, H, gr), lambda = 1e-3;
     for (let it = 0; it < L.iterations; it++) {
-      const A = Float64Array.from(H); for (let i = 0; i < 8; i++) A[i * 8 + i] += lambda * (H[i * 8 + i] || 1);
-      const d = solve(A, g.map((x) => -x), 8);
+      const A = Float64Array.from(H); for (let i = 0; i < np; i++) A[i * np + i] += lambda * (H[i * np + i] || 1);
+      const d = solve(A, gr.map((x) => -x), np);
       if (!d) break;
-      const R2 = mul3(rotVec([d[0], d[1], d[2]]), R), t2 = [t[0] + d[3], t[1] + d[4], t[2] + d[5]], a2 = a + d[6], b2 = b + d[7];
-      const H2 = new Float64Array(64), g2 = new Float64Array(8), next = normalEq(L, img, F, R2, t2, c, a2, b2, H2, g2);
+      const q2: Params = { R: mul3(rotVec([d[0], d[1], d[2]]), q.R), t: [q.t[0] + d[3], q.t[1] + d[4], q.t[2] + d[5]], a: q.a + d[6], b: q.b + d[7], g: e ? [q.g[0] + d[8], q.g[1] + d[9], q.g[2] + d[10]] : q.g };
+      const H2 = new Float64Array(np * np), g2 = new Float64Array(np), next = normalEq(L, img, F, q2, c, e, H2, g2);
       if (next.cost < cur.cost) {
-        R = R2; t = t2; a = a2; b = b2; cur = next; H.set(H2); g.set(g2); lambda = Math.max(1e-6, lambda / 3);
-        if (Math.hypot(d[3], d[4], d[5]) < 1e-3 && Math.hypot(d[0], d[1], d[2]) < 2e-5) break;
+        q = q2; cur = next; H.set(H2); gr.set(g2); lambda = Math.max(1e-6, lambda / 3);
+        if (Math.hypot(d[3], d[4], d[5]) < 1e-3 && Math.hypot(d[0], d[1], d[2]) < 2e-5 && (!e || Math.hypot(d[8], d[9], d[10]) < 1e-3)) break;
       } else { lambda *= 10; if (lambda > 1e4) break; }
     }
   }
-  return { R, t: t as [number, number, number], c };
+  return { R: q.R, t: q.t as [number, number, number], c, ...(e ? { ec: { g: q.g as [number, number, number], e } } : {}) };
 }
 
 // ── The prediction of a diffusion-weighted image from the rest of its shell ─────────────────────
@@ -315,7 +340,7 @@ const fromVec = (v: number[], c: [number, number, number]): Rigid => ({ R: rotVe
  * one. Returns each image's move from the reference, the corrected b = 0 mean and brain, and how much better the images
  * agree with their predictions afterwards.
  */
-export async function estimateMotion(dwi: DiffusionSeries, field?: Field, opts: { rounds?: number } = {}): Promise<MotionResult> {
+export async function estimateMotion(dwi: DiffusionSeries, field?: Field, opts: { rounds?: number; /** 1: movement; 2: and eddy currents. */ rule?: 1 | 2; /** The phase-encoding axis of the scan's voxels (0 i, 1 j, 2 k) when no field gives it. */ peAxis?: 0 | 1 | 2 } = {}): Promise<MotionResult> {
   const t0 = performance.now(), src = dwi.volumes[0], full = { dims: src.dims as [number, number, number], ijkToRAS: src.ijkToRAS };
   const Si = inv4(full.ijkToRAS), N = dwi.volumes.length, [nx, ny, nz] = full.dims, nv = nx * ny * nz;
   const b0i = dwi.bValues.map((b, i) => (b < 50 ? i : -1)).filter((i) => i >= 0), shells = shellsOf(dwi);
@@ -327,8 +352,11 @@ export async function estimateMotion(dwi: DiffusionSeries, field?: Field, opts: 
   for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) if (mask[(k * ny + j) * nx + i]) { cx += i; cy += j; cz += k; cn++; }
   cx /= cn || 1; cy /= cn || 1; cz /= cn || 1;
   const c: [number, number, number] = [0, 1, 2].map((r) => M[4 * r] * cx + M[4 * r + 1] * cy + M[4 * r + 2] * cz + M[4 * r + 3]) as [number, number, number];
-  const identity = (): Rigid => ({ R: I3(), t: [0, 0, 0], c });
-  let moves: Rigid[] = dwi.volumes.map(identity);
+  const identity = (): Move => ({ R: I3(), t: [0, 0, 0], c });
+  let moves: Move[] = dwi.volumes.map(identity);
+  // Eddy currents (rule 2) shift along the phase-encoding axis: the distortion field's, else the scanner's record.
+  const peAxis = field?.fit.axis ?? opts.peAxis, rule = opts.rule ?? 1;
+  const e = rule === 2 && peAxis !== undefined ? (() => { const v = [M[peAxis], M[4 + peAxis], M[8 + peAxis]], l = Math.hypot(v[0], v[1], v[2]); return [v[0] / l, v[1] / l, v[2] / l] as [number, number, number]; })() : undefined;
   const data = (i: number) => dwi.volumes[i].data as ArrayLike<number>;
   if (!b0i.length || !cn) {
     const b0 = scanBrain(dwi, field).b0;
@@ -360,10 +388,10 @@ export async function estimateMotion(dwi: DiffusionSeries, field?: Field, opts: 
   const targetsOf = (img: Float32Array) => levels.map((L) => { const g = L.mm > 0 ? coarsen({ ...full, data: img }, L.mm) : { ...full, data: img }; const o = new Float32Array(L.idx.length); for (let p = 0; p < o.length; p++) o[p] = Number(g.data[L.idx[p]]); return o; });
 
   // Each image put back, at each level's points (block means on the coarse level).
-  const atLevels = (i: number, m: Rigid) => targetsOf(scatter(readMoved(data(i), full.dims, Si, regP, m)));
+  const atLevels = (i: number, m: Move) => targetsOf(scatter(readMoved(data(i), full.dims, Si, regP, m)));
   // The predictions of every diffusion-weighted image at each level, and how well the images agree with them (relative
   // root mean square at the fine level's points).
-  const predictAll = (mv: Rigid[]) => {
+  const predictAll = (mv: Move[]) => {
     let se = 0, sy = 0;
     const pred = new Map<number, Float32Array[]>();
     const dirs = dwi.gradients.map((g, i) => { const m = mv[i].R; return [m[0] * g[0] + m[3] * g[1] + m[6] * g[2], m[1] * g[0] + m[4] * g[1] + m[7] * g[2], m[2] * g[0] + m[5] * g[1] + m[8] * g[2]]; });
@@ -406,7 +434,7 @@ export async function estimateMotion(dwi: DiffusionSeries, field?: Field, opts: 
     const { pred } = predictAll(moves);
     for (const s of shells) {
       if (!pred.has(s[0])) continue;
-      for (const i of s) { moves[i] = alignOne(data(i), full, levels, pred.get(i)!, moves[i]); if (i % 4 === 0) await yieldNow(); }
+      for (const i of s) { moves[i] = alignOne(data(i), full, levels, pred.get(i)!, moves[i], e); if (i % 4 === 0) await yieldNow(); }
     }
     // 4. All diffusion-weighted images onto the b = 0 images' frame: their extrapolation to b = 0 aligned to the b = 0
     //    mean (same contrast), and the move found added to every one of them. A scan with one shell cannot be
@@ -427,11 +455,11 @@ export async function estimateMotion(dwi: DiffusionSeries, field?: Field, opts: 
       for (const i of b0i) { const r = readMoved(data(i), full.dims, Si, regP, moves[i]); for (let p = 0; p < r.length; p++) b0Mean[p] += r[p] / b0i.length; }
       const m = alignOne(scatter(icpt), full, levels, targetsOf(scatter(b0Mean)), identity());
       // The common move first, then each image's own: y = Rᵢ(R_m(x − c) + c + t_m − c) + c + tᵢ.
-      for (const i of dw) { const a = moves[i], R = mul3(a.R, m.R), Rt = [0, 1, 2].map((r) => a.R[3 * r] * m.t[0] + a.R[3 * r + 1] * m.t[1] + a.R[3 * r + 2] * m.t[2]); moves[i] = { R, t: [a.t[0] + Rt[0], a.t[1] + Rt[1], a.t[2] + Rt[2]], c }; }
+      for (const i of dw) { const a = moves[i], R = mul3(a.R, m.R), Rt = [0, 1, 2].map((r) => a.R[3 * r] * m.t[0] + a.R[3 * r + 1] * m.t[1] + a.R[3 * r + 2] * m.t[2]); moves[i] = { ...a, R, t: [a.t[0] + Rt[0], a.t[1] + Rt[1], a.t[2] + Rt[2]], c }; }
     } else for (const s of shells) {
       const want = [0, 0, 0, 0, 0, 0], have = [0, 0, 0, 0, 0, 0];
       for (const i of s) { const a = atTime(i, b0Vecs), h = toVec(moves[i]); for (let q = 0; q < 6; q++) { want[q] += a[q] / s.length; have[q] += h[q] / s.length; } }
-      for (const i of s) { const h = toVec(moves[i]); moves[i] = fromVec(h.map((x, q) => x + want[q] - have[q]), c); }
+      for (const i of s) { const h = toVec(moves[i]); moves[i] = { ...moves[i], ...fromVec(h.map((x, q) => x + want[q] - have[q]), c) }; }
     }
   }
   const after = predictAll(moves).rel;
@@ -441,13 +469,23 @@ export async function estimateMotion(dwi: DiffusionSeries, field?: Field, opts: 
   for (const i of b0i) { const r = readMoved(data(i), full.dims, Si, allP, moves[i]); for (let v = 0; v < nv; v++) b0[v] += r[v] / b0i.length; }
   const sizes = moves.map((m) => { const s = rigidSize(m); return { mm: +s.mm.toFixed(3), degrees: +s.degrees.toFixed(3) }; });
   const largest = { mm: Math.max(...sizes.map((s) => s.mm)), degrees: Math.max(...sizes.map((s) => s.degrees)) };
+  // The largest eddy-current shift inside the brain (at the fine level's points), over all images.
+  let eddyMm: number | undefined;
+  if (e) {
+    eddyMm = 0;
+    const X = levels[1].P.x;
+    for (const m of moves) { const g = m.ec?.g; if (!g) continue; for (let p = 0; p < X.length; p += 3) eddyMm = Math.max(eddyMm, Math.abs(g[0] * (X[p] - c[0]) + g[1] * (X[p + 1] - c[1]) + g[2] * (X[p + 2] - c[2])) / 100); }
+    eddyMm = +eddyMm.toFixed(2);
+  }
   const ms = performance.now() - t0;
-  return { rule: 1, moves, b0, mask, sizes, largest, residual: { before, after }, ms,
-    said: `head movement corrected (largest ${largest.mm.toFixed(1)} mm and ${largest.degrees.toFixed(1)}°; the images agree with each other ${(100 * (1 - after / before)).toFixed(0)}% better)` };
+  const eddySaid = e ? `; eddy-current stretch up to ${eddyMm!.toFixed(1)} mm` : rule === 2 ? "; eddy currents not corrected (the phase-encoding direction is not known)" : "";
+  return { rule: e ? 2 : 1, moves, b0, mask, sizes, largest, ...(eddyMm !== undefined ? { eddyMm } : {}), residual: { before, after }, ms,
+    said: `head movement corrected (largest ${largest.mm.toFixed(1)} mm and ${largest.degrees.toFixed(1)}°${eddySaid}; the images agree with each other ${(100 * (1 - after / before)).toFixed(0)}% better)` };
 }
 
 /** The scan with each image put back (field and movement, one interpolation) on its own grid: for a case without a T1. */
 export async function applyMotion(dwi: DiffusionSeries, motion: Pick<MotionResult, "moves">, field?: Field): Promise<DiffusionSeries> {
+  // The eddy-current shifts ride in each move (readMoved applies them); the gradients turn with the movement only.
   const src = dwi.volumes[0], full = { dims: src.dims as [number, number, number], ijkToRAS: src.ijkToRAS }, Si = inv4(full.ijkToRAS);
   const fdRaw = field ? fieldWithSlope(field.fit) : undefined, fd = fdRaw && field ? { ...fdRaw, axis: field.fit.axis, sign: field.sign } : undefined;
   const all = voxelsRas(full, () => true), P = pointsAt(all.ras, full, fd), volumes: DiffusionSeries["volumes"] = [];

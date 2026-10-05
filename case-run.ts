@@ -106,7 +106,7 @@ export async function runCase(ds: string, id: string, device: GPUDevice, model: 
   // Head movement, the field and the T1 in one resampling (prepare.ts, the module's path too).
   const prep = await prepareScan(dwi, { ...(field.fit ? { field: { fit: field.fit, sign: field.sign ?? -1 } } : {}),
     ...(t1Vol ? { t1: { dims: t1Vol.dims as [number, number, number], ijkToRAS: t1Vol.ijkToRAS, data: t1Vol.data as ArrayLike<number> } } : {}),
-    motionRule: opts.motionRule ?? MOTION_RULE, times: stages });
+    motionRule: opts.motionRule ?? MOTION_RULE, phaseEncoding: sidecarPE(`dwi/sub-${id}_ses-preop_acq-AP_dwi.json`), times: stages });
   dwi = prep.dwi;
   if (prep.said) corrected += `; ${prep.said}`;
   const alignment = prep.alignment;
