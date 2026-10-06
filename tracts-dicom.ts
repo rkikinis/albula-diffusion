@@ -35,6 +35,9 @@ const DETERMINISTIC = { CodeValue: "113211", CodingSchemeDesignator: "DCM", Code
 /** Where the direction-colored map stored with a tracts object lives, relative to the database's folder (the import job
  *  writes it, the Tract review reads it; Contents/docs/TRACT-REVIEW.md). */
 export const colorFaPath = (tractsSeriesUID: string) => `SlicerAlbula-Cache/colorfa-${tractsSeriesUID}.nrrd`;
+/** The b = 0 image beside them (Ron, 2026-10-06: "substantia nigra should be visible on the B0 images, which are heavily
+ *  T2 weighted"), on the same grid -- the fit's S0, after every correction. */
+export const b0Path = (tractsSeriesUID: string) => `SlicerAlbula-Cache/b0-${tractsSeriesUID}.nrrd`;
 /** The Track Set holding the streamlines no tract name fits (Ron, 2026-10-01). */
 export const UNNAMED = "Unnamed";
 

@@ -26,7 +26,7 @@ import { SHORT } from "./tractcloud/name-tracts.ts";
 import { tractColor, TRACT_COLORS_VERSION } from "./tractcloud/tract-colors.ts";
 import type { TractCloudModel } from "./tractcloud/tractcloud.ts";
 import type { RapidParcModel } from "./rapidparc/rapidparc.ts";
-import { colorFaPath, dicomToTracts, tractsToDicom, UNNAMED, type TractSetData } from "./tracts-dicom.ts";
+import { b0Path, colorFaPath, dicomToTracts, tractsToDicom, UNNAMED, type TractSetData } from "./tracts-dicom.ts";
 
 /** The description every stored tracts object carries: how the job finds its own objects in the index. */
 export const TRACTS_DESCRIPTION = "Fiber tracts (whole brain)";
@@ -332,7 +332,8 @@ export async function makeTracts(dbDir: string, dbId: string, server: string, pl
   const stored = await storedTracts(dbDir, plan.dwi.facts.uid);
   // CURRENT = the same code, rules and inputs AND its Color FA beside it (critic 2026-10-06, finding 16: a job stopped
   // between storing the tracts and the map left tracts that counted as current forever, without the map).
-  const hasMap = async (uid: string) => !!(await Deno.stat(`${dbDir}/${colorFaPath(uid)}`).catch(() => null));
+  // ... and the b = 0 image beside it (2026-10-06: the substantia nigra for the tract review).
+  const hasMap = async (uid: string) => !!(await Deno.stat(`${dbDir}/${colorFaPath(uid)}`).catch(() => null)) && !!(await Deno.stat(`${dbDir}/${b0Path(uid)}`).catch(() => null));
   let current: (typeof stored)[number] | undefined;
   for (const s of stored) if (isCurrent(s, rules, inputs) && await hasMap(s.seriesUID)) { current = s; break; }
   if (current && !opts.force) return { state: "current", seriesUID: current.seriesUID };
@@ -388,15 +389,22 @@ export async function makeTracts(dbDir: string, dbId: string, server: string, pl
   // THE DIRECTION-COLORED MAP BESIDE THEM (the tract review, Contents/docs/TRACT-REVIEW.md, Ron's "1 a"): on the grid the
   // tracts are on, after every correction, so a viewer needs no fit. A display aid, regenerable from the scan: the
   // database's cache folder, named by the tracts' series. Its failure does not undo the tracts.
-  try { await writeColorFA(dbDir, written.seriesInstanceUID, r.fit); }
-  catch (e) { return { state: "made", ...out, said: `${out.said}; the direction-colored map was not stored (${(e as Error).message})` }; }
+  try { await writeColorFA(dbDir, written.seriesInstanceUID, r.fit); await writeB0(dbDir, written.seriesInstanceUID, r.fit); }
+  catch (e) { return { state: "made", ...out, said: `${out.said}; the direction-colored map or the b = 0 image was not stored (${(e as Error).message})` }; }
   return { state: "made", ...out };
 }
 
-export { colorFaPath };
+export { b0Path, colorFaPath };
 
 /** The Color FA of `fit` (tensor.ts colorFA: FA times the principal direction's components), one byte a color packed
  *  into one float sample as the slice views draw it (packRGB24, the Diffusion module's own form), as a gzipped NRRD. */
+/** The b = 0 image (the fit's S0) on the tracts' grid: heavily T2-weighted, so the substantia nigra and the red nucleus
+ *  show dark (iron), which the tract review uses to tell the crus from the tegmentum. */
+export async function writeB0(dbDir: string, tractsSeriesUID: string, fit: TensorFit): Promise<void> {
+  const bytes = await writeNrrd({ dims: fit.dims, ijkToRAS: fit.ijkToRAS, data: Float32Array.from(fit.S0), dtype: "<f4" } as Volume, { encoding: "gzip" });
+  await Deno.mkdir(`${dbDir}/SlicerAlbula-Cache`, { recursive: true });
+  await Deno.writeFile(`${dbDir}/${b0Path(tractsSeriesUID)}`, bytes);
+}
 export async function writeColorFA(dbDir: string, tractsSeriesUID: string, fit: TensorFit): Promise<void> {
   const rgb = colorFA(fit), n = fit.fa.length, packed = new Float32Array(n), q = (x: number) => Math.max(0, Math.min(255, Math.round(x * 255)));
   for (let v = 0; v < n; v++) packed[v] = packRGB24(q(rgb[3 * v]), q(rgb[3 * v + 1]), q(rgb[3 * v + 2]));
