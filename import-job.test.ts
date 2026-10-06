@@ -3,7 +3,9 @@
 // (critic, 2026-10-05, qa/2026-10-05-dmri-import-job.md, findings 6, 7, 11, 14).
 //   deno test -A --no-check --config ../../src/SlicerLive/deno.jsonc import-job.test.ts
 import { assert, assertEquals } from "jsr:@std/assert@1";
-import { anatomyOf, isCurrent, isDiffusionScan, jobRules, partnerOf, planCases, trackSets, type SeriesFacts } from "./import-job.ts";
+import { anatomyOf, colorFaPath, isCurrent, isDiffusionScan, jobRules, partnerOf, planCases, trackSets, writeColorFA, type SeriesFacts } from "./import-job.ts";
+import { packRGB24 } from "albula";
+import type { TensorFit } from "./tensor.ts";
 import { SHORT } from "./tractcloud/name-tracts.ts";
 import { UNNAMED } from "./tracts-dicom.ts";
 
@@ -65,4 +67,19 @@ Deno.test("track sets: one per named tract and side, the rest in Unnamed, last",
   const sl = [0, 1, 2, 3, 4].map((i) => new Float32Array([i, 0, 0, i + 1, 0, 0]));
   const sets = trackSets(sl, Int32Array.from([0, 0, 1, 2, SHORT]), Int8Array.from([-1, 1, 0, 0, 0]), new Uint8Array(5), names);
   assertEquals(sets.map((s) => [s.label, s.side, s.streamlines.length]), [["arcuate", -1, 1], ["arcuate", 1, 1], ["corpus callosum", 0, 1], [UNNAMED, 0, 2]]);
+});
+
+Deno.test("the direction-colored map is stored beside the tracts: the Color FA, packed as the slice views draw it", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    // Two voxels: FA 0.5 along left-right (red), FA 1 along up-down (blue).
+    const fit = { dims: [2, 1, 1], ijkToRAS: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], fa: new Float32Array([0.5, 1]), v1: new Float32Array([1, 0, 0, 0, 0, 1]) } as unknown as TensorFit;
+    await writeColorFA(dir, "1.2.3", fit);
+    const bytes = await Deno.readFile(`${dir}/${colorFaPath("1.2.3")}`);
+    const text = new TextDecoder().decode(bytes.subarray(0, 400)), at = text.indexOf("\n\n") + 2;
+    assert(/type: float/.test(text) && /encoding: gzip/.test(text) && /sizes: 2 1 1/.test(text), text);
+    const raw = new Uint8Array(await new Response(new Blob([bytes.subarray(at)]).stream().pipeThrough(new DecompressionStream("gzip"))).arrayBuffer());
+    const v = new Float32Array(raw.buffer);
+    assertEquals([...v], [packRGB24(128, 0, 0), packRGB24(0, 0, 255)]);
+  } finally { await Deno.remove(dir, { recursive: true }); }
 });

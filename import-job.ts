@@ -10,7 +10,7 @@
 // is the library; import-job-main.ts is the program. The critic's round of 2026-10-05 (qa/2026-10-05-dmri-import-job.md)
 // shaped it: a study at a time (finding 3), the module's rules for the T1 and the partner, tested (6, 7, 14), stored
 // tracts current only for the same code, rules and inputs (1, 11), states that say what will and will not change (13).
-import { parseInstances, synthstripBrainMask, startSegmentationServer, volumesOfSeries, type BrainMask, type Volume } from "albula";
+import { packRGB24, parseInstances, synthstripBrainMask, startSegmentationServer, volumesOfSeries, type BrainMask, type Volume } from "albula";
 import { indexSeries, seriesFilePaths, writeNrrd, type IndexSeries } from "albula/server";
 import { fromDicomVolumes } from "./dwi.ts";
 import { DIRECTION_CHECK_RULE } from "./gradient-check.ts";
@@ -21,6 +21,7 @@ import { REGISTRATION_RULE } from "./registration.ts";
 import { TRACKING_RULE } from "./tracking-rules.ts";
 import { OUTSIDE_RULE } from "./outside-brain.ts";
 import { stageText, type StageTimes } from "./planning.ts";
+import { colorFA, type TensorFit } from "./tensor.ts";
 import { SHORT } from "./tractcloud/name-tracts.ts";
 import { tractColor, TRACT_COLORS_VERSION } from "./tractcloud/tract-colors.ts";
 import type { TractCloudModel } from "./tractcloud/tractcloud.ts";
@@ -327,5 +328,23 @@ export async function makeTracts(dbDir: string, dbId: string, server: string, pl
   const res = await fetch(`${server.replace(/\/+$/, "")}/_db/${encodeURIComponent(dbId)}/_write/${encodeURIComponent(`tracts-${written.seriesInstanceUID}.dcm`)}`,
     { method: "POST", body: written.bytes as unknown as BodyInit, headers: { "content-type": "application/dicom", "x-albula-index": encodeURIComponent(JSON.stringify(meta)) } });
   if (!res.ok) return { state: "failed", why: `the server did not store the tracts (${res.status})` };
+  // THE DIRECTION-COLORED MAP BESIDE THEM (the tract review, Contents/docs/TRACT-REVIEW.md, Ron's "1 a"): on the grid the
+  // tracts are on, after every correction, so a viewer needs no fit. A display aid, regenerable from the scan: the
+  // database's cache folder, named by the tracts' series. Its failure does not undo the tracts.
+  try { await writeColorFA(dbDir, written.seriesInstanceUID, r.fit); }
+  catch (e) { return { state: "made", ...out, said: `${out.said}; the direction-colored map was not stored (${(e as Error).message})` }; }
   return { state: "made", ...out };
+}
+
+/** Where the direction-colored map of a tracts object lives, relative to the database's folder. */
+export const colorFaPath = (tractsSeriesUID: string) => `SlicerAlbula-Cache/colorfa-${tractsSeriesUID}.nrrd`;
+
+/** The Color FA of `fit` (tensor.ts colorFA: FA times the principal direction's components), one byte a color packed
+ *  into one float sample as the slice views draw it (packRGB24, the Diffusion module's own form), as a gzipped NRRD. */
+export async function writeColorFA(dbDir: string, tractsSeriesUID: string, fit: TensorFit): Promise<void> {
+  const rgb = colorFA(fit), n = fit.fa.length, packed = new Float32Array(n), q = (x: number) => Math.max(0, Math.min(255, Math.round(x * 255)));
+  for (let v = 0; v < n; v++) packed[v] = packRGB24(q(rgb[3 * v]), q(rgb[3 * v + 1]), q(rgb[3 * v + 2]));
+  const bytes = await writeNrrd({ dims: fit.dims, ijkToRAS: fit.ijkToRAS, data: packed, dtype: "<f4" } as Volume, { encoding: "gzip" });
+  await Deno.mkdir(`${dbDir}/SlicerAlbula-Cache`, { recursive: true });
+  await Deno.writeFile(`${dbDir}/${colorFaPath(tractsSeriesUID)}`, bytes);
 }
