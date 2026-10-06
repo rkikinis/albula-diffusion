@@ -26,7 +26,7 @@ import { SHORT } from "./tractcloud/name-tracts.ts";
 import { tractColor, TRACT_COLORS_VERSION } from "./tractcloud/tract-colors.ts";
 import type { TractCloudModel } from "./tractcloud/tractcloud.ts";
 import type { RapidParcModel } from "./rapidparc/rapidparc.ts";
-import { dicomToTracts, tractsToDicom, UNNAMED, type TractSetData } from "./tracts-dicom.ts";
+import { colorFaPath, dicomToTracts, tractsToDicom, UNNAMED, type TractSetData } from "./tracts-dicom.ts";
 
 /** The description every stored tracts object carries: how the job finds its own objects in the index. */
 export const TRACTS_DESCRIPTION = "Fiber tracts (whole brain)";
@@ -350,8 +350,7 @@ export async function makeTracts(dbDir: string, dbId: string, server: string, pl
   return { state: "made", ...out };
 }
 
-/** Where the direction-colored map of a tracts object lives, relative to the database's folder. */
-export const colorFaPath = (tractsSeriesUID: string) => `SlicerAlbula-Cache/colorfa-${tractsSeriesUID}.nrrd`;
+export { colorFaPath };
 
 /** The Color FA of `fit` (tensor.ts colorFA: FA times the principal direction's components), one byte a color packed
  *  into one float sample as the slice views draw it (packRGB24, the Diffusion module's own form), as a gzipped NRRD. */

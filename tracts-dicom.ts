@@ -32,6 +32,9 @@ const MODEL = {
   single: { CodeValue: "113231", CodingSchemeDesignator: "DCM", CodeMeaning: "Single Tensor" },
 };
 const DETERMINISTIC = { CodeValue: "113211", CodingSchemeDesignator: "DCM", CodeMeaning: "Deterministic" };
+/** Where the direction-colored map stored with a tracts object lives, relative to the database's folder (the import job
+ *  writes it, the Tract review reads it; Contents/docs/TRACT-REVIEW.md). */
+export const colorFaPath = (tractsSeriesUID: string) => `SlicerAlbula-Cache/colorfa-${tractsSeriesUID}.nrrd`;
 /** The Track Set holding the streamlines no tract name fits (Ron, 2026-10-01). */
 export const UNNAMED = "Unnamed";
 

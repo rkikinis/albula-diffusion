@@ -1485,3 +1485,5 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
 }
 
 queueModule(registerDiffusionPanel);
+// The second module of this extension: judging the corticospinal tract case by case (review.ts; it registers itself).
+import "./review.ts";
