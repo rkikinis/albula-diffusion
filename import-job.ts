@@ -12,7 +12,7 @@
 // tracts current only for the same code, rules and inputs (1, 11), states that say what will and will not change (13).
 import { packRGB24, parseInstances, synthstripBrainMask, startSegmentationServer, volumesOfSeries, type BrainMask, type Volume } from "albula";
 import { indexSeries, seriesFilePaths, writeNrrd, type IndexSeries } from "albula/server";
-import { fromDicomVolumes } from "./dwi.ts";
+import { fromDicomVolumes, type DiffusionSeries } from "./dwi.ts";
 import { DIRECTION_CHECK_RULE } from "./gradient-check.ts";
 import { wholeBrainTracts, PIPELINE_MAX_B } from "./pipeline.ts";
 import { DISTORTION_RULE } from "./distortion.ts";
@@ -389,7 +389,7 @@ export async function makeTracts(dbDir: string, dbId: string, server: string, pl
   // THE DIRECTION-COLORED MAP BESIDE THEM (the tract review, Contents/docs/TRACT-REVIEW.md, Ron's "1 a"): on the grid the
   // tracts are on, after every correction, so a viewer needs no fit. A display aid, regenerable from the scan: the
   // database's cache folder, named by the tracts' series. Its failure does not undo the tracts.
-  try { await writeColorFA(dbDir, written.seriesInstanceUID, r.fit); await writeB0(dbDir, written.seriesInstanceUID, r.fit); }
+  try { await writeColorFA(dbDir, written.seriesInstanceUID, r.fit); await writeB0(dbDir, written.seriesInstanceUID, r.dwi, r.fit); }
   catch (e) { return { state: "made", ...out, said: `${out.said}; the direction-colored map or the b = 0 image was not stored (${(e as Error).message})` }; }
   return { state: "made", ...out };
 }
@@ -398,17 +398,37 @@ export { b0Path, colorFaPath };
 
 /** The Color FA of `fit` (tensor.ts colorFA: FA times the principal direction's components), one byte a color packed
  *  into one float sample as the slice views draw it (packRGB24, the Diffusion module's own form), as a gzipped NRRD. */
-/** The b = 0 image (the fit's S0) on the tracts' grid: heavily T2-weighted, so the substantia nigra and the red nucleus
- *  show dark (iron), which the tract review uses to tell the crus from the tegmentum. */
-export async function writeB0(dbDir: string, tractsSeriesUID: string, fit: TensorFit): Promise<void> {
-  const bytes = await writeNrrd({ dims: fit.dims, ijkToRAS: fit.ijkToRAS, data: Float32Array.from(fit.S0), dtype: "<f4" } as Volume, { encoding: "gzip" });
+/** Write a cache file whole or not at all (critic 2026-10-06, b = 0 finding 2: a half-written file counted as current and
+ *  the review could not open the case): a temporary name beside it, then renamed over. */
+async function writeCacheFile(dbDir: string, rel: string, bytes: Uint8Array): Promise<void> {
   await Deno.mkdir(`${dbDir}/SlicerAlbula-Cache`, { recursive: true });
-  await Deno.writeFile(`${dbDir}/${b0Path(tractsSeriesUID)}`, bytes);
+  const tmp = `${dbDir}/SlicerAlbula-Cache/.${crypto.randomUUID()}.tmp`;
+  try { await Deno.writeFile(tmp, bytes); await Deno.rename(tmp, `${dbDir}/${rel}`); }
+  catch (e) { await Deno.remove(tmp).catch(() => {}); throw e; }
 }
+
+/** The b = 0 image on the tracts' grid: the MEAN OF THE MEASURED b = 0 images of the corrected scan (heavily
+ *  T2-weighted, so the substantia nigra and the red nucleus show dark from their iron -- Ron, 2026-10-06), not the tensor
+ *  fit's S0, which runs a few percent low at the fluid's edges (critic 2026-10-06, b = 0 finding 4). The fit's S0 only
+ *  when the scan is not on the fit's grid or has no b = 0 image. */
+export function measuredB0(dwi: DiffusionSeries, fit: TensorFit): Float32Array {
+  const zeros = dwi.bValues.map((b, i) => (b < 50 ? i : -1)).filter((i) => i >= 0);
+  const n = fit.dims[0] * fit.dims[1] * fit.dims[2];
+  const sameGrid = dwi.volumes[0] && dwi.volumes[0].dims.every((d, i) => d === fit.dims[i]) && dwi.ijkToRAS.every((m, i) => Math.abs(m - fit.ijkToRAS[i]) < 1e-4);
+  if (!zeros.length || !sameGrid) return Float32Array.from(fit.S0);
+  const out = new Float32Array(n);
+  for (const i of zeros) { const d = dwi.volumes[i].data as ArrayLike<number>; for (let v = 0; v < n; v++) out[v] += d[v] / zeros.length; }
+  return out;
+}
+export async function writeB0(dbDir: string, tractsSeriesUID: string, dwi: DiffusionSeries, fit: TensorFit): Promise<void> {
+  const bytes = await writeNrrd({ dims: fit.dims, ijkToRAS: fit.ijkToRAS, data: measuredB0(dwi, fit), dtype: "<f4" } as Volume, { encoding: "gzip" });
+  await writeCacheFile(dbDir, b0Path(tractsSeriesUID), bytes);
+}
+/** The Color FA of `fit` (tensor.ts colorFA: FA times the principal direction's components), one byte a color packed
+ *  into one float sample as the slice views draw it (packRGB24, the Diffusion module's own form), as a gzipped NRRD. */
 export async function writeColorFA(dbDir: string, tractsSeriesUID: string, fit: TensorFit): Promise<void> {
   const rgb = colorFA(fit), n = fit.fa.length, packed = new Float32Array(n), q = (x: number) => Math.max(0, Math.min(255, Math.round(x * 255)));
   for (let v = 0; v < n; v++) packed[v] = packRGB24(q(rgb[3 * v]), q(rgb[3 * v + 1]), q(rgb[3 * v + 2]));
   const bytes = await writeNrrd({ dims: fit.dims, ijkToRAS: fit.ijkToRAS, data: packed, dtype: "<f4" } as Volume, { encoding: "gzip" });
-  await Deno.mkdir(`${dbDir}/SlicerAlbula-Cache`, { recursive: true });
-  await Deno.writeFile(`${dbDir}/${colorFaPath(tractsSeriesUID)}`, bytes);
+  await writeCacheFile(dbDir, colorFaPath(tractsSeriesUID), bytes);
 }

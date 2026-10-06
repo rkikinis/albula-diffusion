@@ -3,9 +3,10 @@
 // (critic, 2026-10-05, qa/2026-10-05-dmri-import-job.md, findings 6, 7, 11, 14).
 //   deno test -A --no-check --config ../../src/SlicerLive/deno.jsonc import-job.test.ts
 import { assert, assertEquals } from "jsr:@std/assert@1";
-import { anatomyOf, b0Path, colorFaPath, importGraph, isCurrent, isDiffusionScan, jobRules, partnerOf, planCases, synthstripVersion, trackSets, writeB0, writeColorFA, type SeriesFacts } from "./import-job.ts";
+import { anatomyOf, b0Path, colorFaPath, importGraph, isCurrent, isDiffusionScan, jobRules, partnerOf, planCases, synthstripVersion, trackSets, measuredB0, writeB0, writeColorFA, type SeriesFacts } from "./import-job.ts";
 import { packRGB24 } from "albula";
 import type { TensorFit } from "./tensor.ts";
+import type { DiffusionSeries } from "./dwi.ts";
 import { SHORT } from "./tractcloud/name-tracts.ts";
 import { UNNAMED } from "./tracts-dicom.ts";
 
@@ -84,16 +85,24 @@ Deno.test("the direction-colored map is stored beside the tracts: the Color FA, 
   } finally { await Deno.remove(dir, { recursive: true }); }
 });
 
-Deno.test("the b = 0 image is stored beside the tracts, on their grid (the substantia nigra for the tract review)", async () => {
+Deno.test("the b = 0 image beside the tracts: the measured b = 0 images' mean on the fit's grid, written whole", async () => {
   const dir = await Deno.makeTempDir();
   try {
-    const fit = { dims: [2, 1, 1], ijkToRAS: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], S0: new Float32Array([812.5, 140]) } as unknown as TensorFit;
-    await writeB0(dir, "1.2.3", fit);
+    const M = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+    const fit = { dims: [2, 1, 1], ijkToRAS: M, S0: new Float32Array([790, 130]) } as unknown as TensorFit;
+    const vol = (a: number, b: number) => ({ dims: [2, 1, 1], ijkToRAS: M, data: new Float32Array([a, b]) });
+    // Two b = 0 images and one b = 1000: the mean of the two b = 0, not the fit's S0, and not the b = 1000.
+    const dwi = { volumes: [vol(800, 140), vol(825, 160), vol(300, 20)], bValues: [0, 5, 1000], gradients: [[0, 0, 0], [0, 0, 0], [1, 0, 0]], ijkToRAS: M } as unknown as DiffusionSeries;
+    assertEquals([...measuredB0(dwi, fit)], [812.5, 150]);
+    // Another grid: the fit's S0.
+    assertEquals([...measuredB0({ ...dwi, ijkToRAS: [2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 1] } as DiffusionSeries, fit)], [790, 130]);
+    await writeB0(dir, "1.2.3", dwi, fit);
     const bytes = await Deno.readFile(`${dir}/${b0Path("1.2.3")}`);
     const text = new TextDecoder().decode(bytes.subarray(0, 400)), at = text.indexOf("\n\n") + 2;
     assert(/type: float/.test(text) && /sizes: 2 1 1/.test(text), text);
     const raw = new Uint8Array(await new Response(new Blob([bytes.subarray(at)]).stream().pipeThrough(new DecompressionStream("gzip"))).arrayBuffer());
-    assertEquals([...new Float32Array(raw.buffer)], [812.5, 140]);
+    assertEquals([...new Float32Array(raw.buffer)], [812.5, 150]);
+    assertEquals([...Deno.readDirSync(`${dir}/SlicerAlbula-Cache`)].filter((e) => e.name.endsWith(".tmp")).length, 0, "no temporary file left");
   } finally { await Deno.remove(dir, { recursive: true }); }
 });
 

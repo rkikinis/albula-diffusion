@@ -323,6 +323,14 @@ function registerTractReview(ctx: ModuleContext): void {
     const raw = await nrrdDecode(f, body, sizes[0] * sizes[1] * sizes[2] * 4);
     const data = new Float32Array(raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength));
     const res = await loadVolumeIntoScene(live, store, { dims: sizes, ijkToRAS: nrrdGeometry(f).ijkToRAS, data, dtype: "<f4", name }, { name, extra: { ...(rgb ? { rgb24: true } : {}), autoVolumeRendering: false, recomputable: true } });
+    if (!rgb) {
+      // THE b = 0's WINDOW ON THE BRAIN (critic 2026-10-06, b = 0 finding 5): the automatic one spans the eyes and the
+      // ventricles, the brightest things on it, and leaves the brain dim. From the 30th to the 92nd percentile of the
+      // non-zero voxels (on PAT08: about 60 to 380, the tissue's range).
+      const v = Float32Array.from(data.filter((x) => x > 1)).sort(), q = (t: number) => v[Math.floor(t * (v.length - 1))];
+      if (v.length > 100) { const lo = q(0.3), hi = q(0.92);
+        for (const [k, val] of [["window", hi - lo], ["level", (hi + lo) / 2], ["autoWindowLevel", false]] as const) live.write({ op: "patch", id: res.displayId, path: `#/${k}`, value: val }); }
+    }
     return res.imageId;
   }
 
@@ -380,7 +388,7 @@ function registerTractReview(ctx: ModuleContext): void {
       const mapId = await loadColorFA(c.tracts, `${c.patient} Color FA (made at import)`);
       // The b = 0 image (T2-weighted: the substantia nigra and the red nucleus dark, Ron 2026-10-06), for a view's gear ›
       // Image; tracts made before it was stored have none.
-      await loadStored(b0Path(c.tracts), `${c.patient} b=0 (made at import)`, false);
+      const b0Id = await loadStored(b0Path(c.tracts), `${c.patient} b=0 (made at import)`, false);
       for (const cmp of [...live.nodes.values()].filter((n) => n.type === "sliceComposite")) {
         if (t1Node) live.write({ op: "patch", id: cmp.id, path: "#/refs/background", value: [t1Node.id] });
         live.write({ op: "patch", id: cmp.id, path: "#/refs/foreground", value: mapId ? [mapId] : [] });
@@ -407,7 +415,7 @@ function registerTractReview(ctx: ModuleContext): void {
       draw(sl);
       lookFrom3D("A");
       const why = tumorX === undefined ? (patientSegs.length ? "no outline named as a tumor was found for this patient, so the left is shown" : "no tumor outline for this patient, so the left is shown") : `the tumor is on the ${side < 0 ? "right" : "left"}`;
-      say([`${c.patient}: the ${side < 0 ? "left" : "right"} corticospinal tract (${why}), ${sl.length.toLocaleString()} fibers`, ...(mapId ? [] : ["the direction-colored map was not stored with these tracts"]), ...(levelsSaid ? [levelsSaid] : []), ...(r.failures.length ? [`not everything loaded: ${r.failures[0]}`] : [])].join("; ") + ".");
+      say([`${c.patient}: the ${side < 0 ? "left" : "right"} corticospinal tract (${why}), ${sl.length.toLocaleString()} fibers`, ...(mapId ? [] : ["the direction-colored map was not stored with these tracts"]), ...(b0Id ? [] : ["no b = 0 image was stored with these tracts"]), ...(levelsSaid ? [levelsSaid] : []), ...(r.failures.length ? [`not everything loaded: ${r.failures[0]}`] : [])].join("; ") + ".");
     } catch (e) {
       say(`${c.patient} could not be opened: ${(e as Error).message}`);
     } finally { busy = ""; render(); }
