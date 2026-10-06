@@ -55,3 +55,56 @@ export function trimEnds(f: Float32Array, mm: number): Float32Array | null {
   out.push(...at(b));
   return Float32Array.from(out);
 }
+
+/**
+ * THE OUTLINE OF WHERE A TRACT CROSSES A SLICE (Ron, 2026-10-06, on the Tract review: dots hide the direction-colored
+ * map under them, and that map is what shows the tract in the posterior limb of the internal capsule and in front of the
+ * substantia nigra). Every crossing is widened to a disk of `radiusMm`, and the edge of their union is returned as
+ * closed loops in RAS mm: the bundle becomes one outline with the map visible inside it, a stray fiber a small circle
+ * of its own. `e1`, `e2` are the slice's in-plane axes (unit vectors), `origin` a point on it. Grid: `cellMm`.
+ */
+export function crossingOutlines(points: [number, number, number][], origin: [number, number, number], e1: [number, number, number], e2: [number, number, number], radiusMm = 1, cellMm = 0.5): [number, number, number][][] {
+  if (!points.length) return [];
+  const uv = points.map((p) => {
+    const d = [p[0] - origin[0], p[1] - origin[1], p[2] - origin[2]];
+    return [d[0] * e1[0] + d[1] * e1[1] + d[2] * e1[2], d[0] * e2[0] + d[1] * e2[1] + d[2] * e2[2]];
+  });
+  const pad = radiusMm + 2 * cellMm;
+  let u0 = Infinity, v0 = Infinity, u1 = -Infinity, v1 = -Infinity;
+  for (const [u, v] of uv) { u0 = Math.min(u0, u); v0 = Math.min(v0, v); u1 = Math.max(u1, u); v1 = Math.max(v1, v); }
+  u0 -= pad; v0 -= pad;
+  const W = Math.ceil((u1 + pad - u0) / cellMm), H = Math.ceil((v1 + pad - v0) / cellMm);
+  if (W * H > 4e6) return [];   // a slice-wide spray: no outline is meaningful (and none is drawn)
+  const fill = new Uint8Array(W * H), rc = Math.ceil(radiusMm / cellMm) + 1, r2 = radiusMm * radiusMm;
+  for (const [u, v] of uv) {
+    const ci = Math.floor((u - u0) / cellMm), cj = Math.floor((v - v0) / cellMm);
+    for (let j = Math.max(0, cj - rc); j <= Math.min(H - 1, cj + rc); j++) for (let i = Math.max(0, ci - rc); i <= Math.min(W - 1, ci + rc); i++) {
+      const du = u0 + (i + 0.5) * cellMm - u, dv = v0 + (j + 0.5) * cellMm - v;
+      if (du * du + dv * dv <= r2) fill[j * W + i] = 1;
+    }
+  }
+  const at = (i: number, j: number) => (i >= 0 && j >= 0 && i < W && j < H ? fill[j * W + i] : 0);
+  // The filled cells' boundary edges, each running counterclockwise around its cell, keyed by the corner it starts at.
+  const next = new Map<number, number[]>(), key = (i: number, j: number) => j * (W + 1) + i;
+  const add = (a: number, b: number) => { const l = next.get(a); if (l) l.push(b); else next.set(a, [b]); };
+  for (let j = 0; j < H; j++) for (let i = 0; i < W; i++) {
+    if (!fill[j * W + i]) continue;
+    if (!at(i, j - 1)) add(key(i, j), key(i + 1, j));
+    if (!at(i + 1, j)) add(key(i + 1, j), key(i + 1, j + 1));
+    if (!at(i, j + 1)) add(key(i + 1, j + 1), key(i, j + 1));
+    if (!at(i - 1, j)) add(key(i, j + 1), key(i, j));
+  }
+  const loops: [number, number, number][][] = [];
+  for (const [start, outs] of next) {
+    while (outs.length) {
+      const corners: number[] = [start];
+      let cur = outs.pop()!;
+      while (cur !== start) { corners.push(cur); const o = next.get(cur); if (!o?.length) break; cur = o.pop()!; }
+      // Corner cutting (two rounds) takes the grid's stairs off; the loop stays within half a cell of the edge.
+      let pts = corners.map((c) => [u0 + (c % (W + 1)) * cellMm, v0 + Math.floor(c / (W + 1)) * cellMm]);
+      for (let k = 0; k < 2; k++) pts = pts.flatMap((p, n) => { const q = pts[(n + 1) % pts.length]; return [[0.75 * p[0] + 0.25 * q[0], 0.75 * p[1] + 0.25 * q[1]], [0.25 * p[0] + 0.75 * q[0], 0.25 * p[1] + 0.75 * q[1]]]; });
+      loops.push(pts.map(([u, v]) => [origin[0] + u * e1[0] + v * e2[0], origin[1] + u * e1[1] + v * e2[1], origin[2] + u * e1[2] + v * e2[2]]));
+    }
+  }
+  return loops;
+}

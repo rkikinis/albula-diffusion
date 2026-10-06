@@ -1,5 +1,5 @@
 import { assert, assertEquals } from "jsr:@std/assert@1";
-import { sliceCrossings, trimEnds } from "./tract-slice.ts";
+import { crossingOutlines, sliceCrossings, trimEnds } from "./tract-slice.ts";
 
 Deno.test("a straight streamline crosses an axial plane once, at the right place, with its direction", () => {
   const f = Float32Array.from([0, 0, -2, 1, 0, -1, 2, 0, 0.5, 3, 0, 2]);
@@ -36,4 +36,25 @@ Deno.test("trimming the ends: the length less twice the trim, the cut points on 
   assertEquals(Array.from(t.slice(-3)).map((x) => +x.toFixed(5)), [10, 3.5, 0]);
   assertEquals(trimEnds(f, 8), null);
   assertEquals(trimEnds(f, 0), f);
+});
+
+Deno.test("the outline of the crossings: one loop around the bundle, its own small loop around a stray fiber", () => {
+  const z = 7, bundle: [number, number, number][] = [];
+  for (let k = 0; k < 40; k++) bundle.push([10 + 1.5 * Math.cos(k), -5 + 1.5 * Math.sin(k * 1.3), z]);
+  const stray: [number, number, number] = [22, -5, z];
+  const loops = crossingOutlines([...bundle, stray], [0, 0, z], [1, 0, 0], [0, 1, 0], 1, 0.5);
+  assertEquals(loops.length, 2, "the bundle and the stray fiber");
+  const inside = (loop: [number, number, number][], x: number, y: number) => {
+    let w = false;
+    for (let i = 0, j = loop.length - 1; i < loop.length; j = i++) {
+      const [xi, yi] = loop[i], [xj, yj] = loop[j];
+      if ((yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) w = !w;
+    }
+    return w;
+  };
+  const around = loops.find((l) => inside(l, 10, -5))!, small = loops.find((l) => inside(l, 22, -5))!;
+  assert(around && small && around !== small, "each loop encloses its own crossings");
+  for (const p of small) assert(Math.abs(Math.hypot(p[0] - 22, p[1] + 5) - 1) < 0.6, "the stray fiber's loop lies about 1 mm from it");
+  for (const l of loops) for (const p of l) assertEquals(p[2], z, "on the slice");
+  assertEquals(crossingOutlines([], [0, 0, 0], [1, 0, 0], [0, 1, 0]), []);
 });

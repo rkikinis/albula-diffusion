@@ -18,11 +18,13 @@ import {
 } from "albula";
 import { TUMOR } from "./face.ts";
 import { colorFaPath, dicomToTracts, type TractSetData } from "./tracts-dicom.ts";
-import { sliceCrossings } from "./tract-slice.ts";
+import { crossingOutlines, sliceCrossings } from "./tract-slice.ts";
 
 export const CST = "corticospinal tract";
 /** The fibers' one color (the mockup's yellow) and their tube radius in 3D (mm). */
 const FIBER_RGB: [number, number, number] = [1, 0.83, 0.3], RADIUS = 0.35;
+/** How far around each crossing the outline on a slice runs (mm; about 1 voxel of the 1 mm T1). */
+const OUTLINE_MM = 1;
 const REVIEWS = "tract-review.json";
 
 // ── The pure parts (tested: review.test.ts) ─────────────────────────────────────────────────────────────────────────
@@ -219,15 +221,19 @@ function registerTractReview(ctx: ModuleContext): void {
     old?.destroy?.();
     drawDots();
   }
-  /** Where the tract crosses each slice view, as dots (the Diffusion module's way of showing tracts on slices). */
+  /** Where the tract crosses each slice view, as OUTLINES (Ron, 2026-10-06: dots hid the direction-colored map, which is
+   *  what shows the tract in the internal capsule's posterior limb and in front of the substantia nigra). */
   function drawDots(): void {
     const view = live.view; if (!view?.setOverlay) return;
     for (const n of live.nodes.values()) {
       if (n.type !== "view" || n.kind !== "slice" || !Array.isArray(n.sliceToRAS)) continue;
       const m = n.sliceToRAS as number[], L = Math.hypot(m[2], m[6], m[10]) || 1, nrm: [number, number, number] = [m[2] / L, m[6] / L, m[10] / L];
       const d = typeof n.offset === "number" ? n.offset : m[3] * nrm[0] + m[7] * nrm[1] + m[11] * nrm[2];
-      const cs = drawn.length ? sliceCrossings([drawn], { origin: [nrm[0] * d, nrm[1] * d, nrm[2] * d], normal: nrm }) : [];
-      view.setOverlay(String(n.layoutName ?? n.name), "tract-review", cs.map((c) => ({ kind: "point" as const, ras: c.p, color: [...FIBER_RGB, 1], radiusPx: 1.6, inPlaneOnly: true })));
+      const o: [number, number, number] = [nrm[0] * d, nrm[1] * d, nrm[2] * d];
+      const cs = drawn.length ? sliceCrossings([drawn], { origin: o, normal: nrm }) : [];
+      const unit = (a: number, b: number, c: number): [number, number, number] => { const l = Math.hypot(a, b, c) || 1; return [a / l, b / l, c / l]; };
+      const loops = crossingOutlines(cs.map((c) => c.p), o, unit(m[0], m[4], m[8]), unit(m[1], m[5], m[9]), OUTLINE_MM);
+      view.setOverlay(String(n.layoutName ?? n.name), "tract-review", loops.map((points) => ({ kind: "polyline" as const, points, color: [...FIBER_RGB, 1], widthPx: 1.5, closed: true })));
     }
   }
   live.subscribe((c) => {
