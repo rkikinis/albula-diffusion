@@ -2,7 +2,7 @@
   "name": "diffusion",
   "repository": "albula-diffusion",
   "version": "0.2.0",
-  "sdk": 7,
+  "sdk": 8,
   "about": "Diffusion MRI for brain tumor planning: reading diffusion data from every major scanner, FA and Color FA, distortion correction, UKF two-tensor free-water tractography on the graphics card, tract names from RapidParc, the tracts near a tumor.",
   "entries": {
     "hooks": "hooks.ts",
