@@ -5,7 +5,8 @@
 import { assert } from "jsr:@std/assert@1";
 import type { DiffusionSeries } from "./dwi.ts";
 import { applyMotion, estimateMotion, logRot, rotVec, shellsOf, type Move } from "./motion.ts";
-import type { Rigid } from "./registration.ts";
+import { resampleOntoT1, type Rigid } from "./registration.ts";
+import { applyField, fieldFromCenters } from "./distortion.ts";
 
 const DIMS: [number, number, number] = [48, 52, 38], H = 2.5;
 const M = [-H, 0, 0, 58.75, 0, H, 0, -63.75, 0, 0, H, -46.25, 0, 0, 0, 1];   // a scan in LAS-like orientation; the head inside it
@@ -160,4 +161,67 @@ Deno.test("eddy currents: with rules 2 and 3 every brain point is read where it 
   console.log(`  rule 3: points ${e3.toFixed(3)} mm; slopes off by ${s3.toFixed(3)} (rule 2 ${s2.toFixed(3)}) mm per 100 mm`);
   assert(r3.rule === 3 && s3 < s2, `tying the slopes to the gradient did not bring them nearer the truth: ${s3.toFixed(3)} against ${s2.toFixed(3)}`);
   assert(e3 < e2 + 0.02, `rule 3 reads points worse than rule 2: ${e3.toFixed(3)} against ${e2.toFixed(3)} mm`);
+});
+
+/** The largest common move of the diffusion-weighted images (mean of their six numbers), in mm and degrees. */
+function commonMove(moves: Move[], bValues: number[]): { mm: number; degrees: number } {
+  const dw = bValues.map((b, i) => (b > 50 ? i : -1)).filter((i) => i >= 0), v = [0, 0, 0, 0, 0, 0];
+  for (const i of dw) { const w = logRot(moves[i].R); for (let q = 0; q < 3; q++) { v[q] += w[q] / dw.length; v[3 + q] += moves[i].t[q] / dw.length; } }
+  return { mm: Math.hypot(v[3], v[4], v[5]), degrees: Math.hypot(v[0], v[1], v[2]) * 180 / Math.PI };
+}
+
+Deno.test("with a distortion field, a still head stays still: the field is not applied twice (critic 2026-10-05, finding 1)", async () => {
+  const { bValues, gradients } = protocol(), c: [number, number, number] = [0, 0, 0];
+  const still = scan(bValues.map(() => move([0, 0, 0], [0, 0, 0], c)), bValues, gradients, 2);
+  // A smooth field along j of up to 2 voxels; the scan is distorted by it, and the correction is given it.
+  const [nx, ny, nz] = DIMS, cen = new Float32Array(nx * ny * nz);
+  for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) cen[(k * ny + j) * nx + i] = 2 * Math.exp(-(((i - nx / 2) / 12) ** 2 + ((j - ny / 2 - 6) / 14) ** 2 + ((k - nz / 3) / 9) ** 2));
+  const fit = fieldFromCenters(DIMS, 1, cen);
+  for (const v of still.volumes) v.data = applyField(fit, v.data as ArrayLike<number>, 1);
+  const est = await estimateMotion(still, { fit, sign: -1 });
+  const cm = commonMove(est.moves, bValues);
+  console.log(`  common move of the diffusion-weighted images: ${cm.mm.toFixed(3)} mm, ${cm.degrees.toFixed(3)}° (before the fix: 2.2 mm); largest ${est.largest.mm} mm`);
+  assert(cm.mm < 0.3 && cm.degrees < 0.3, `the diffusion-weighted images were moved together by ${cm.mm.toFixed(2)} mm and ${cm.degrees.toFixed(2)}°`);
+});
+
+Deno.test("two shells: a still head stays still (the extrapolation to b = 0 needs three; critic 2026-10-05, finding 2)", async () => {
+  const c: [number, number, number] = [0, 0, 0], { bValues: b3, gradients } = protocol();
+  const bValues = b3.map((b) => (b === 0 ? 0 : b === 2800 ? 2000 : 1000));        // b 1000 and 2000 only
+  const still = scan(bValues.map(() => move([0, 0, 0], [0, 0, 0], c)), bValues, gradients, 4);
+  const est = await estimateMotion(still);
+  console.log(`  largest move ${est.largest.mm} mm, ${est.largest.degrees}° (before the fix: 7.3 mm, 19.3°)`);
+  assert(est.largest.mm < 1 && est.largest.degrees < 1, `a still head was moved ${est.largest.mm} mm and ${est.largest.degrees}°`);
+});
+
+Deno.test("the single resampling reads exactly what the estimate read: moves, field and eddy shifts, and the gradients turned (critic 2026-10-05, finding 11)", async () => {
+  const { bValues, gradients } = protocol(), c: [number, number, number] = [3, -5, 2];
+  const n = bValues.length, dwi = scan(bValues.map(() => move([0, 0, 0], [0, 0, 0], [0, 0, 0])), bValues, gradients, 0);
+  // Known moves about an off-center point, eddy slopes on the diffusion-weighted images, and a field.
+  const moves: Move[] = bValues.map((b, v) => ({ ...move([0.8 * Math.sin(v), -0.5 * Math.cos(v), 0.3], [0.6 * Math.cos(v), 0.4, -0.7 * Math.sin(v)], c), ...(b > 0 ? { ec: { g: [0.5 * Math.sin(v), 0.8, -0.3] as [number, number, number], e: [0, 1, 0] as [number, number, number] } } : {}) }));
+  const [nx, ny, nz] = DIMS, cen = new Float32Array(nx * ny * nz);
+  for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) cen[(k * ny + j) * nx + i] = 1.5 * Math.sin(i / 9) * Math.cos(k / 7);
+  const field = { fit: fieldFromCenters(DIMS, 1, cen), sign: -1 as const };
+  const a = await applyMotion(dwi, { moves }, field);
+  const b = await resampleOntoT1(dwi, { R: [1, 0, 0, 0, 1, 0, 0, 0, 1], t: [0, 0, 0], c: [0, 0, 0] }, { dims: DIMS, ijkToRAS: M }, field, { motion: moves });
+  let worst = 0, mean = 0, cnt = 0;
+  for (let v = 0; v < n; v += 7) { const x = a.volumes[v].data as Float32Array, y = b.volumes[v].data as Float32Array; assert(x.length === y.length, "the two grids differ"); for (let i = 0; i < x.length; i++) { worst = Math.max(worst, Math.abs(x[i] - y[i])); mean += Math.abs(x[i]); cnt++; } }
+  console.log(`  largest voxel difference ${worst.toExponential(2)} on a mean signal of ${(mean / cnt).toFixed(1)}`);
+  assert(worst < 1e-2, `the resampling and the estimate's reading differ by ${worst}`);
+  // Each gradient turned into the reference by its own move: Rᵥᵀ g (both paths).
+  for (let v = 0; v < n; v++) {
+    const R = moves[v].R, g = gradients[v], want = [R[0] * g[0] + R[3] * g[1] + R[6] * g[2], R[1] * g[0] + R[4] * g[1] + R[7] * g[2], R[2] * g[0] + R[5] * g[1] + R[8] * g[2]];
+    for (let q = 0; q < 3; q++) { assert(Math.abs(a.gradients[v][q] - want[q]) < 1e-9, "applyMotion's gradient not Rᵀg"); assert(Math.abs(b.gradients[v][q] - want[q]) < 1e-9, "resampleOntoT1's gradient not Rᵀg"); }
+  }
+});
+
+Deno.test("rule 3 always has its free round (critic 2026-10-05, finding 6); a six-direction scan says it was not corrected (finding 7)", async () => {
+  const c: [number, number, number] = [0, 0, 0], { bValues, gradients } = protocol();
+  const K = [[1.2, 0.3, 0], [0.2, 1.5, 0.1], [0, 0.4, 0.8]];
+  const eddy: Eddy = { e: [0, 1, 0], g: gradients.map((d, v) => K.map((row) => Math.sqrt(bValues[v] / 2800) * (row[0] * d[0] + row[1] * d[1] + row[2] * d[2]))), d0: bValues.map(() => 0) };
+  const dwi = scan(bValues.map(() => move([0, 0, 0], [0, 0, 0], c)), bValues, gradients, 2, eddy);
+  const one = await estimateMotion(dwi, undefined, { rule: 3, peAxis: 1, rounds: 1 });
+  assert(one.rule === 3 && (one.eddyMm ?? 0) > 0.2, `rule 3 with one round found no eddy currents (${one.eddyMm} mm)`);
+  const six = scan([0, 1000, 1000, 1000, 1000, 1000, 1000].map(() => move([0, 0, 0], [0, 0, 0], c)), [0, 1000, 1000, 1000, 1000, 1000, 1000], [[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1], [0.7071, 0.7071, 0], [0.7071, 0, 0.7071], [0, 0.7071, 0.7071]], 2);
+  const r6 = await estimateMotion(six);
+  assert(r6.rule === 0 && /not corrected/.test(r6.said) && !/NaN/.test(r6.said), `a six-direction scan: "${r6.said}"`);
 });

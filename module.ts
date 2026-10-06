@@ -70,7 +70,7 @@ interface Scan { browserId: string; name: string; frameIds: string[]; bValues: n
   /** The scanner's record of the phase-encoding direction (diffusion-vendors.ts phaseEncodingOf: "j-", or "ROW" / "COL"). */
   phaseEncoding?: string }
 /** What has been computed for a scan, kept while the scan is in the scene. */
-interface Computed { dwi: DiffusionSeries; fit: TensorFit; maxB: number; corrected: string; partnerId: string; /** motion.ts: the head-movement rule the scan was put in place by. */ motionRule: MotionRuleId; /** The anatomy MRI the scan was aligned to ("" none). */ anatomyId?: string; /** The tracking rule the fit's brain mask serves (tracking-rules.ts): 2 until rule 3's brain is put in (brainFor). */ rule: TrackingRuleId; /** Rule 3's brain: what was used, in words, and why not when it was not. */ brain: BrainState; faId?: string; colorFaId?: string; ukf?: UkfData; fod?: FodVolume }
+interface Computed { dwi: DiffusionSeries; fit: TensorFit; maxB: number; corrected: string; partnerId: string; /** motion.ts: the head-movement rule asked for (the cache's key), the rule actually applied, and what it did in words. */ motionAsked: MotionRuleId; motionRule: MotionRuleId; movement?: string; /** The anatomy MRI the scan was aligned to ("" none). */ anatomyId?: string; /** The tracking rule the fit's brain mask serves (tracking-rules.ts): 2 until rule 3's brain is put in (brainFor). */ rule: TrackingRuleId; /** Rule 3's brain: what was used, in words, and why not when it was not. */ brain: BrainState; faId?: string; colorFaId?: string; ukf?: UkfData; fod?: FodVolume }
 /** RULE 3's BRAIN for a fitted scan (critic, 2026-10-04, findings 2, 4, 8, 9): asked of the segmentation server when the
  *  maps are made but not waited for -- the maps do not use it -- and waited for by the tracking (brainFor). A failure
  *  that can go away (no server, a server without SynthStrip, a failed job) is asked again at the next tracking. */
@@ -229,7 +229,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     render();
   };
   let correct = true;                                        // distortion correction when a reversed scan is there
-  let preCorrected = false;                                  // the scan was corrected for head movement before (a preprocessed dataset)
+  const preCorrected = new Set<string>();                    // scans (browser ids) corrected for head movement before loading (preprocessed)
   let method: Method = "ukf";
   /** dcm2niix's second opinion per scan (second-opinion.ts): running, its answer, or why it could not run. */
   const checks = new Map<string, { running: true } | { result: SecondOpinion } | { error: string }>();
@@ -439,8 +439,8 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     // to it and read once onto its axes, so the maps and the tracts are made in its space.
     const anat = anatomyFor(scan), anatOk = anat && !moved(anat) ? anat : undefined;
     // Still valid when made with the same b range, the same reversed scan (or none) and the same anatomy (or none).
-    const motionRule: MotionRuleId = preCorrected ? 0 : MOTION_RULE;
-    if (have && have.maxB === adv.maxB && have.partnerId === (partner?.id ?? "") && (have.anatomyId ?? "") === (anatOk?.id ?? "") && have.motionRule === motionRule) return have;
+    const motionRule: MotionRuleId = preCorrected.has(scan.browserId) ? 0 : MOTION_RULE;
+    if (have && have.maxB === adv.maxB && have.partnerId === (partner?.id ?? "") && (have.anatomyId ?? "") === (anatOk?.id ?? "") && have.motionAsked === motionRule) return have;
     if (have) dropMaps(have);
     if (moved(live.nodes.get(scan.frameIds[0]))) throw new Error("the scan has a transform (Transforms module); the maps and tracts are not computed on a moved scan yet — harden or remove the transform first");
     say(`Reading ${scan.frameIds.length} diffusion volumes…`);
@@ -466,7 +466,8 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       ...(anatOk && z ? { t1: { dims: anatOk.dims as [number, number, number], ijkToRAS: anatOk.ijkToRAS as number[], data: z.data as ArrayLike<number> } } : {}),
       motionRule, ...(scan.phaseEncoding ? { phaseEncoding: scan.phaseEncoding } : {}), times, say });
     dwi = prep.dwi;
-    if (prep.said) corrected += `; ${prep.said}`;
+    // The distortion line keeps the alignment; the movement has its own row (critic, 2026-10-05, finding 7).
+    if (prep.alignmentSaid) corrected += `; ${prep.alignmentSaid}`;
     const aligned = !!prep.alignment && !prep.alignment.doubt;
     const t1 = performance.now();
     say("Fitting the diffusion tensor…");
@@ -482,9 +483,9 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       : !anatOk ? { note: fromScan + "the MRI of the anatomy has a transform (Transforms module): harden or remove it", reason: "moved" }
       : !aligned ? { note: fromScan + "the scan could not be aligned to the MRI of the anatomy", reason: "doubt" }
       : { note: "", ask: askBrain(anatOk.id) };
-    const c: Computed = { dwi, fit, maxB: adv.maxB, corrected, motionRule, partnerId: partner?.id ?? "", anatomyId: anatOk?.id ?? "", rule: wantT1 ? 2 : TRACKING_RULE, brain };
+    const c: Computed = { dwi, fit, maxB: adv.maxB, corrected, motionAsked: motionRule, motionRule: prep.motionRule, ...(prep.movementSaid ? { movement: prep.movementSaid } : {}), partnerId: partner?.id ?? "", anatomyId: anatOk?.id ?? "", rule: wantT1 ? 2 : TRACKING_RULE, brain };
     computed.set(scan.browserId, c);
-    say(`Maps made from ${fit.used.length} volumes up to b = ${adv.maxB}; distortion ${corrected}. ${stageText(times)}.`);
+    say(`Maps made from ${fit.used.length} volumes up to b = ${adv.maxB}; distortion ${corrected}${c.movement ? `; ${c.movement}` : ""}. ${stageText(times)}.`);
     return c;
   }
   const dropMaps = (c: Computed) => {
@@ -1157,15 +1158,17 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     if (MOTION_RULE !== 0) {
       const mv = document.createElement("label");
       mv.style.cssText = "display:flex;align-items:center;gap:6px";
-      const mcb = document.createElement("input"); mcb.type = "checkbox"; mcb.checked = preCorrected; mcb.disabled = !!busy;
+      const mcb = document.createElement("input"); mcb.type = "checkbox"; mcb.checked = preCorrected.has(scan.browserId); mcb.disabled = !!busy;
       mcb.onchange = () => {
-        preCorrected = mcb.checked;
+        if (mcb.checked) preCorrected.add(scan.browserId); else preCorrected.delete(scan.browserId);
         const was = shownNow(scan);
         const c = computed.get(scan.browserId); if (c) { dropMaps(c); computed.delete(scan.browserId); }
         if (was === "fa" || was === "colorfa") void showMap(scan, was); else render();
       };
       mv.append(mcb, "Already corrected (a preprocessed scan)");
-      mv.title = c0?.motionRule ? `This scan's images were put back where the head was: ${c0.corrected.split("; ").find((x) => x.startsWith("head movement")) ?? "corrected"}.` : "Tick when the scan was corrected for head movement before it was loaded, so it is not corrected twice.";
+      // What was done to THIS scan (the rule actually applied), or what the tick is for. A preprocessed scan is often
+      // corrected for distortion too: the Distortion row above switches that off.
+      mv.title = c0?.movement ? `This scan: ${c0.movement}.` : "Tick when this scan was corrected for head movement before it was loaded, so it is not corrected twice. A preprocessed scan is often corrected for distortion too: switch that off in the Distortion row.";
       shell.row(maps, "Head movement").append(mv);
     }
     // dcm2niix's reading of the same files, compared (second-opinion.ts).

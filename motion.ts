@@ -8,11 +8,13 @@
 // model of the signal and written from that description, not from its code:
 //   - the reference is the mean of the b = 0 images; each b = 0 is aligned to it;
 //   - a diffusion-weighted image cannot be aligned to the b = 0 (at b 2800 it is a different picture), so it is aligned
-//     to what it should look like: a prediction from the OTHER images of its shell -- per voxel, a smooth function of the
-//     gradient direction (the even polynomials of degree 4, the same functions as spherical harmonics to order 4; degree
-//     2 for a shell of fewer than 22 images), fitted with the image itself left out;
-//   - a shell's average position is invisible to its own predictions, so it is pinned to the b = 0 images' movement at
-//     the times its images were taken (interpolated between the b = 0 images spread through the scan);
+//     to what it should look like: a prediction from ALL the other images, per voxel the kurtosis model on the log
+//     signal (scanPredictor; for a scan with one diffusion-weighted shell, a polynomial of the gradient direction of
+//     degree 4, or 2 under 22 images), fitted with the image itself left out;
+//   - the diffusion-weighted images' common position is invisible to their predictions of each other. With three shells
+//     or more it is found by extrapolating them to b = 0 (the fit's intercept, a b = 0-like picture) and aligning that to
+//     the b = 0 mean; with one or two shells each shell is pinned instead to the b = 0 images' movement at the times its
+//     images were taken (interpolated between the b = 0 images spread through the scan);
 //   - two rounds: the second builds its predictions from images already put back.
 // The alignment is rigid, least squares with a gain and an offset, Gauss-Newton with Levenberg-Marquardt damping, on a
 // grid twice as coarse and then on the scan's own, inside the brain (median_otsu of the b = 0 mean, grown by 2 voxels).
@@ -51,6 +53,8 @@ export type MotionRuleId = keyof typeof MOTION_RULES;
  *  square on PAT16 and PAT25); eddy currents (rule 2) left out, their per-image estimates being noise beyond one axis on
  *  ds001226's scanner (dmri-review, 2026-10-05 night). */
 export const MOTION_RULE: MotionRuleId = 1;
+/** A common move of all the diffusion-weighted images larger than this is a failed fit, not a movement (step 4). */
+const COMMON_MOVE_LIMIT = { mm: 3, degrees: 3 };
 
 type Field = { fit: FieldFit; sign: 1 | -1 };
 /** A move with, for a diffusion-weighted image under rule 2, its eddy-current shift along the phase-encoding axis e (a
@@ -97,9 +101,11 @@ const mul3 = (A: number[], B: number[]) => [0, 1, 2].flatMap((r) => [0, 1, 2].ma
 /** Solve A x = b (n×n, row-major) by elimination with partial pivoting; undefined when singular. */
 function solve(A: Float64Array, b: Float64Array, n: number): Float64Array | undefined {
   const M = Float64Array.from(A), x = Float64Array.from(b);
+  // Singular, or nearly (critic, 2026-10-05, finding 2: an exact-zero test let roundoff through as huge weights).
+  let scale = 0; for (let i = 0; i < n * n; i++) scale = Math.max(scale, Math.abs(M[i]));
   for (let c = 0; c < n; c++) {
     let p = c; for (let r = c + 1; r < n; r++) if (Math.abs(M[r * n + c]) > Math.abs(M[p * n + c])) p = r;
-    if (Math.abs(M[p * n + c]) < 1e-300) return undefined;
+    if (!(Math.abs(M[p * n + c]) > 1e-12 * scale)) return undefined;
     if (p !== c) { for (let k = 0; k < n; k++) { const t = M[c * n + k]; M[c * n + k] = M[p * n + k]; M[p * n + k] = t; } const t = x[c]; x[c] = x[p]; x[p] = t; }
     for (let r = 0; r < n; r++) if (r !== c) { const f = M[r * n + c] / M[c * n + c]; if (f) { for (let k = c; k < n; k++) M[r * n + k] -= f * M[c * n + k]; x[r] -= f * x[c]; } }
   }
@@ -329,7 +335,9 @@ export function scanPredictor(bValues: number[], dirs: ArrayLike<number>[]): ((Y
  * predictions from each other cannot see. Undefined for a single shell (one b cannot be extrapolated).
  */
 function interceptWeights(bValues: number[], dirs: ArrayLike<number>[], idx: number[]): Float64Array | undefined {
-  if (new Set(idx.map((i) => Math.round(bValues[i] / 50))).size < 2) return undefined;
+  // The constant, the b terms and the b² terms are told apart only with THREE distinct shells or more (critic,
+  // 2026-10-05, finding 2: two shells passed and threw the images 7-10 mm and 20° off); shells as shellsOf groups them.
+  if (shellsOf({ bValues, gradients: dirs.map((d) => [d[0], d[1], d[2]] as [number, number, number]) }).length < 3) return undefined;
   const X = idx.map((i) => { const b = bValues[i] / 1000, d = dirs[i], l = Math.hypot(d[0], d[1], d[2]) || 1, g = [d[0] / l, d[1] / l, d[2] / l]; return [1, ...monomials(g, 2).map((x) => -b * x), ...monomials(g, 4).map((x) => b * b * x)]; });
   const n = X.length, p = X[0].length;
   if (n <= p + 3) return undefined;
@@ -381,9 +389,12 @@ export async function estimateMotion(dwi: DiffusionSeries, field?: Field, opts: 
   const peAxis = field?.fit.axis ?? opts.peAxis, rule = opts.rule ?? 1;
   const e = (rule === 2 || rule === 3) && peAxis !== undefined ? (() => { const v = [M[peAxis], M[4 + peAxis], M[8 + peAxis]], l = Math.hypot(v[0], v[1], v[2]); return [v[0] / l, v[1] / l, v[2] / l] as [number, number, number]; })() : undefined;
   const data = (i: number) => dwi.volumes[i].data as ArrayLike<number>;
-  if (!b0i.length || !cn) {
+  // Nothing to align to: no b = 0, no brain, or too few diffusion-weighted images to predict them from each other (a
+  // six-direction scan; critic, 2026-10-05, finding 7: it said "corrected … NaN% better").
+  const why = !b0i.length ? "no b = 0 image" : !cn ? "no brain found" : !scanPredictor(dwi.bValues, dwi.gradients) ? "too few diffusion-weighted images to predict them from each other" : "";
+  if (why) {
     const b0 = scanBrain(dwi, field).b0;
-    return { rule: 0, moves, b0, mask, sizes: moves.map(() => ({ mm: 0, degrees: 0 })), largest: { mm: 0, degrees: 0 }, residual: { before: NaN, after: NaN }, ms: performance.now() - t0, said: "head movement not corrected (no b = 0 image or no brain found)" };
+    return { rule: 0, moves, b0, mask, sizes: moves.map(() => ({ mm: 0, degrees: 0 })), largest: { mm: 0, degrees: 0 }, residual: { before: NaN, after: NaN }, ms: performance.now() - t0, said: `head movement not corrected (${why})` };
   }
 
   // The region the images are read on: the brain grown by 2 more voxels (the coarse level's blocks reach one beyond it).
@@ -408,6 +419,10 @@ export async function estimateMotion(dwi: DiffusionSeries, field?: Field, opts: 
     { grid: cGrid, Si: inv4(cGrid.ijkToRAS), mm: coarseMm, P: pointsAt(cPts.ras, full, fd), idx: cPts.idx, iterations: 15 },
     { grid: full, Si, mm: 0, P: pointsAt(fPts.ras, full, fd), idx: fPts.idx, iterations: 8 },
   ];
+  // The same levels for images ALREADY in the reference (field removed): step 4 aligns two of those, and reading them
+  // through the field again moved every diffusion-weighted image by it (critic, 2026-10-05, finding 1: 2.2 mm on a still
+  // synthetic head, 0.37 mm on PAT16).
+  const levelsInReference: Level[] = levels.map((L) => ({ ...L, P: pointsAt(L.P.x, full, undefined) }));
   const targetsOf = (img: Float32Array) => levels.map((L) => { const g = L.mm > 0 ? coarsen({ ...full, data: img }, L.mm) : { ...full, data: img }; const o = new Float32Array(L.idx.length); for (let p = 0; p < o.length; p++) o[p] = Number(g.data[L.idx[p]]); return o; });
 
   // Each image put back, at each level's points (block means on the coarse level).
@@ -441,7 +456,8 @@ export async function estimateMotion(dwi: DiffusionSeries, field?: Field, opts: 
     return A.map((a, q) => a + u * (B[q] - a));
   };
 
-  const rounds = opts.rounds ?? 2;
+  // Rule 3 needs a free round before the held one (critic, 2026-10-05, finding 6).
+  const rounds = Math.max(opts.rounds ?? 2, rule === 3 && e ? 2 : 1);
   for (let round = 0; round < rounds; round++) {
     // 1. The b = 0 images to their mean (put back as far as known).
     if (b0i.length > 1) {
@@ -468,11 +484,13 @@ export async function estimateMotion(dwi: DiffusionSeries, field?: Field, opts: 
       if (fitted) for (const i of shells.flat()) { const q = dwi.gradients[i].map((x) => x * Math.sqrt(dwi.bValues[i] / 1000)); moves[i] = { ...moves[i], ec: { g: fitted(q), e } }; }
     }
     // 4. All diffusion-weighted images onto the b = 0 images' frame: their extrapolation to b = 0 aligned to the b = 0
-    //    mean (same contrast), and the move found added to every one of them. A scan with one shell cannot be
-    //    extrapolated: its images are pinned instead to where the b = 0 images say the head was at the same times.
+    //    mean (same contrast, both already in the reference), and the move found added to every one of them. A scan with
+    //    one or two shells cannot be extrapolated: its images are pinned instead to where the b = 0 images say the head
+    //    was at the same times. So is a scan whose common move comes out larger than a visit allows (a failed fit).
     const dw = shells.flat().sort((a, b) => a - b);
     const dirsNow = dwi.gradients.map((g, i) => { const m = moves[i].R; return [m[0] * g[0] + m[3] * g[1] + m[6] * g[2], m[1] * g[0] + m[4] * g[1] + m[7] * g[2], m[2] * g[0] + m[5] * g[1] + m[8] * g[2]]; });
     const w = dw.length ? interceptWeights(dwi.bValues, dirsNow, dw) : undefined;
+    let m: Move | undefined;
     if (w) {
       const Y = dw.map((i) => readMoved(data(i), full.dims, Si, regP, moves[i])), icpt = new Float32Array(reg.idx.length);
       for (let p = 0; p < icpt.length; p++) {
@@ -484,9 +502,14 @@ export async function estimateMotion(dwi: DiffusionSeries, field?: Field, opts: 
       }
       const b0Mean = new Float32Array(reg.idx.length);
       for (const i of b0i) { const r = readMoved(data(i), full.dims, Si, regP, moves[i]); for (let p = 0; p < r.length; p++) b0Mean[p] += r[p] / b0i.length; }
-      const m = alignOne(scatter(icpt), full, levels, targetsOf(scatter(b0Mean)), identity());
+      m = alignOne(scatter(icpt), full, levelsInReference, targetsOf(scatter(b0Mean)), identity());
+      const sz = rigidSize(m);
+      if (sz.mm > COMMON_MOVE_LIMIT.mm || sz.degrees > COMMON_MOVE_LIMIT.degrees) m = undefined;
+    }
+    if (m) {
       // The common move first, then each image's own: y = Rᵢ(R_m(x − c) + c + t_m − c) + c + tᵢ.
-      for (const i of dw) { const a = moves[i], R = mul3(a.R, m.R), Rt = [0, 1, 2].map((r) => a.R[3 * r] * m.t[0] + a.R[3 * r + 1] * m.t[1] + a.R[3 * r + 2] * m.t[2]); moves[i] = { ...a, R, t: [a.t[0] + Rt[0], a.t[1] + Rt[1], a.t[2] + Rt[2]], c }; }
+      const cm = m;
+      for (const i of dw) { const a = moves[i], R = mul3(a.R, cm.R), Rt = [0, 1, 2].map((r) => a.R[3 * r] * cm.t[0] + a.R[3 * r + 1] * cm.t[1] + a.R[3 * r + 2] * cm.t[2]); moves[i] = { ...a, R, t: [a.t[0] + Rt[0], a.t[1] + Rt[1], a.t[2] + Rt[2]], c }; }
     } else for (const s of shells) {
       const want = [0, 0, 0, 0, 0, 0], have = [0, 0, 0, 0, 0, 0];
       for (const i of s) { const a = atTime(i, b0Vecs), h = toVec(moves[i]); for (let q = 0; q < 6; q++) { want[q] += a[q] / s.length; have[q] += h[q] / s.length; } }

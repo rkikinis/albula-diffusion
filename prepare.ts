@@ -10,11 +10,13 @@ import type { StageTimes } from "./planning.ts";
 
 export interface Prepared {
   dwi: DiffusionSeries;
-  /** What was done, in words, to add to the scan's line ("head movement corrected (…); aligned to …"). */
+  /** What was done, in words, to add to the scan's line ("head movement corrected (…); aligned to …"); and its two parts. */
   said: string;
+  movementSaid?: string; alignmentSaid?: string;
   /** The move onto the T1, and a doubt (then not used: the scanner's placement stands). */
   alignment?: { T: Rigid; doubt?: string };
   motion?: MotionResult;
+  /** The head-movement rule actually applied (0 when it was off, or could not run: no b = 0, too few images). */
   motionRule: MotionRuleId;
 }
 
@@ -38,11 +40,16 @@ export async function prepareScan(dwi: DiffusionSeries, opts: { field?: { fit: F
     if (field) for (const v of dwi.volumes) { v.data = applyField(field.fit, v.data as ArrayLike<number>, field.sign); v.dtype = "<f4"; }
     return dwi;
   };
-  if (!opts.t1) return { dwi: await inPlace(), said: said.join("; "), ...(motion ? { motion } : {}), motionRule: rule };
+  // Recorded: the rule actually applied, not the one asked for (critic, 2026-10-05, finding 7).
+  const done = { ...(motion ? { motion, movementSaid: motion.said } : {}), motionRule: (motion?.rule ?? 0) as MotionRuleId };
+  if (!opts.t1) return { dwi: await inPlace(), said: said.join("; "), ...done };
   opts.say?.("Aligning the diffusion scan to the MRI of the anatomy…");
   const a = await alignToT1(dwi, opts.t1, field, opts.times, motion);
   const alignment = { T: a.T, ...(a.doubt ? { doubt: a.doubt } : {}) };
   // A DOUBTFUL ALIGNMENT IS NOT USED (until aligning by hand is built): the scanner's placement stands.
-  if (a.doubt) return { dwi: await inPlace(), said: [...said, `not aligned to the MRI of the anatomy: the automatic alignment looked wrong (${a.doubt}), so the scanner's placement is used`].join("; "), alignment, ...(motion ? { motion } : {}), motionRule: rule };
-  return { dwi: a.dwi, said: [...said, a.said].join("; "), alignment, ...(motion ? { motion } : {}), motionRule: rule };
+  if (a.doubt) {
+    const alignmentSaid = `not aligned to the MRI of the anatomy: the automatic alignment looked wrong (${a.doubt}), so the scanner's placement is used`;
+    return { dwi: await inPlace(), said: [...said, alignmentSaid].join("; "), alignmentSaid, alignment, ...done };
+  }
+  return { dwi: a.dwi, said: [...said, a.said].join("; "), alignmentSaid: a.said, alignment, ...done };
 }
