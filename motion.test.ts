@@ -7,7 +7,7 @@ import { applyMotion, estimateMotion, logRot, shellsOf, type Move } from "./moti
 import { DIMS, M, move, protocol, scan, type Eddy } from "./test/phantom.ts";
 import { resampleOntoT1, type Rigid } from "./registration.ts";
 import { applyField, fieldFromCenters } from "./distortion.ts";
-import { motionHelped } from "./prepare.ts";
+import { motionHelped, prepareScan } from "./prepare.ts";
 
 Deno.test("shells are grouped by b, b = 0 and directionless images left out", () => {
   const s = shellsOf({ bValues: [0, 1000, 2500, 1005, 0, 2480, 1000], gradients: [[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1], [0, 0, 0], [1, 0, 0], [0, 0, 0]] });
@@ -156,6 +156,9 @@ Deno.test("rule 3 always has its free round (critic 2026-10-05, finding 6); a si
   const six = scan([0, 1000, 1000, 1000, 1000, 1000, 1000].map(() => move([0, 0, 0], [0, 0, 0], c)), [0, 1000, 1000, 1000, 1000, 1000, 1000], [[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1], [0.7071, 0.7071, 0], [0.7071, 0, 0.7071], [0, 0.7071, 0.7071]], 2);
   const r6 = await estimateMotion(six);
   assert(r6.rule === 0 && /not corrected/.test(r6.said) && !/NaN/.test(r6.said), `a six-direction scan: "${r6.said}"`);
+  // And through the preparation the app uses (critic 2026-10-06, finding 11: the step-back said "NaN% worse" there).
+  const p6 = await prepareScan(six, { checkDirections: false });
+  assert(p6.motionRule === 0 && /not corrected \(/.test(p6.said) && !/NaN|worse/.test(p6.said), `prepareScan on a six-direction scan: "${p6.said}"`);
 });
 
 Deno.test("a head-movement correction that did not make the images agree better is undone (prepare.ts motionHelped)", () => {

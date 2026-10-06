@@ -56,8 +56,11 @@ export async function prepareScan(dwi: DiffusionSeries, opts: { field?: { fit: F
     if (opts.times) opts.times.motion = performance.now() - t;
     // A CORRECTION THAT DID NOT HELP IS UNDONE (Ron, 2026-10-06: robust, as a site with nobody to look needs it; "4 yes"):
     // the images must agree with each other better after it than as acquired, or the scan is used as acquired, and said.
-    if (!motionHelped(motion.residual)) {
-      stepBack = `head movement not corrected: the correction did not make the images agree better (${(100 * (motion.residual.after / motion.residual.before - 1)).toFixed(1)}% worse), so the scan is used as acquired`;
+    // Only a correction that was MADE is judged (critic 2026-10-06, finding 11: a scan the rule cannot correct -- six
+    // directions, no b = 0 -- comes back rule 0 with no residual, and its own reason must stay, not "NaN% worse").
+    if (motion.rule > 0 && Number.isFinite(motion.residual.before) && !motionHelped(motion.residual)) {
+      const worse = 100 * (motion.residual.after / motion.residual.before - 1);
+      stepBack = `head movement not corrected: the correction did not make the images agree better (${worse > 0.05 ? `${worse.toFixed(1)}% worse` : "no better"}), so the scan is used as acquired`;
       motion = undefined;
       said.push(stepBack);
     } else said.push(motion.said);

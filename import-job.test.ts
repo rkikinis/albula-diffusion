@@ -99,3 +99,13 @@ Deno.test("the SynthStrip version is waited for, never recorded as unknown (a se
     assertEquals(await synthstripVersion(base, { pollMs: 10, waitMs: 50 }), undefined);
   } finally { ac.abort(); await srv.finished; }
 });
+
+Deno.test("a segmentation server without SynthStrip is said as such at once, not waited on (critic 2026-10-06, finding 14)", async () => {
+  const ac = new AbortController();
+  const srv = Deno.serve({ port: 0, signal: ac.signal, onListen: () => {} }, (req) => new URL(req.url).pathname.endsWith("/_status") ? Response.json({ reachable: true, health: { version: "0.15.0" } }) : new Response("no such task", { status: 404 }));
+  try {
+    const t0 = performance.now();
+    assertEquals(await synthstripVersion(`http://127.0.0.1:${(srv.addr as Deno.NetAddr).port}`, { pollMs: 10, waitMs: 5000 }), "haversack 0.15.0, no SynthStrip");
+    assert(performance.now() - t0 < 1000);
+  } finally { ac.abort(); await srv.finished; }
+});

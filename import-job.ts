@@ -10,7 +10,7 @@
 // is the library; import-job-main.ts is the program. The critic's round of 2026-10-05 (qa/2026-10-05-dmri-import-job.md)
 // shaped it: a study at a time (finding 3), the module's rules for the T1 and the partner, tested (6, 7, 14), stored
 // tracts current only for the same code, rules and inputs (1, 11), states that say what will and will not change (13).
-import { packRGB24, parseInstances, restartSegmentationServer, synthstripBrainMask, startSegmentationServer, volumesOfSeries, type BrainMask, type Volume } from "albula";
+import { packRGB24, parseInstances, synthstripBrainMask, startSegmentationServer, volumesOfSeries, type BrainMask, type Volume } from "albula";
 import { indexSeries, seriesFilePaths, writeNrrd, type IndexSeries } from "albula/server";
 import { fromDicomVolumes } from "./dwi.ts";
 import { DIRECTION_CHECK_RULE } from "./gradient-check.ts";
@@ -232,26 +232,36 @@ export async function brainOnT1(server: string, t1: ReadSeries, onProgress?: (li
     const s = await startSegmentationServer(onProgress, toRoot);
     if (s.ok) r = await synthstripBrainMask(stub, key, onProgress, { transport, upload });
   }
-  // A stuck server (queued jobs never started; Ron's demo, 2026-10-06): restarted once, then asked again.
-  if (!r.ok && r.reason === "stuck") {
-    onProgress?.("restarting the segmentation server: it had stopped taking work");
-    const s = await restartSegmentationServer(onProgress, toRoot);
-    if (s.ok) r = await synthstripBrainMask(stub, key, onProgress, { transport, upload });
-  }
+  // A STUCK SERVER IS NOT RESTARTED FROM HERE (critic 2026-10-06, finding 12): a restart re-queues whatever else the server
+  // holds and loses its progress -- a person's decision, from the Diffusion panel's button. The case waits, said so.
   if (r.ok) return { mask: r.mask };
   return { why: r.message, kind: r.reason === "no-synthstrip" ? "cannot" : r.reason === "failed" ? "failed" : "waiting" };
 }
 /** haversack's and SynthStrip's versions, as the server reports them (finding 10). */
-export async function synthstripVersion(server: string, opts: { waitMs?: number; pollMs?: number } = {}): Promise<string | undefined> {
+export async function synthstripVersion(server: string, opts: { waitMs?: number; pollMs?: number; start?: boolean } = {}): Promise<string | undefined> {
   // THE VERSION IS PART OF THE STALENESS KEY (jobRules), so an unknown one must not be recorded: a segmentation server
-  // still starting answered "?" on 2026-10-06, and every case made then would have counted as stale ever after. Asked
-  // again until both parts are known, up to `waitMs` (default 5 minutes); undefined when they never are.
+  // still starting answered "?" on 2026-10-06, and every case made then would have counted as stale ever after. So:
+  // the server is started when it does not answer (as brainOnT1 did; critic 2026-10-06, finding 14); a server without
+  // SynthStrip (a Mac without the developer tools) is said as such -- its cases come out "cannot be made on this Mac";
+  // otherwise asked again until both parts are known, up to `waitMs` (default 5 minutes); undefined when never.
+  // SynthStrip's weights are reported once on disk; before its first job they are "not yet installed" -- the key then
+  // changes once, after the first case (suspected by the critic; one remake, not a loss).
   const root = server.replace(/\/+$/, ""), until = Date.now() + (opts.waitMs ?? 5 * 60_000);
+  let started = false;
   for (;;) {
-    const st = await fetch(`${root}/_haversack/_status`).then((r) => r.json()).catch(() => ({})) as { health?: { version?: string } };
-    const task = await fetch(`${root}/_haversack/tasks/synthstrip:mask`).then((r) => r.json()).catch(() => ({})) as { weights_installed?: { id?: string; version?: string }[] };
-    const v = st.health?.version, w = task.weights_installed?.find((x) => x.id === "synthstrip")?.version;
-    if (v && w) return `haversack ${v}, synthstrip weights ${w}`;
+    const st = await fetch(`${root}/_haversack/_status`).then((r) => r.json()).catch(() => ({})) as { reachable?: boolean; health?: { version?: string } };
+    const v = st.health?.version;
+    if (!v && !started && opts.start !== false) {
+      started = true;
+      await startSegmentationServer(undefined, { fetch: (input, init) => fetch(typeof input === "string" && input.startsWith("/") ? `${root}${input}` : input, init), base: `${root}/_haversack/` });
+      continue;
+    }
+    if (v) {
+      const res = await fetch(`${root}/_haversack/tasks/synthstrip:mask`).catch(() => null);
+      if (res && res.status === 404) return `haversack ${v}, no SynthStrip`;
+      const task = res?.ok ? await res.json().catch(() => ({})) as { weights_installed?: { id?: string; version?: string }[] } : undefined;
+      if (task) return `haversack ${v}, synthstrip weights ${task.weights_installed?.find((x) => x.id === "synthstrip")?.version ?? "not yet installed"}`;
+    }
     if (Date.now() >= until) return undefined;
     await new Promise((r) => setTimeout(r, opts.pollMs ?? 5000));
   }
@@ -299,7 +309,11 @@ export async function makeTracts(dbDir: string, dbId: string, server: string, pl
   const rules = jobRules(versions);
   const inputs: CaseInputs = { diffusion: plan.dwi.facts.uid, partner: plan.partner?.facts.uid ?? null, t1: plan.t1?.facts.uid ?? null };
   const stored = await storedTracts(dbDir, plan.dwi.facts.uid);
-  const current = stored.find((s) => isCurrent(s, rules, inputs));
+  // CURRENT = the same code, rules and inputs AND its Color FA beside it (critic 2026-10-06, finding 16: a job stopped
+  // between storing the tracts and the map left tracts that counted as current forever, without the map).
+  const hasMap = async (uid: string) => !!(await Deno.stat(`${dbDir}/${colorFaPath(uid)}`).catch(() => null));
+  let current: (typeof stored)[number] | undefined;
+  for (const s of stored) if (isCurrent(s, rules, inputs) && await hasMap(s.seriesUID)) { current = s; break; }
   if (current && !opts.force) return { state: "current", seriesUID: current.seriesUID };
   // QUALITY FIRST: the tracking's brain is SynthStrip's on the T1; without the T1 the case waits for it.
   if (!plan.t1) return { state: "waiting", why: "waiting for an MRI of the anatomy named as a T1 (same study or patient)" };
