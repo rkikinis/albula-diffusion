@@ -14,7 +14,7 @@
 import {
   closeScene, databaseFileUrl, databaseSeries, FiberField, fetchZarrVolumeNative, LAYOUT, loadDatabaseSeries, loadVolumeIntoScene,
   lookFrom3D, nrrdDecode, nrrdGeometry, nrrdSplitHeader, orientView, queueModule, seriesDicomFiles, setLayout, setSliceOffset,
-  sliceOffset, sliceOrientation, writeDatabaseFile, type DatabaseSeries, type ModuleContext, type ZarrDesc,
+  sliceOffset, sliceOrientation, writeDatabaseFile, startPlacing, placingMarkupId, endPlacing, type DatabaseSeries, type ModuleContext, type ZarrDesc,
 } from "albula";
 import { isTumorName } from "./face.ts";
 import { b0Path, colorFaPath, dicomToTracts, type TractSetData } from "./tracts-dicom.ts";
@@ -144,7 +144,11 @@ export interface Review {
   levels?: Levels;
   /** Per tracts series: the verdict, the note, when, and the rules the tracts were made under. */
   judgments: Record<string, Judgment>;
+  /** The border between each crus and the substantia nigra as Ron drew it on the peduncle slice (RAS points, the slice's
+   *  height), for counting the fibers dorsal to it (2026-10-06: "I could draw a line to separate the crus from sn"). */
+  crusBorder?: Partial<Record<"left" | "right", CrusBorder>>;
 }
+export interface CrusBorder { points: [number, number, number][]; z: number; drawnAt: string }
 export interface ReviewFile { version: 2; cases: Record<string, Review> }
 
 /** WHAT ONE ACTION CHANGES in a case: a verdict, a note, or the levels -- never the whole record. */
@@ -154,6 +158,8 @@ export interface CasePatch {
   verdict?: { verdict: NonNullable<Judgment["verdict"]>; judgedAt: string; carriedFrom?: string };
   /** A note; "" removes it; undefined leaves it. */
   note?: string;
+  /** A crus border drawn (one side). */
+  crusBorder?: { side: "left" | "right" } & CrusBorder;
 }
 
 /** Apply one action to the file AS IT IS ON DISK NOW (read just before writing). Only the fields the action names change:
@@ -167,8 +173,27 @@ export function mergeCase(onDisk: ReviewFile, key: string, p: CasePatch): Review
   if (p.verdict) { j.verdict = p.verdict.verdict; j.judgedAt = p.verdict.judgedAt; if (p.verdict.carriedFrom) j.carriedFrom = p.verdict.carriedFrom; else delete j.carriedFrom; }
   if (p.note !== undefined) { if (p.note) j.note = p.note; else delete j.note; }
   const levels = p.levels ?? had?.levels;
-  const rec: Review = { patient: p.patient, side: p.side, ...(levels ? { levels } : {}), judgments: { ...(had?.judgments ?? {}), [p.tracts]: j } };
+  const crusBorder = p.crusBorder ? { ...(had?.crusBorder ?? {}), [p.crusBorder.side]: { points: p.crusBorder.points, z: p.crusBorder.z, drawnAt: p.crusBorder.drawnAt } } : had?.crusBorder;
+  const rec: Review = { patient: p.patient, side: p.side, ...(levels ? { levels } : {}), judgments: { ...(had?.judgments ?? {}), [p.tracts]: j }, ...(crusBorder ? { crusBorder } : {}) };
   return { version: 2, cases: { ...onDisk.cases, [key]: rec } };
+}
+
+/**
+ * HOW MANY CROSSINGS LIE DORSAL TO A DRAWN BORDER (on the axial slice; RAS: dorsal = smaller y). The border is a line of
+ * points drawn from one end of the crus to the other; a crossing is compared with the border's y at its own x
+ * (interpolated between the two border points around it; beyond the border's ends, the nearer end's y).
+ */
+export function dorsalTo(border: [number, number][], crossings: [number, number][]): number {
+  if (border.length < 2) return 0;
+  const b = [...border].sort((p, q) => p[0] - q[0]);
+  const yAt = (x: number) => {
+    if (x <= b[0][0]) return b[0][1];
+    if (x >= b[b.length - 1][0]) return b[b.length - 1][1];
+    let i = 1; while (b[i][0] < x) i++;
+    const [x0, y0] = b[i - 1], [x1, y1] = b[i], t = x1 > x0 ? (x - x0) / (x1 - x0) : 0;
+    return y0 + t * (y1 - y0);
+  };
+  return crossings.filter(([x, y]) => y < yAt(x)).length;
 }
 
 /** A fingerprint of the streamlines judged (their count and every coordinate), for carrying a verdict over a remake that
@@ -205,6 +230,8 @@ function registerTractReview(ctx: ModuleContext): void {
   const canWrite = () => fileState === "ok" || fileState === "absent";
   /** The open case's own facts, for the actions' patches. */
   let openPatient = "", openSide: "left" | "right" = "left", openRules: Record<string, unknown> | undefined, openFibers = "";
+  /** Both corticospinal tracts of the open case (the crus borders are drawn on both sides), and the side being drawn. */
+  let openCst: { left: Float32Array[]; right: Float32Array[] } = { left: [], right: [] }, drawing: "left" | "right" | undefined;
   /** The case open, by its diffusion scan's UID (critic 2026-10-06, finding 8: a row number moves when the list does). */
   let openKey = "", openTracts = "", busy = "", note = "", field: FiberField | undefined, drawn: Float32Array[] = [];
   let placed: Levels | undefined, levelsSaid = "";
@@ -306,7 +333,10 @@ function registerTractReview(ctx: ModuleContext): void {
       const cs = drawn.length ? sliceCrossings([drawn], { origin: o, normal: nrm }) : [];
       const unit = (a: number, b: number, c: number): [number, number, number] => { const l = Math.hypot(a, b, c) || 1; return [a / l, b / l, c / l]; };
       const loops = crossingOutlines(cs.map((c) => c.p), o, unit(m[0], m[4], m[8]), unit(m[1], m[5], m[9]), OUTLINE_MM);
-      view.setOverlay(String(n.layoutName ?? n.name), "tract-review", loops.map((points) => ({ kind: "polyline" as const, points, color: [...FIBER_RGB, 1], widthPx: 1.5, closed: true })));
+      // Ron's crus borders, on the view whose level they were drawn at.
+      const borders = Object.values(file.cases[openKey]?.crusBorder ?? {}).filter((b) => b && Math.abs(nrm[2]) > 0.9 && Math.abs(b.z - d * Math.sign(nrm[2])) < 1.5);
+      view.setOverlay(String(n.layoutName ?? n.name), "tract-review", [...loops.map((points) => ({ kind: "polyline" as const, points, color: [...FIBER_RGB, 1], widthPx: 1.5, closed: true })),
+        ...borders.map((b) => ({ kind: "polyline" as const, points: b!.points, color: [0.35, 0.85, 1, 1], widthPx: 2 }))]);
     }
   }
   live.subscribe((c) => {
@@ -400,6 +430,7 @@ function registerTractReview(ctx: ModuleContext): void {
         live.write({ op: "patch", id: cmp.id, path: "#/foregroundOpacity", value: 0.5 });
       }
       const { left, right } = cstOf(t.sets), mid = midlineX(left, right);
+      openCst = { left, right };
       const tumorX = await tumorCenterX(segNodes.map((n) => n.id));
       const side = sideToJudge(tumorX, mid);
       const sl = side < 0 ? left : right;
@@ -424,6 +455,35 @@ function registerTractReview(ctx: ModuleContext): void {
     } catch (e) {
       say(`${c.patient} could not be opened: ${(e as Error).message}`);
     } finally { busy = ""; render(); }
+  }
+
+  /** THE CRUS BORDER (Ron, 2026-10-06): a curve he places along the border between one crus and the substantia nigra on
+   *  the peduncle slice; Done takes its points into the verdicts file and removes the markup (the line is drawn by the
+   *  review from then on). */
+  function startBorder(side: "left" | "right"): void {
+    if (!openKey || !canWrite()) return;
+    drawing = side;
+    if (!startPlacing("curve", false)) { drawing = undefined; say("Drawing is not available in this app."); return; }
+    say(`Click points along the border between the ${side} crus and the substantia nigra in the red view, from one end to the other; then Done.`);
+  }
+  async function finishBorder(keep: boolean): Promise<void> {
+    const side = drawing, id = placingMarkupId();
+    drawing = undefined; endPlacing();
+    const node = id ? live.nodes.get(id) : undefined;
+    const points = ((node?.controlPoints as { position: [number, number, number] }[] | undefined) ?? []).map((c) => c.position);
+    if (id) live.write({ op: "del", id });
+    if (keep && side && points.length >= 2) {
+      const z = sliceOffset("Red") ?? points[0][2];
+      await saveCase(openKey, patchOf({ crusBorder: { side, points, z: +z.toFixed(1), drawnAt: new Date().toISOString() } }));
+      drawDots();
+      say(`The ${side} crus border is saved with the case.`);
+    } else if (keep) say("The border needs at least two points; nothing was saved.");
+    render();
+  }
+  /** How many of a side's crossings at the border's level lie dorsal to it. */
+  function borderCount(side: "left" | "right", b: CrusBorder): { dorsal: number; of: number } {
+    const cs = sliceCrossings([openCst[side]], { origin: [0, 0, b.z], normal: [0, 0, 1] }).map((c) => [c.p[0], c.p[1]] as [number, number]);
+    return { dorsal: dorsalTo(b.points.map((p) => [p[0], p[1]] as [number, number]), cs), of: cs.length };
   }
 
   async function judge(verdict: NonNullable<Judgment["verdict"]>): Promise<void> {
@@ -488,6 +548,23 @@ function registerTractReview(ctx: ModuleContext): void {
       prev.onclick = () => { void openCase(cases[i - 1].dwi.seriesInstanceUID); }; next.onclick = () => { void openCase(cases[i + 1].dwi.seriesInstanceUID); };
       pos.textContent = `${i + 1} of ${cases.length}`;
       nav.append(prev, next, pos); v.append(nav);
+      const cb = shell.section(root, "4 · Crus border", { band: "green", open: true });
+      const hint = document.createElement("p"); hint.className = "sl-hint";
+      hint.textContent = "Optional: draw the border between each crus and the substantia nigra on the red view; the fibers of that side dorsal to your line are counted.";
+      cb.append(hint);
+      for (const sd of ["left", "right"] as const) {
+        const b = r?.crusBorder?.[sd], line = document.createElement("div"); line.style.cssText = "display:flex;gap:6px;align-items:center;margin:4px 0";
+        const btn = document.createElement("button");
+        btn.textContent = drawing === sd ? "Done" : b ? `Redraw the ${sd} border` : `Draw the ${sd} border`;
+        btn.title = drawing === sd ? "Take the line you placed." : `Place points along the border between the ${sd} crus and the substantia nigra in the red view.`;
+        btn.disabled = !!busy || !canWrite() || (!!drawing && drawing !== sd);
+        btn.onclick = () => { if (drawing === sd) void finishBorder(true); else startBorder(sd); };
+        line.append(btn);
+        if (drawing === sd) { const cancel = document.createElement("button"); cancel.textContent = "Cancel"; cancel.onclick = () => { void finishBorder(false); }; line.append(cancel); }
+        const info = document.createElement("span"); info.className = "sl-hint";
+        if (b) { const n = borderCount(sd, b); info.textContent = `${n.dorsal} of ${n.of} crossings dorsal (S ${b.z} mm)`; }
+        line.append(info); cb.append(line);
+      }
     }
     if (busy || note) { const s = document.createElement("p"); s.className = "sl-hint"; s.textContent = busy && !note ? busy : note; root.append(s); }
   }

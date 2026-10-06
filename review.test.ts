@@ -1,7 +1,7 @@
 // The Tract review's own arithmetic (review.ts): which streamlines are judged, on which side, at which levels.
 //   deno test -A --no-check --config ../../src/SlicerLive/deno.jsonc review.test.ts
 import { assert, assertEquals } from "jsr:@std/assert@1";
-import { carriedVerdict, CST, cstOf, fibersFingerprint, levelsFromPair, levelsOf, mergeCase, midlineX, sideToJudge, type Review, type ReviewFile } from "./review.ts";
+import { carriedVerdict, CST, cstOf, dorsalTo, fibersFingerprint, levelsFromPair, levelsOf, mergeCase, midlineX, sideToJudge, type Review, type ReviewFile } from "./review.ts";
 import type { TractSetData } from "./tracts-dicom.ts";
 
 /** A synthetic corticospinal tract as the real ones are (the test cases, 2026-10-06): 60 fibers from z = -40 (brainstem)
@@ -111,4 +111,19 @@ Deno.test("a remake that drew the very same fibers carries the verdict over; dif
   assertEquals(carriedVerdict(rec, "new", same)?.from, "old", "the newest verdict on the same fibers");
   assertEquals(carriedVerdict(rec, "new", other), undefined);
   assertEquals(carriedVerdict({ ...rec, judgments: { ...rec.judgments, new: { verdict: "not acceptable" } } }, "new", same), undefined, "a verdict of its own wins");
+});
+
+Deno.test("crossings dorsal to a drawn crus border: compared with the border's height at their own x", () => {
+  // A border sloping from (0, 10) to (20, 0): y = 10 - x / 2.
+  const border: [number, number][] = [[20, 0], [0, 10], [10, 5]];
+  assertEquals(dorsalTo(border, [[10, 4], [10, 6], [0, 9], [20, 1], [-5, 9], [25, -1]]), 4, "below the line at their x: (10,4), (0,9), and beyond the ends (-5,9), (25,-1)");
+  assertEquals(dorsalTo([[0, 0]], [[0, -5]]), 0, "a border of one point counts nothing");
+});
+
+Deno.test("a crus border is kept per side; drawing one side keeps the other and the verdicts", () => {
+  const onDisk: ReviewFile = { version: 2, cases: { a: { patient: "A", side: "left", judgments: { t: { verdict: "acceptable" } }, crusBorder: { right: { points: [[1, 2, 3], [4, 5, 3]], z: 3, drawnAt: "x" } } } } };
+  const m = mergeCase(onDisk, "a", { patient: "A", side: "left", tracts: "t", crusBorder: { side: "left", points: [[-1, 2, 3], [-4, 5, 3]], z: 3, drawnAt: "y" } });
+  assertEquals(Object.keys(m.cases.a.crusBorder!).sort(), ["left", "right"]);
+  assertEquals(m.cases.a.judgments.t.verdict, "acceptable");
+  assertEquals(mergeCase(m, "a", { patient: "A", side: "left", tracts: "t", note: "n" }).cases.a.crusBorder, m.cases.a.crusBorder, "another action keeps the borders");
 });
