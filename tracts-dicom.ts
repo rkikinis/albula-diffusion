@@ -13,9 +13,10 @@
 // tract itself is named by the label. The diffusion model is Multi Tensor (DCM 113232, CID 7261) for two-tensor UKF,
 // Single Tensor (113231) otherwise; the algorithm family Deterministic (DCM 113211, CID 7262).
 //
-// What made the tracts -- every rule's version, the haversack version, the extension's commit, the date -- goes into
-// Albula's private block (creator "SlicerAlbula provenance 1", element 0077,1002, as JSON). That is what tells, later,
-// whether the stored tracts are still current.
+// What made the tracts goes into Albula's private block (creator "SlicerAlbula provenance 1", element 0077,1002, as JSON),
+// as the caller gives it: the import job writes every rule's version, a fingerprint of the extension's code, the naming
+// network's and SynthStrip's versions, the series it was made from and the date (import-job.ts jobRules). That is what
+// tells, later, whether the stored tracts are still current.
 import { dicomIO, rgbToDicomLab } from "albula";
 
 export const TRACTOGRAPHY_RESULTS = "1.2.840.10008.5.1.4.1.1.66.6";
@@ -46,6 +47,9 @@ export interface TractsSource {
   seriesInstanceUID: string;
   /** The diffusion series' instances (SOP class and instance UIDs): the images the tracking used. */
   instances: { sopClassUID: string; sopInstanceUID: string }[];
+  /** Other series the tracts depend on -- the T1 they were aligned to (their points are on it), the reversed scan --
+   *  listed after the diffusion series (critic, 2026-10-05, finding 12). */
+  alsoReferenced?: { seriesInstanceUID: string; instances: { sopClassUID: string; sopInstanceUID: string }[] }[];
 }
 
 export interface TractsRun {
@@ -88,9 +92,13 @@ export async function tractsToDicom(sets: TractSetData[], source: TractsSource, 
       }],
     };
   });
-  const refs = source.instances.map((r) => ({ ReferencedSOPClassUID: r.sopClassUID, ReferencedSOPInstanceUID: r.sopInstanceUID }));
+  const refsOf = (list: TractsSource["instances"]) => list.map((r) => ({ ReferencedSOPClassUID: r.sopClassUID, ReferencedSOPInstanceUID: r.sopInstanceUID }));
+  const refs = refsOf(source.instances), more = source.alsoReferenced ?? [];
   const ds: Record<string, unknown> = {
     ...source.patientStudy,
+    // UTF-8 (ISO_IR 192): the provenance's text and copied names may hold any character (critic, 2026-10-05, finding 4:
+    // "°" and "·" under no declared character set failed dciodvfy and read back garbled).
+    SpecificCharacterSet: "ISO_IR 192",
     SOPClassUID: TRACTOGRAPHY_RESULTS, SOPInstanceUID: sop,
     // BodyPartExamined: the brain is not a paired structure, so General Series' Laterality (Type 2C) is not required.
     Modality: "MR", BodyPartExamined: "BRAIN", SeriesInstanceUID: series, SeriesNumber: run.seriesNumber ?? 900,
@@ -103,8 +111,9 @@ export async function tractsToDicom(sets: TractSetData[], source: TractsSource, 
     ContentDate: now.date, ContentTime: now.time, InstanceCreationDate: now.date, InstanceCreationTime: now.time,
     TrackSetSequence,
     // The images the tracking used: in this study, so Referenced Series Sequence (Common Instance Reference module).
-    ReferencedSeriesSequence: [{ SeriesInstanceUID: source.seriesInstanceUID, ReferencedInstanceSequence: refs }],
-    ReferencedInstanceSequence: refs,
+    ReferencedSeriesSequence: [{ SeriesInstanceUID: source.seriesInstanceUID, ReferencedInstanceSequence: refs },
+      ...more.map((m) => ({ SeriesInstanceUID: m.seriesInstanceUID, ReferencedInstanceSequence: refsOf(m.instances) }))],
+    ReferencedInstanceSequence: [...refs, ...more.flatMap((m) => refsOf(m.instances))],
     _meta: {
       MediaStorageSOPClassUID: { Value: [TRACTOGRAPHY_RESULTS], vr: "UI" },
       MediaStorageSOPInstanceUID: { Value: [sop], vr: "UI" },

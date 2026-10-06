@@ -1,14 +1,15 @@
 // THE FIBER TRACTS MADE AT IMPORT TIME (Contents/docs/DMRI-AT-IMPORT.md in the workspace; Ron, 2026-10-05: "go ahead
 // with the import-time job"; "quality takes precedence over speed. That is why we do the slow stuff at import time").
 // For each diffusion scan in a DICOM database: the whole-brain pipeline (pipeline.ts, the one the case runs and the
-// regression test use) on the scan, its reversed phase-encoding partner and the T1 of the same study, with SynthStrip's
-// brain from haversack, and the named tracts stored as ONE DICOM Tractography Results object (tracts-dicom.ts) beside the
-// scan, derived from it, recording the rules that made it. The resident's button then only measures stored tracts
-// against the tumor.
+// regression test use) on the scan, its reversed phase-encoding partner and the T1, with SynthStrip's brain from
+// haversack, and the named tracts stored as ONE DICOM Tractography Results object (tracts-dicom.ts) filed under the scan,
+// recording what made it. The resident's button then only measures stored tracts against the tumor.
 //
 // It runs as a program beside Albula's server (sdk/server.ts): it reads the index and the files itself, read-only, and
 // writes and indexes only through the server's `_write` route (the index's lock lives in the server process). This file
-// is the library; import-job-main.ts is the program.
+// is the library; import-job-main.ts is the program. The critic's round of 2026-10-05 (qa/2026-10-05-dmri-import-job.md)
+// shaped it: a study at a time (finding 3), the module's rules for the T1 and the partner, tested (6, 7, 14), stored
+// tracts current only for the same code, rules and inputs (1, 11), states that say what will and will not change (13).
 import { parseInstances, synthstripBrainMask, startSegmentationServer, volumesOfSeries, type BrainMask, type Volume } from "albula";
 import { indexSeries, seriesFilePaths, writeNrrd, type IndexSeries } from "albula/server";
 import { fromDicomVolumes } from "./dwi.ts";
@@ -27,34 +28,121 @@ import { dicomToTracts, tractsToDicom, UNNAMED, type TractSetData } from "./trac
 
 /** The description every stored tracts object carries: how the job finds its own objects in the index. */
 export const TRACTS_DESCRIPTION = "Fiber tracts (whole brain)";
+/** A series larger than this is not read to be classified (a 4D fMRI, a long dynamic study): said, not tried. */
+const MAX_SERIES_FILES = 4000;
+
+// ── What decides whether stored tracts are current ───────────────────────────────────────────────────────────────
 
 /**
- * EVERYTHING THAT DECIDES WHETHER STORED TRACTS ARE CURRENT: the rules of each step and the naming network. Stored tracts
- * whose `rules` differ are remade (Ron, 2026-10-05: "remake automatically, versioned"); the old object stays until the
- * new one is written. `labeler` names the naming network's weights.
+ * EVERYTHING THAT MADE THE TRACTS: the rule of each step, a fingerprint of the code (`code`: the extension's modules that
+ * shape the result, hashed by the program; critic finding 1 -- a fix that moves the results without a new rule number
+ * must still make stored tracts stale), the naming network's weights and table, and SynthStrip's version. Stored tracts
+ * are current only when all of it AND the inputs are the same (Ron, 2026-10-05: "remake automatically, versioned").
  */
-export function jobRules(labeler: string): Record<string, string | number> {
-  return { pipeline: 1, distortion: DISTORTION_RULE, motion: MOTION_RULE, registration: REGISTRATION_RULE, tracking: TRACKING_RULE,
-    outside: OUTSIDE_RULE.on ? OUTSIDE_RULE.id : 0, maxB: PIPELINE_MAX_B, labeler, tractColors: TRACT_COLORS_VERSION, writer: 1 };
+export function jobRules(versions: { code: string; labeler: string; synthstrip: string }): Record<string, string | number> {
+  return { distortion: DISTORTION_RULE, motion: MOTION_RULE, registration: REGISTRATION_RULE, tracking: TRACKING_RULE,
+    outside: OUTSIDE_RULE.on ? OUTSIDE_RULE.id : 0, maxB: PIPELINE_MAX_B, tractColors: TRACT_COLORS_VERSION,
+    code: versions.code, labeler: versions.labeler, synthstrip: versions.synthstrip };
 }
-const sameRules = (a: Record<string, unknown> | undefined, b: Record<string, unknown>) => !!a && Object.keys(b).every((k) => String(a[k]) === String(b[k])) && Object.keys(a).length === Object.keys(b).length;
+/** The inputs a case was made from: a reversed scan or a T1 that arrives later makes the case stale (finding 11). */
+export interface CaseInputs { diffusion: string; partner: string | null; t1: string | null }
+/** Same rules (every key, both ways) and same inputs. */
+export function isCurrent(stored: { rules?: Record<string, unknown>; inputs?: Partial<CaseInputs> } | undefined, rules: Record<string, unknown>, inputs: CaseInputs): boolean {
+  const a = stored?.rules;
+  if (!a || Object.keys(a).length !== Object.keys(rules).length || !Object.keys(rules).every((k) => String(a[k]) === String(rules[k]))) return false;
+  const i = stored?.inputs ?? {};
+  return i.diffusion === inputs.diffusion && (i.partner ?? null) === inputs.partner && (i.t1 ?? null) === inputs.t1;
+}
+
+// ── What a series is (from its volumes; the rules tested in import-job.test.ts) ───────────────────────────────────
+
+/** What the job needs to know about a series to choose: from its volumes and the first header, no pixels. */
+export interface SeriesFacts {
+  uid: string; studyUID: string; patientUID: string; description: string;
+  volumes: number; bValues: number[];
+  /** Distinct gradient directions among the volumes with b > 50. */
+  directions: number;
+  /** The scanner's record of the phase-encoding direction ("j-", "ROW", …) when there is one. */
+  phaseEncoding?: string;
+  /** The first volume's placement (4×4 ijkToRAS). */
+  ijkToRAS: number[];
+  /** A computed map (ImageType ADC, TRACE, FA, …), or an image Albula made: never the anatomy. */
+  derived: boolean;
+}
+/** A diffusion scan worth a whole-brain run: 7 volumes or more, 6 gradient directions or more (the tensor's minimum). */
+export const isDiffusionScan = (f: SeriesFacts) => f.volumes >= 7 && f.directions >= 6;
+const isB0Only = (f: SeriesFacts) => f.bValues.length >= 1 && f.bValues.every((b) => Number.isFinite(b) && b < 50);
+const hasB0 = (f: SeriesFacts) => f.bValues.some((b) => Number.isFinite(b) && b < 50);
+/** Placed as the scan is: origin within 30 mm, each axis within 15° (module.ts partnerFor). */
+export function samePlacement(A: number[], B: number[]): boolean {
+  if (Math.hypot(A[3] - B[3], A[7] - B[7], A[11] - B[11]) > 30) return false;
+  for (let c = 0; c < 3; c++) {
+    const u = [A[c], A[4 + c], A[8 + c]], w = [B[c], B[4 + c], B[8 + c]], cos = Math.abs(u[0] * w[0] + u[1] * w[1] + u[2] * w[2]) / (Math.hypot(...u) * Math.hypot(...w));
+    if (!(cos > Math.cos(15 * Math.PI / 180))) return false;
+  }
+  return true;
+}
+/** The recorded phase-encoding directions say the two are a reversed pair: the same axis, opposite signs. */
+function recordedReversed(a?: string, b?: string): boolean | undefined {
+  const axis = (d: string) => d === "ROW" ? "i" : d === "COL" || d === "COLUMN" ? "j" : d[0], signed = (d: string) => /^[ijk]-?$/.test(d);
+  if (!a || !b) return undefined;
+  if (axis(a) !== axis(b)) return false;
+  return signed(a) && signed(b) ? a.endsWith("-") !== b.endsWith("-") : undefined;
+}
+/**
+ * THE REVERSED PARTNER of a diffusion scan (finding 7): a series of the same study placed as the scan is, holding
+ * b = 0 images, and not itself a bigger diffusion scan. First choice: one the scanner's record calls reversed; then a
+ * b = 0-only series; then a smaller diffusion series with b = 0 images. One the record calls NOT reversed is skipped.
+ */
+export function partnerOf(dwi: SeriesFacts, all: SeriesFacts[]): SeriesFacts | undefined {
+  const c = all.filter((s) => s.uid !== dwi.uid && s.studyUID === dwi.studyUID && hasB0(s) && s.volumes < dwi.volumes && samePlacement(s.ijkToRAS, dwi.ijkToRAS)
+    && recordedReversed(dwi.phaseEncoding, s.phaseEncoding) !== false);
+  return c.find((s) => recordedReversed(dwi.phaseEncoding, s.phaseEncoding) === true) ?? c.find(isB0Only) ?? c[0];
+}
+/** A T1 by the series' name (face.ts pickAnatomy's rule), or a 3D T1 sequence's usual names. */
+export const T1_NAME = /(^|[^a-z0-9])t1([^0-9]|$)|mprage|mp-rage|bravo|spgr|tfl3d|t1w/i;
+/**
+ * THE MRI OF THE ANATOMY for a scan (finding 6): one volume, not diffusion, not b = 0, not computed, of the same study --
+ * else of the same patient -- and named as a T1. Quality first: with no image named so, none is chosen and the case
+ * waits (the module, which shows its choice to the person, takes the first image instead).
+ */
+export function anatomyOf(dwi: SeriesFacts, all: SeriesFacts[]): SeriesFacts | undefined {
+  const ok = (s: SeriesFacts) => s.uid !== dwi.uid && s.volumes === 1 && !s.derived && !s.bValues.some((b) => Number.isFinite(b)) && T1_NAME.test(s.description);
+  return all.find((s) => ok(s) && s.studyUID === dwi.studyUID) ?? all.find((s) => ok(s) && !!dwi.patientUID && s.patientUID === dwi.patientUID);
+}
+/** The cases of a set of series: every diffusion scan that is not itself another scan's partner. */
+export function planCases(all: SeriesFacts[]): { dwi: SeriesFacts; partner?: SeriesFacts; t1?: SeriesFacts }[] {
+  const scans = all.filter(isDiffusionScan).sort((a, b) => b.volumes - a.volumes);
+  const used = new Set<string>(), out: { dwi: SeriesFacts; partner?: SeriesFacts; t1?: SeriesFacts }[] = [];
+  for (const dwi of scans) {
+    if (used.has(dwi.uid)) continue;
+    const partner = partnerOf(dwi, all), t1 = anatomyOf(dwi, all);
+    if (partner) used.add(partner.uid);
+    out.push({ dwi, ...(partner ? { partner } : {}), ...(t1 ? { t1 } : {}) });
+  }
+  return out;
+}
+
+// ── Reading ───────────────────────────────────────────────────────────────────────────────────────────────────────
 
 /** One series read through the core reader, with what the tracts object needs from its headers. */
 export interface ReadSeries {
-  uid: string; description: string; frames: Volume[];
+  facts: SeriesFacts; frames: Volume[];
   /** The first instance's header as DICOM JSON (patient and study attributes, frame of reference). */
   header: Record<string, { vr?: string; Value?: unknown[] }>;
   instances: { sopClassUID: string; sopInstanceUID: string }[];
 }
+const metaOf = (v: Volume) => (v.meta ?? {}) as Record<string, unknown>;
+const diffusionOf = (v: Volume) => metaOf(v).diffusion as { bValue?: number; gradient?: number[]; phaseEncoding?: string } | undefined;
 
-/** Read a series' files, parse them with every registered interpreter (the extension's hooks are loaded by the program),
- *  and make its volumes -- the duckn copy writer's path. */
+/** Read a series' files and make its volumes (the duckn copy writer's path; the extension's hooks are loaded by the program). */
 export async function readSeries(dbDir: string, row: IndexSeries): Promise<ReadSeries> {
   const paths = await seriesFilePaths(dbDir, row.seriesUID);
-  if (!paths.length) throw new Error(`${row.seriesUID}: no files in the index`);
+  if (!paths.length) throw new Error("no files in the index");
+  if (paths.length > MAX_SERIES_FILES) throw new Error(`${paths.length} files: too large to be a diffusion scan, not read`);
   const buffers = await Promise.all(paths.map(async (p) => { const b = await Deno.readFile(p); return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) as ArrayBuffer; }));
   const instances = await parseInstances(buffers, { headers: true });
-  if (!instances.length) throw new Error(`${row.seriesUID}: none of its ${paths.length} files could be read as images`);
+  if (!instances.length) throw new Error(`none of its ${paths.length} files could be read as images`);
   const { frames } = volumesOfSeries(instances);
   const header = (instances[0].header?.json ?? {}) as ReadSeries["header"];
   const seen = new Set<string>(), refs: ReadSeries["instances"] = [];
@@ -62,94 +150,106 @@ export async function readSeries(dbDir: string, row: IndexSeries): Promise<ReadS
     const sop = i.sopInstanceUID, cls = String((i.header?.json as ReadSeries["header"] | undefined)?.["00080016"]?.Value?.[0] ?? "");
     if (sop && !seen.has(sop)) { seen.add(sop); refs.push({ sopClassUID: cls, sopInstanceUID: sop }); }
   }
-  return { uid: row.seriesUID, description: row.description, frames, header, instances: refs };
+  const bValues = frames.map((v) => Number(diffusionOf(v)?.bValue ?? NaN));
+  const dirs = new Set(frames.filter((v) => Number(diffusionOf(v)?.bValue ?? 0) > 50).map((v) => (diffusionOf(v)?.gradient ?? []).map((x) => Math.round(Number(x) * 100) / 100).join(",")));
+  const maker = String(header["00080070"]?.Value?.[0] ?? "");
+  // A computed map by its ImageType values (ADC, trace, FA, exponential ADC), or an image Albula made. Not "DERIVED" alone:
+  // a scan converted to DICOM (the BIDS import, other converters) says DERIVED and is still the scan.
+  const derived = (header["00080008"]?.Value ?? []).map((x) => String(x).toUpperCase()).some((v) => ["ADC", "TRACE", "TRACEW", "FA", "EXP", "EADC", "CALC_BV", "COLFA"].includes(v)) || maker === "SlicerAlbula";
+  return { facts: { uid: row.seriesUID, studyUID: row.studyUID, patientUID: row.patientUID, description: row.description, volumes: frames.length, bValues, directions: dirs.size,
+    ...(frames[0] && diffusionOf(frames[0])?.phaseEncoding ? { phaseEncoding: diffusionOf(frames[0])!.phaseEncoding } : {}), ijkToRAS: frames[0]?.ijkToRAS ?? [], derived }, frames, header, instances: refs };
 }
 
-const bOf = (v: Volume) => Number(((v.meta as Record<string, unknown> | undefined)?.diffusion as { bValue?: number } | undefined)?.bValue ?? NaN);
-const peOf = (v: Volume) => ((v.meta as Record<string, unknown> | undefined)?.diffusion as { phaseEncoding?: string } | undefined)?.phaseEncoding;
-/** A diffusion scan, as the module decides it: seven volumes or more, some with b > 0 (module.ts). */
-export const isDiffusionScan = (s: ReadSeries) => s.frames.length >= 7 && s.frames.some((v) => bOf(v) > 50);
-/** b = 0 images only, every volume carrying a diffusion b-value under 50. */
-const isB0Only = (s: ReadSeries) => s.frames.length >= 1 && s.frames.every((v) => Number.isFinite(bOf(v)) && bOf(v) < 50);
-/** Placed as the scan is: origin within 30 mm, each axis within 15° (module.ts partnerFor). */
-function samePlacement(a: Volume, b: Volume): boolean {
-  const A = a.ijkToRAS, B = b.ijkToRAS;
-  if (Math.hypot(A[3] - B[3], A[7] - B[7], A[11] - B[11]) > 30) return false;
-  for (let c = 0; c < 3; c++) {
-    const u = [A[c], A[4 + c], A[8 + c]], w = [B[c], B[4 + c], B[8 + c]], cos = (u[0] * w[0] + u[1] * w[1] + u[2] * w[2]) / (Math.hypot(...u) * Math.hypot(...w));
-    if (!(cos > Math.cos(15 * Math.PI / 180))) return false;
-  }
-  return true;
+/** The studies to look at: those with an MR series that is not one of ours, with their MR series (and the patient's). */
+export async function studiesOf(dbDir: string, only?: string): Promise<{ rows: IndexSeries[]; studies: string[] }> {
+  const rows = await indexSeries(dbDir);
+  const mr = (r: IndexSeries) => r.modality === "MR" && r.description !== TRACTS_DESCRIPTION;
+  let studies = [...new Set(rows.filter(mr).map((r) => r.studyUID))];
+  if (only) { const st = rows.find((r) => r.seriesUID === only)?.studyUID; studies = studies.filter((s) => s === st); }
+  return { rows, studies };
 }
-
-/** What a diffusion scan's job needs, found in its study; or why it waits. */
-export interface CasePlan { study: string; dwi: ReadSeries; partner?: ReadSeries; t1?: ReadSeries }
 
 /**
- * THE STUDIES' DIFFUSION SCANS, each with its partner and T1 (the module's rules: partnerFor, anatomyFor and pickAnatomy
- * prefer a "T1" in the name). Every MR series of a study with an MR series is read; nothing else.
+ * ONE STUDY'S CASES, read when its turn comes and let go after it (finding 3): every MR series of the study, and of the
+ * patient's other studies when the study has no T1 (the module takes an image of the same patient too).
  */
-export async function planDatabase(dbDir: string, onSeries?: (line: string) => void, only?: string): Promise<{ plans: CasePlan[]; rows: IndexSeries[] }> {
-  const rows = await indexSeries(dbDir);
-  const studies = new Map<string, IndexSeries[]>();
-  for (const r of rows) if (r.modality === "MR" && r.description !== TRACTS_DESCRIPTION) (studies.get(r.studyUID) ?? studies.set(r.studyUID, []).get(r.studyUID)!).push(r);
-  if (only) { const st = rows.find((r) => r.seriesUID === only)?.studyUID; for (const k of [...studies.keys()]) if (k !== st) studies.delete(k); }
-  const plans: CasePlan[] = [];
-  for (const [study, series] of studies) {
-    const read: ReadSeries[] = [];
-    for (const r of series) {
-      try { read.push(await readSeries(dbDir, r)); onSeries?.(`read ${r.seriesUID}`); }
-      catch (e) { onSeries?.(`${r.seriesUID}: not read (${(e as Error).message.slice(0, 160)})`); }
+export async function planStudy(dbDir: string, rows: IndexSeries[], study: string, onLine?: (line: string, why?: string) => void): Promise<{ dwi: ReadSeries; partner?: ReadSeries; t1?: ReadSeries }[]> {
+  const mr = (r: IndexSeries) => r.modality === "MR" && r.description !== TRACTS_DESCRIPTION;
+  const own = rows.filter((r) => mr(r) && r.studyUID === study);
+  const read = new Map<string, ReadSeries>();
+  const readAll = async (list: IndexSeries[]) => {
+    for (const r of list) {
+      if (read.has(r.seriesUID)) continue;
+      try { read.set(r.seriesUID, await readSeries(dbDir, r)); onLine?.("read a series"); }
+      catch (e) { onLine?.("a series could not be read", (e as Error).message); }
     }
-    for (const dwi of read.filter(isDiffusionScan)) {
-      if (only && dwi.uid !== only) continue;
-      const partner = read.find((s) => s !== dwi && isB0Only(s) && samePlacement(s.frames[0], dwi.frames[0]));
-      const anatomy = read.filter((s) => s.frames.length === 1 && !isDiffusionScan(s) && !isB0Only(s) && !((s.frames[0].meta as Record<string, unknown> | undefined)?.diffusion));
-      const t1 = anatomy.find((s) => /t1/i.test(s.description)) ?? anatomy[0];
-      plans.push({ study, dwi, ...(partner ? { partner } : {}), ...(t1 ? { t1 } : {}) });
-    }
+  };
+  await readAll(own);
+  let cases = planCases([...read.values()].map((s) => s.facts));
+  if (!cases.length) return [];
+  // No T1 in the study: the patient's other studies (same patient, module.ts anatomyFor).
+  if (cases.some((c) => !c.t1)) {
+    const patient = own[0]?.patientUID;
+    if (patient) { await readAll(rows.filter((r) => mr(r) && r.studyUID !== study && r.patientUID === patient)); cases = planCases([...read.values()].map((s) => s.facts)).filter((c) => c.dwi.studyUID === study); }
   }
-  return { plans, rows };
+  return cases.map((c) => ({ dwi: read.get(c.dwi.uid)!, ...(c.partner ? { partner: read.get(c.partner.uid)! } : {}), ...(c.t1 ? { t1: read.get(c.t1.uid)! } : {}) }));
 }
 
-/** The stored tracts objects of a diffusion series, with the rules they were made by. */
-export async function storedTracts(dbDir: string, rows: IndexSeries[], dwiUID: string): Promise<{ seriesUID: string; rules?: Record<string, unknown> }[]> {
-  const out: { seriesUID: string; rules?: Record<string, unknown> }[] = [];
-  for (const r of rows.filter((x) => x.description === TRACTS_DESCRIPTION && x.studyUID === rows.find((y) => y.seriesUID === dwiUID)?.studyUID)) {
+/** The stored tracts objects of a diffusion series, with what made them (from the index as it is NOW: finding 8). */
+export async function storedTracts(dbDir: string, dwiUID: string): Promise<{ seriesUID: string; rules?: Record<string, unknown>; inputs?: Partial<CaseInputs>; made?: string }[]> {
+  const rows = await indexSeries(dbDir), study = rows.find((y) => y.seriesUID === dwiUID)?.studyUID;
+  const out: { seriesUID: string; rules?: Record<string, unknown>; inputs?: Partial<CaseInputs>; made?: string }[] = [];
+  for (const r of rows.filter((x) => x.description === TRACTS_DESCRIPTION && x.studyUID === study)) {
     for (const p of await seriesFilePaths(dbDir, r.seriesUID)) {
       try {
         const t = await dicomToTracts(await Deno.readFile(p));
-        if (t.referencedSeries === dwiUID) out.push({ seriesUID: r.seriesUID, rules: t.provenance?.rules as Record<string, unknown> | undefined });
-      } catch { /* not a tracts object of ours */ }
+        if (t.referencedSeries === dwiUID) out.push({ seriesUID: r.seriesUID, rules: t.provenance?.rules as Record<string, unknown> | undefined, inputs: t.provenance?.inputs as Partial<CaseInputs> | undefined, made: String(t.provenance?.made ?? "") });
+      } catch { /* not a readable tracts object of ours */ }
     }
   }
-  return out;
+  return out.sort((a, b) => (b.made ?? "").localeCompare(a.made ?? ""));
 }
 
-/** What happened to one diffusion scan. */
-export type CaseOutcome =
-  | { state: "made"; seriesUID: string; streamlines: number; named: number; seconds: number; said: string }
-  | { state: "current"; seriesUID: string }
-  | { state: "waiting"; why: string };
+// ── The brain mask ───────────────────────────────────────────────────────────────────────────────────────────────
 
 /**
  * SynthStrip's brain on the T1, through the server's haversack proxy (`server` the server's root URL). Starts the
- * segmentation server when none answers, and waits for it (quality first: no fallback to the scan's own mask).
+ * segmentation server when none answers. Quality first: no fallback to the scan's own mask. `kind` says whether waiting
+ * can help: "waiting" (the server is not answering), "cannot" (no SynthStrip on this Mac), "failed" (it ran and failed).
  */
-export async function brainOnT1(server: string, t1: Volume, onProgress?: (line: string) => void): Promise<{ mask?: BrainMask; why?: string }> {
-  const transport = { fetch: (...a: Parameters<typeof fetch>) => fetch(...a), base: `${server.replace(/\/+$/, "")}/_haversack/` };
-  const upload = async () => ({ bytes: await writeNrrd(t1, { encoding: "gzip" }), filename: "t1.nrrd" })   // gzip INSIDE the NRRD, as the page sends it (logic/export.ts); ITK will not read ".nrrd.gz";
+export async function brainOnT1(server: string, t1: ReadSeries, onProgress?: (line: string) => void): Promise<{ mask?: BrainMask; why?: string; kind?: "waiting" | "cannot" | "failed" }> {
+  const root = server.replace(/\/+$/, ""), transport = { fetch: (...a: Parameters<typeof fetch>) => fetch(...a), base: `${root}/_haversack/` };
+  // gzip INSIDE the NRRD, as the page sends it (logic/export.ts); haversack's reader will not take ".nrrd.gz".
+  const upload = async () => ({ bytes: await writeNrrd(t1.frames[0], { encoding: "gzip" }), filename: "t1.nrrd" });
   const stub = { nodes: new Map() } as unknown as Parameters<typeof synthstripBrainMask>[0];
-  let r = await synthstripBrainMask(stub, `t1:${(t1.meta as Record<string, unknown> | undefined)?.seriesInstanceUID ?? "?"}`, onProgress, { transport, upload });
+  const key = `t1:${t1.facts.uid}`;
+  let r = await synthstripBrainMask(stub, key, onProgress, { transport, upload });
   if (!r.ok && r.reason === "no-server") {
     onProgress?.("starting the segmentation server");
-    const s = await startSegmentationServer(onProgress, { fetch: (input, init) => fetch(typeof input === "string" && input.startsWith("/") ? `${server.replace(/\/+$/, "")}${input}` : input, init), base: transport.base });
-    if (s.ok) r = await synthstripBrainMask(stub, `t1:${(t1.meta as Record<string, unknown> | undefined)?.seriesInstanceUID ?? "?"}`, onProgress, { transport, upload });
+    const s = await startSegmentationServer(onProgress, { fetch: (input, init) => fetch(typeof input === "string" && input.startsWith("/") ? `${root}${input}` : input, init), base: transport.base });
+    if (s.ok) r = await synthstripBrainMask(stub, key, onProgress, { transport, upload });
   }
-  return r.ok ? { mask: r.mask } : { why: r.message };
+  if (r.ok) return { mask: r.mask };
+  return { why: r.message, kind: r.reason === "no-synthstrip" ? "cannot" : r.reason === "failed" ? "failed" : "waiting" };
+}
+/** haversack's and SynthStrip's versions, as the server reports them (finding 10). */
+export async function synthstripVersion(server: string): Promise<string> {
+  const root = server.replace(/\/+$/, "");
+  const st = await fetch(`${root}/_haversack/_status`).then((r) => r.json()).catch(() => ({})) as { health?: { version?: string } };
+  const task = await fetch(`${root}/_haversack/tasks/synthstrip:mask`).then((r) => r.json()).catch(() => ({})) as { weights_installed?: { id?: string; version?: string }[] };
+  const w = task.weights_installed?.find((x) => x.id === "synthstrip")?.version;
+  return `haversack ${st.health?.version ?? "?"}, synthstrip weights ${w ?? "?"}`;
 }
 
-/** The patient and study attributes the tracts object copies from the scan (as they are). */
+// ── One case ─────────────────────────────────────────────────────────────────────────────────────────────────────
+
+/** What happened to one diffusion scan; `why` in plain words. */
+export type CaseOutcome =
+  | { state: "made" | "would be made"; seriesUID: string; streamlines: number; stored: number; named: number; seconds: number; said: string }
+  | { state: "current"; seriesUID: string }
+  | { state: "waiting" | "cannot" | "failed"; why: string };
+
+/** The patient and study attributes the tracts object copies from the scan (PersonName as its alphabetic form). */
 const PATIENT_STUDY: [string, string][] = [["00100010", "PatientName"], ["00100020", "PatientID"], ["00100030", "PatientBirthDate"], ["00100040", "PatientSex"],
   ["0020000D", "StudyInstanceUID"], ["00080020", "StudyDate"], ["00080030", "StudyTime"], ["00200010", "StudyID"], ["00080050", "AccessionNumber"], ["00080090", "ReferringPhysicianName"]];
 function patientStudyOf(h: ReadSeries["header"]): Record<string, unknown> {
@@ -161,61 +261,70 @@ function patientStudyOf(h: ReadSeries["header"]): Record<string, unknown> {
   return o;
 }
 
+/** The track sets: one per named tract and side, and one "Unnamed" (too short to name, or no tract). */
+export function trackSets(sl: Float32Array[], tract: Int32Array, side: Int8Array, outside: Uint8Array, names: { name: string }[]): TractSetData[] {
+  const count = names.length, OTHER = count - 1, groups = new Map<string, TractSetData>();
+  for (let i = 0; i < sl.length; i++) {
+    const t = tract[i], named = t !== SHORT && t !== OTHER && !outside[i];
+    const s = (named ? Math.sign(side[i]) : 0) as -1 | 0 | 1, key = named ? `${t}:${s}` : "unnamed";
+    let g = groups.get(key);
+    if (!g) { const c = tractColor(named ? t : -1, count); g = { label: named ? names[t].name : UNNAMED, side: s, color: [c[0], c[1], c[2]], streamlines: [] }; groups.set(key, g); }
+    g.streamlines.push(sl[i]);
+  }
+  return [...groups.values()].sort((a, b) => (a.label === UNNAMED ? 1 : b.label === UNNAMED ? -1 : a.label.localeCompare(b.label) || a.side - b.side));
+}
+
 /**
- * ONE CASE: the pipeline on the planned scan, its tracts written and indexed through the server. `rules` from jobRules;
- * a scan whose stored tracts carry the same rules is left alone.
+ * ONE CASE: the pipeline on the planned scan, its tracts written and indexed through the server -- unless tracts made
+ * by the same code, rules and inputs are already stored.
  */
-export async function makeTracts(dbDir: string, dbId: string, server: string, plan: CasePlan, rows: IndexSeries[], device: GPUDevice, model: TractCloudModel,
-  labeler: { model: RapidParcModel; name: string }, onProgress?: (line: string) => void, opts: { force?: boolean; dryRun?: boolean } = {}): Promise<CaseOutcome> {
-  const rules = jobRules(labeler.name);
-  const stored = await storedTracts(dbDir, rows, plan.dwi.uid);
-  const current = stored.find((s) => sameRules(s.rules, rules));
+export async function makeTracts(dbDir: string, dbId: string, server: string, plan: { dwi: ReadSeries; partner?: ReadSeries; t1?: ReadSeries }, device: GPUDevice, model: TractCloudModel,
+  labeler: RapidParcModel, versions: { code: string; labeler: string; synthstrip: string }, onProgress?: (line: string) => void, opts: { force?: boolean; dryRun?: boolean } = {}): Promise<CaseOutcome> {
+  const rules = jobRules(versions);
+  const inputs: CaseInputs = { diffusion: plan.dwi.facts.uid, partner: plan.partner?.facts.uid ?? null, t1: plan.t1?.facts.uid ?? null };
+  const stored = await storedTracts(dbDir, plan.dwi.facts.uid);
+  const current = stored.find((s) => isCurrent(s, rules, inputs));
   if (current && !opts.force) return { state: "current", seriesUID: current.seriesUID };
-  // QUALITY FIRST: the tracking's brain is SynthStrip's on the T1; without the T1 or the service the case waits.
-  if (!plan.t1) return { state: "waiting", why: "waiting for the MRI of the anatomy (T1) of this study" };
+  // QUALITY FIRST: the tracking's brain is SynthStrip's on the T1; without the T1 the case waits for it.
+  if (!plan.t1) return { state: "waiting", why: "waiting for an MRI of the anatomy named as a T1 (same study or patient)" };
   const t0 = performance.now();
   onProgress?.("finding the brain on the MRI of the anatomy");
-  const brain = await brainOnT1(server, plan.t1.frames[0], onProgress);
-  if (!brain.mask) return { state: "waiting", why: `waiting for the brain-mask service (${brain.why})` };
-  const dwi = fromDicomVolumes(plan.dwi.frames, plan.dwi.description);
-  const t1v = plan.t1.frames[0];
-  const stages: StageTimes = {};
+  const brain = await brainOnT1(server, plan.t1, onProgress);
+  if (!brain.mask) return { state: brain.kind ?? "waiting", why: `the brain on the MRI of the anatomy: ${brain.why}` };
+  const dwi = fromDicomVolumes(plan.dwi.frames, plan.dwi.facts.description);
+  const t1v = plan.t1.frames[0], stages: StageTimes = {};
   onProgress?.("correcting, aligning and tracking the whole brain");
   const r = await wholeBrainTracts({ dwi,
-    ...(plan.partner ? { partner: { b0s: plan.partner.frames.map((v) => v.data as ArrayLike<number>), grid: { dims: plan.partner.frames[0].dims, ijkToRAS: plan.partner.frames[0].ijkToRAS }, name: plan.partner.description || "reversed scan" } } : {}),
-    phaseEncoding: { scan: peOf(plan.dwi.frames[0]), partner: plan.partner ? peOf(plan.partner.frames[0]) : undefined },
+    ...(plan.partner ? { partner: { b0s: plan.partner.frames.filter((v) => Number(diffusionOf(v)?.bValue ?? 0) < 50).map((v) => v.data as ArrayLike<number>), grid: { dims: plan.partner.frames[0].dims, ijkToRAS: plan.partner.frames[0].ijkToRAS }, name: "the reversed scan" } } : {}),
+    phaseEncoding: { scan: plan.dwi.facts.phaseEncoding, partner: plan.partner?.facts.phaseEncoding },
     t1: { dims: t1v.dims as [number, number, number], ijkToRAS: t1v.ijkToRAS, data: t1v.data as ArrayLike<number> },
-    brainT1: brain.mask }, device, model, { labeler: labeler.model }, stages);
-  // THE TRACK SETS: one per named tract and side, and one "Unnamed" for the rest (too short to name, or no tract).
-  const count = model.json.tracts.length, OTHER = count - 1, groups = new Map<string, TractSetData>();
-  for (let i = 0; i < r.sl.length; i++) {
-    const t = r.named.tract[i], named = t !== SHORT && t !== OTHER && !r.outside[i];
-    const side = (named ? Math.sign(r.named.side[i]) : 0) as -1 | 0 | 1, key = named ? `${t}:${side}` : "unnamed";
-    let g = groups.get(key);
-    if (!g) { const c = named ? tractColor(t, count) : tractColor(-1, count); g = { label: named ? model.json.tracts[t].name : UNNAMED, side, color: [c[0], c[1], c[2]], streamlines: [] }; groups.set(key, g); }
-    g.streamlines.push(r.sl[i]);
-  }
-  const sets = [...groups.values()].sort((a, b) => (a.label === UNNAMED ? 1 : b.label === UNNAMED ? -1 : a.label.localeCompare(b.label) || a.side - b.side));
+    brainT1: brain.mask }, device, model, { labeler }, stages);
+  const sets = trackSets(r.sl, r.named.tract, r.named.side, r.outside, model.json.tracts);
   const named = sets.filter((s) => s.label !== UNNAMED).reduce((n, s) => n + s.streamlines.length, 0);
   // On the T1's axes when aligned: the streamlines are in the T1's space, so the T1's frame of reference.
-  const aligned = r.alignment && !r.alignment.doubt;
+  const aligned = !!r.alignment && !r.alignment.doubt;
   const forUID = String(((aligned ? plan.t1.header : plan.dwi.header)["00200052"]?.Value?.[0]) ?? "");
   const seconds = (performance.now() - t0) / 1000;
-  const provenance = { rules, made: new Date().toISOString(), seconds: +seconds.toFixed(1), stages: stageText(stages),
-    streamlines: r.sl.length, onePointLeftOut: r.sl.filter((p) => p.length < 6).length,
-    inputs: { diffusion: plan.dwi.uid, partner: plan.partner?.uid ?? null, t1: plan.t1.uid }, corrected: r.corrected,
+  const provenance = { rules, inputs, made: new Date().toISOString(), seconds: +seconds.toFixed(1), stages: stageText(stages),
+    streamlines: r.sl.length, onePointLeftOut: r.sl.filter((p) => p.length < 6).length, corrected: r.corrected, alignedToT1: aligned,
     trackingRuleApplied: r.rule.id, motionRuleApplied: r.prep.motionRule, ...(r.alignment ? { alignment: r.alignment } : {}), brain: r.fit.seedMaskRule ?? r.fit.maskRule };
-  const written = await tractsToDicom(sets, { patientStudy: patientStudyOf(plan.dwi.header), frameOfReferenceUID: forUID, seriesInstanceUID: plan.dwi.uid, instances: plan.dwi.instances },
+  // Several objects can follow each other under one scan (remade after a change): numbered from 900 by their time.
+  const seriesNumber = 900 + stored.length;
+  const written = await tractsToDicom(sets, { patientStudy: patientStudyOf(plan.dwi.header), frameOfReferenceUID: forUID, seriesInstanceUID: plan.dwi.facts.uid, instances: plan.dwi.instances,
+    alsoReferenced: [...(aligned ? [{ seriesInstanceUID: plan.t1.facts.uid, instances: plan.t1.instances }] : []), ...(plan.partner ? [{ seriesInstanceUID: plan.partner.facts.uid, instances: plan.partner.instances }] : [])] },
     { algorithmName: "UKF two-tensor (Albula's port of UKFTractography)", algorithmVersion: `tracking rule ${r.rule.id}`, algorithmParameters: JSON.stringify(r.rule.ukf).slice(0, 10240),
-      model: "multi", provenance, seriesDescription: TRACTS_DESCRIPTION });
+      model: "multi", provenance, seriesDescription: TRACTS_DESCRIPTION, seriesNumber });
   // A streamline of one point (a seed that stopped at once) has no line to store; the writer leaves it out, and says so.
   const onePoint = r.sl.length - written.tracks;
-  const said = `${r.sl.length} streamlines (${written.tracks} stored${onePoint ? `, ${onePoint} of a single point left out` : ""}), ${named} named into ${sets.length - (groups.has("unnamed") ? 1 : 0)} tracts, in ${seconds.toFixed(0)} s; ${r.corrected}`;
-  if (opts.dryRun) return { state: "made", seriesUID: written.seriesInstanceUID, streamlines: r.sl.length, named, seconds, said: `(dry run, not written) ${said}` };
-  const meta = { sopInstanceUID: written.sopInstanceUID, seriesInstanceUID: written.seriesInstanceUID, studyInstanceUID: plan.study, modality: "MR",
-    seriesDescription: TRACTS_DESCRIPTION, frameOfReferenceUID: forUID, derivedFrom: { parentSeriesUID: plan.dwi.uid, kind: "tracts", label: "Fiber tracts" } };
+  const said = `${r.sl.length} streamlines (${written.tracks} stored${onePoint ? `, ${onePoint} of a single point left out` : ""}), ${named} named into ${sets.length - (sets.some((s) => s.label === UNNAMED) ? 1 : 0)} tracts, in ${seconds.toFixed(0)} s`;
+  const out = { seriesUID: written.seriesInstanceUID, streamlines: r.sl.length, stored: written.tracks, named, seconds, said };
+  if (opts.dryRun) return { state: "would be made", ...out };
+  const now = new Date(), d2 = (n: number) => String(n).padStart(2, "0");
+  const meta = { sopInstanceUID: written.sopInstanceUID, seriesInstanceUID: written.seriesInstanceUID, studyInstanceUID: plan.dwi.facts.studyUID, modality: "MR",
+    seriesNumber, seriesDate: `${now.getFullYear()}${d2(now.getMonth() + 1)}${d2(now.getDate())}`, seriesTime: `${d2(now.getHours())}${d2(now.getMinutes())}${d2(now.getSeconds())}`,
+    seriesDescription: TRACTS_DESCRIPTION, frameOfReferenceUID: forUID, derivedFrom: { parentSeriesUID: plan.dwi.facts.uid, kind: "tracts", label: "Fiber tracts" } };
   const res = await fetch(`${server.replace(/\/+$/, "")}/_db/${encodeURIComponent(dbId)}/_write/${encodeURIComponent(`tracts-${written.seriesInstanceUID}.dcm`)}`,
     { method: "POST", body: written.bytes as unknown as BodyInit, headers: { "content-type": "application/dicom", "x-albula-index": encodeURIComponent(JSON.stringify(meta)) } });
-  if (!res.ok) throw new Error(`the server refused the tracts object: ${res.status} ${(await res.text()).slice(0, 300)}`);
-  return { state: "made", seriesUID: written.seriesInstanceUID, streamlines: r.sl.length, named, seconds, said };
+  if (!res.ok) return { state: "failed", why: `the server did not store the tracts (${res.status})` };
+  return { state: "made", ...out };
 }

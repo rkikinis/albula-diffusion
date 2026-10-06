@@ -2,8 +2,11 @@
 // already read -- the diffusion scan, its reversed phase-encoding partner's b = 0 images, the T1, SynthStrip's brain on
 // the T1 -- through the distortion correction, the head's movement and the alignment to the T1 (one resampling), the
 // tensor, the whole-brain tracking and the naming. case-run.ts (a BIDS case from files) and the import-time job (a
-// DICOM series from a database) both call it, so the regression test checks what the job stores. The tumor is not part
-// of it: the near-tumor list is measured afterwards against whatever outline the resident has.
+// DICOM series from a database) both call it, so a change to any step shows in the regression test. It does NOT check
+// the job's own inputs: the same scan read from DICOM instead of NIfTI (the slice axis the other way, the SynthStrip mask
+// made through the server) gave 47,904 streamlines against 47,805 on PAT16 -- the same images, a different start for the
+// seeds and the movement (critic, 2026-10-05, finding 5). The tumor is not part of it: the near-tumor list is measured
+// afterwards against whatever outline the resident has.
 import type { DiffusionSeries } from "./dwi.ts";
 import { fitTensors, type TensorFit } from "./tensor.ts";
 import { correctWithReversed, trackUkfSeeds, wholeBrainSeeds, type StageTimes, type TrackTiming } from "./planning.ts";

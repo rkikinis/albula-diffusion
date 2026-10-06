@@ -11,7 +11,9 @@ const source: TractsSource = {
   frameOfReferenceUID: "2.25.1002", seriesInstanceUID: "2.25.1003",
   instances: [{ sopClassUID: "1.2.840.10008.5.1.4.1.1.4.1", sopInstanceUID: "2.25.1004" }],
 };
-const run: TractsRun = { algorithmName: "UKF two-tensor (Albula GPU port)", algorithmVersion: "tracking rule 3", algorithmParameters: "seedingThreshold=0.1 stoppingFA=0.08", model: "multi", provenance: { trackingRule: 3, date: "2026-10-05" } };
+// The provenance as the import job writes it: free text with "°" and "·" (critic, 2026-10-05, finding 4).
+const run: TractsRun = { algorithmName: "UKF two-tensor (Albula GPU port)", algorithmVersion: "tracking rule 3", algorithmParameters: "seedingThreshold=0.1 stoppingFA=0.08", model: "multi",
+  provenance: { trackingRule: 3, date: "2026-10-05", corrected: "head movement corrected (largest 1.8 mm and 0.9°)", stages: "read 0.2 s · tracking 35 s" } };
 const line = (x0: number, n: number) => Float32Array.from(Array.from({ length: n }, (_, i) => [x0 + i, -2 * i, 0.5 * i]).flat());
 
 Deno.test("tracts round-trip through a Tractography Results object: points, sides, colors, labels, provenance", async () => {
@@ -29,6 +31,9 @@ Deno.test("tracts round-trip through a Tractography Results object: points, side
   for (let c = 0; c < 3; c++) assertAlmostEquals(r.sets[0].color[c], sets[0].color[c], 0.01);
   assertEquals(r.provenance, run.provenance);
   assertEquals(r.referencedSeries, source.seriesInstanceUID);
+  // The T1 the points sit on, referenced as well (finding 12).
+  const w2 = await tractsToDicom(sets, { ...source, alsoReferenced: [{ seriesInstanceUID: "2.25.1005", instances: [{ sopClassUID: "1.2.840.10008.5.1.4.1.1.4", sopInstanceUID: "2.25.1006" }] }] }, run);
+  assertEquals((await dicomToTracts(w2.bytes)).referencedSeries, source.seriesInstanceUID);
   if (HAS_DCIODVFY) {
     const v = dciodvfy(w.bytes)!;
     assertEquals(v.errors, [], `dciodvfy errors: ${v.errors.join(" | ")}`);
