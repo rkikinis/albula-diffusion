@@ -24,14 +24,14 @@ export interface Prepared {
  * `dwi` as acquired (the field NOT applied: correctWithReversed with apply false), the field when there is one, the T1
  * when there is one. `motionRule` 0 when the scan was corrected before (a preprocessed dataset) or the rule is off.
  */
-export async function prepareScan(dwi: DiffusionSeries, opts: { field?: { fit: FieldFit; sign: 1 | -1 }; t1?: Grid3; motionRule?: MotionRuleId; /** The scanner's record of the phase-encoding direction ("j-", or DICOM's "ROW" / "COL"), for the eddy currents when no field gives the axis. */ phaseEncoding?: string; times?: StageTimes; say?: (s: string) => void } = {}): Promise<Prepared> {
+export async function prepareScan(dwi: DiffusionSeries, opts: { field?: { fit: FieldFit; sign: 1 | -1 }; t1?: Grid3; motionRule?: MotionRuleId; /** The scanner's record of the phase-encoding direction ("j-", or DICOM's "ROW" / "COL"), for the eddy currents when no field gives the axis. */ phaseEncoding?: string; /** motion.ts rounds (default two). */ motionRounds?: number; times?: StageTimes; say?: (s: string) => void } = {}): Promise<Prepared> {
   const rule = opts.motionRule ?? MOTION_RULE, field = opts.field, said: string[] = [];
   let motion: MotionResult | undefined;
   if (rule === 1 || rule === 2 || rule === 3) {
     opts.say?.(rule >= 2 ? "Correcting the head's movement and the eddy-current distortion between the images…" : "Correcting the head's movement between the images…");
     const t = performance.now(), pe = opts.phaseEncoding;
     const peAxis = pe === "ROW" ? 0 : pe === "COL" ? 1 : pe && /^[ijk]/.test(pe) ? "ijk".indexOf(pe[0]) as 0 | 1 | 2 : undefined;
-    motion = await estimateMotion(dwi, field, { rule, ...(peAxis !== undefined ? { peAxis } : {}) });
+    motion = await estimateMotion(dwi, field, { rule, ...(peAxis !== undefined ? { peAxis } : {}), ...(opts.motionRounds ? { rounds: opts.motionRounds } : {}) });
     if (opts.times) opts.times.motion = performance.now() - t;
     said.push(motion.said);
   }
