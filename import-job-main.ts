@@ -30,13 +30,13 @@ if (!args.server || !args.db) { say({ event: "error", said: "needs --server and 
 const server = args.server.replace(/\/+$/, "");
 
 /** THE CODE THAT SHAPES THE RESULT, hashed (critic, finding 1): every module of the extension except its tests, the
- *  person's interface (module.ts, face.ts) and this program. A change there makes stored tracts stale. */
+ *  person's interface (module.ts, face.ts, review.ts) and this program. A change there makes stored tracts stale. */
 async function codeFingerprint(): Promise<string> {
   const here = new URL("./", import.meta.url), files: string[] = [];
   const walk = async (dir: URL, rel: string) => {
     for await (const e of Deno.readDir(dir)) {
       if (e.isDirectory && !["test", "vendor", "model", "node_modules"].includes(e.name)) await walk(new URL(`${e.name}/`, dir), `${rel}${e.name}/`);
-      else if (e.isFile && /\.(ts|wgsl)$/.test(e.name) && !/\.test\.ts$|bench\.ts$/.test(e.name) && !["module.ts", "face.ts", "import-job-main.ts"].includes(`${rel}${e.name}`)) files.push(`${rel}${e.name}`);
+      else if (e.isFile && /\.(ts|wgsl)$/.test(e.name) && !/\.test\.ts$|bench\.ts$/.test(e.name) && !["module.ts", "face.ts", "review.ts", "import-job-main.ts"].includes(`${rel}${e.name}`)) files.push(`${rel}${e.name}`);
     }
   };
   await walk(here, "");

@@ -28,6 +28,9 @@ export interface Prepared {
  * `dwi` as acquired (the field NOT applied: correctWithReversed with apply false), the field when there is one, the T1
  * when there is one. `motionRule` 0 when the scan was corrected before (a preprocessed dataset) or the rule is off.
  */
+/** Did the head-movement correction make the images agree with each other better than as acquired? (Not: it is undone.) */
+export const motionHelped = (r: { before: number; after: number }): boolean => Number.isFinite(r.after) && Number.isFinite(r.before) && r.after < r.before;
+
 export async function prepareScan(dwi: DiffusionSeries, opts: { field?: { fit: FieldFit; sign: 1 | -1 }; t1?: Grid3; motionRule?: MotionRuleId; /** The scanner's record of the phase-encoding direction ("j-", or DICOM's "ROW" / "COL"), for the eddy currents when no field gives the axis. */ phaseEncoding?: string; /** motion.ts rounds (default two). */ motionRounds?: number; times?: StageTimes; say?: (s: string) => void; /** false: the directions are used as recorded, unchecked (for checking tools only). */ checkDirections?: boolean; /** The check already made for this scan (the module keeps it per scan: it depends on nothing the person can change; critic finding 8). */ directions?: GradientCheck } = {}): Promise<Prepared> {
   const rule = opts.motionRule ?? MOTION_RULE, field = opts.field, said: string[] = [];
   // THE DIRECTIONS FIRST: everything after (the movement's predictions, the tensors, the tracts) uses them. A table that
@@ -44,14 +47,20 @@ export async function prepareScan(dwi: DiffusionSeries, opts: { field?: { fit: F
     dwi = withCheckedDirections(dwi, directions);
     if (directions.verdict !== "as recorded") { directionsSaid = directions.said; said.push(directions.said); }
   }
-  let motion: MotionResult | undefined;
+  let motion: MotionResult | undefined, stepBack: string | undefined;
   if (rule === 1 || rule === 2 || rule === 3) {
     opts.say?.(rule >= 2 ? "Correcting the head's movement and the eddy-current distortion between the images…" : "Correcting the head's movement between the images…");
     const t = performance.now(), pe = opts.phaseEncoding;
     const peAxis = pe === "ROW" ? 0 : pe === "COL" ? 1 : pe && /^[ijk]/.test(pe) ? "ijk".indexOf(pe[0]) as 0 | 1 | 2 : undefined;
     motion = await estimateMotion(dwi, field, { rule, ...(peAxis !== undefined ? { peAxis } : {}), ...(opts.motionRounds ? { rounds: opts.motionRounds } : {}) });
     if (opts.times) opts.times.motion = performance.now() - t;
-    said.push(motion.said);
+    // A CORRECTION THAT DID NOT HELP IS UNDONE (Ron, 2026-10-06: robust, as a site with nobody to look needs it; "4 yes"):
+    // the images must agree with each other better after it than as acquired, or the scan is used as acquired, and said.
+    if (!motionHelped(motion.residual)) {
+      stepBack = `head movement not corrected: the correction did not make the images agree better (${(100 * (motion.residual.after / motion.residual.before - 1)).toFixed(1)}% worse), so the scan is used as acquired`;
+      motion = undefined;
+      said.push(stepBack);
+    } else said.push(motion.said);
   }
   const inPlace = async () => {
     if (motion) return await applyMotion(dwi, motion, field);
@@ -59,7 +68,7 @@ export async function prepareScan(dwi: DiffusionSeries, opts: { field?: { fit: F
     return dwi;
   };
   // Recorded: the rule actually applied, not the one asked for (critic, 2026-10-05, finding 7).
-  const done = { ...(motion ? { motion, movementSaid: motion.said } : {}), motionRule: (motion?.rule ?? 0) as MotionRuleId,
+  const done = { ...(motion ? { motion, movementSaid: motion.said } : stepBack ? { movementSaid: stepBack } : {}), motionRule: (motion?.rule ?? 0) as MotionRuleId,
     ...(directions ? { directions } : {}), ...(directionsSaid ? { directionsSaid } : {}) };
   if (!opts.t1) return { dwi: await inPlace(), said: said.join("; "), ...done };
   opts.say?.("Aligning the diffusion scan to the MRI of the anatomy…");
