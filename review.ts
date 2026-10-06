@@ -119,7 +119,7 @@ export function levelsFromPair(left: Float32Array[], right: Float32Array[], judg
   if (c < 0) return undefined;
   // The internal capsule at 22 mm -- or at 85% of the widest the two get, when that is less than 26 mm: on PAT13 and
   // PAT31 the separation peaks at 22.2-22.3 mm, in the corona radiata, and 22 was met only there (critic 2026-10-06,
-  // R2-3); on the other 34 stored cases this moves the level 0-4 mm.
+  // R2-3); of the other 34 stored cases, 19 are unchanged and 15 move 1-7 mm lower.
   let peak = -Infinity;
   sm.forEach((v, i) => { if (at[i].z >= at[c].z && v > peak) peak = v; });
   const k = first(at[c].z + 5, Math.min(22, 0.85 * peak));
@@ -227,15 +227,30 @@ function registerTractReview(ctx: ModuleContext): void {
     if (r.state === "ok") file = r.file!;
     else if (r.state === "absent") file = { version: 2, cases: {} };
   }
-  /** Apply ONE action to the file as it is on disk now; never over a file that does not read. */
-  async function saveCase(key: string, patch: CasePatch): Promise<boolean> {
+  /** Apply ONE action to the file as it is on disk now; never over a file that does not read. THE WINDOW'S SAVES RUN ONE
+   *  AFTER ANOTHER (critic 2026-10-06, R3-1): one click can start several (a moved level, a note left by the click, the
+   *  verdict); run at once, each read the same file and the last write erased the others' fields. A save that could not
+   *  be made is kept, and Try again makes it. */
+  let saving: Promise<unknown> = Promise.resolve(), unsaved: { key: string; patch: CasePatch }[] = [];
+  function saveCase(key: string, patch: CasePatch): Promise<boolean> {
+    const run = saving.then(() => saveNow(key, patch));
+    saving = run.catch(() => false);
+    return run;
+  }
+  async function saveNow(key: string, patch: CasePatch): Promise<boolean> {
     const r = await readFile();
-    if (r.state === "failed" || r.state === "unreadable") { fileState = r.state; fileProblem = problemOf(r.state); render(); return false; }
+    if (r.state === "failed" || r.state === "unreadable") { fileState = r.state; fileProblem = problemOf(r.state); unsaved.push({ key, patch }); render(); return false; }
     const merged = mergeCase(r.file ?? { version: 2, cases: {} }, key, patch);
     const w = await writeDatabaseFile(REVIEWS, JSON.stringify(merged, null, 2) + "\n");
-    if (!w.ok) { fileProblem = `The verdict could not be saved: ${w.why}.`; render(); return false; }
+    if (!w.ok) { fileProblem = `The verdict could not be saved: ${w.why}.`; unsaved.push({ key, patch }); render(); return false; }
     file = merged; fileState = "ok"; fileProblem = "";
     return true;
+  }
+  /** Try again: read the verdicts, then make the saves that could not be made, in their order. */
+  async function tryAgain(): Promise<void> {
+    await refreshFile();
+    if (canWrite()) { const todo = unsaved; unsaved = []; for (const u of todo) await saveCase(u.key, u.patch); }
+    render();
   }
   const patchOf = (extra: Partial<CasePatch>): CasePatch => ({ patient: openPatient, side: openSide, tracts: openTracts, ...(openRules ? { rules: openRules } : {}), ...(openFibers ? { fibers: openFibers } : {}), ...extra });
 
@@ -429,10 +444,10 @@ function registerTractReview(ctx: ModuleContext): void {
       const v = shell.section(root, "3 · Verdict", { band: "yellow", open: true });
       if (fileProblem) {
         const warn = document.createElement("p"); warn.className = "sl-hint"; warn.style.color = "var(--sl-error)"; warn.textContent = fileProblem; v.append(warn);
-        if (fileState !== "unreadable") { const again = document.createElement("button"); again.textContent = "Try again"; again.title = "Read the verdicts again."; again.onclick = () => { void refreshFile().then(render); }; v.append(again); }
+        if (fileState !== "unreadable") { const again = document.createElement("button"); again.textContent = "Try again"; again.title = "Read the verdicts again."; again.onclick = () => { void tryAgain(); }; v.append(again); }
       }
       if (j?.carriedFrom) { const cf = document.createElement("p"); cf.className = "sl-hint"; cf.textContent = "This verdict was given on an earlier making of the tracts that drew exactly these fibers."; v.append(cf); }
-      const crit = document.createElement("p"); crit.className = "sl-hint"; crit.textContent = "Judge by: at the internal capsule, the tract in the posterior limb (blue), nothing in the thalamus or the lentiform nucleus; at the peduncle, in the crus, in front of the substantia nigra; how complete the fan is, seen from the front in 3D. The outline on a slice is where the tract crosses it; a small circle is a stray fiber."; v.append(crit);
+      const crit = document.createElement("p"); crit.className = "sl-hint"; crit.textContent = "Judge by: at the internal capsule, the tract in the posterior limb (blue), nothing in the thalamus or the lentiform nucleus; at the peduncle, in the crus, in front of the substantia nigra; how complete the fan is, seen from the front in 3D. The outline on a slice is where the tract crosses it; on the two axial slices, a small circle on its own is a stray fiber."; v.append(crit);
       const row = document.createElement("div"); row.style.cssText = "display:flex;gap:6px;margin:6px 0";
       const ok = document.createElement("button"), no = document.createElement("button");
       ok.textContent = "✓ Acceptable"; no.textContent = "✗ Not acceptable";
@@ -462,7 +477,7 @@ function registerTractReview(ctx: ModuleContext): void {
     title: "Tract review",
     groups: ["Display"],
     tip: "Judge the corticospinal tract on the side without a tumor, case after case, for checking the fiber tracts.",
-    help: "<p><b>For checking the fiber tracts</b> against an expert's eye. Each case is a diffusion scan whose fiber tracts were made when it was imported. Click a case: its MRI of the anatomy is shown with the direction-colored map over it (red left-right, green front-back, blue up-down), and only the corticospinal tract on the side without the tumor, in one color. The red view is an axial slice at the cerebral peduncle, the yellow one an axial slice at the internal capsule, the green one coronal through the tract; the 3D view is seen from the front. The slice levels are found from the two tracts; move a slider when one is off, and the level you leave is used next time. The outline on a slice is where the tract crosses it, with the map visible inside; a small circle on its own is a stray fiber. Judge by where the tract lies -- at the internal capsule in the posterior limb (blue on the map), nothing in the thalamus or the lentiform nucleus; at the peduncle in the crus, in front of the substantia nigra -- and how complete the fan is in 3D: <b>Acceptable</b> or <b>Not acceptable</b>, with a note if you like; <b>Next</b> opens the next case. The verdicts are kept in the database's folder (tract-review.json), each with the version of the tracts it was about; when the tracts are made again, the earlier verdicts stay, and the case waits for a new one.</p>",
+    help: "<p><b>For checking the fiber tracts</b> against an expert's eye. Each case is a diffusion scan whose fiber tracts were made when it was imported. Click a case: its MRI of the anatomy is shown with the direction-colored map over it (red left-right, green front-back, blue up-down), and only the corticospinal tract on the side without the tumor, in one color. The red view is an axial slice at the cerebral peduncle, the yellow one an axial slice at the internal capsule, the green one coronal through the tract; the 3D view is seen from the front. The slice levels are found from the two tracts; move a slider when one is off, and the level you leave is used next time. The outline on a slice is where the tract crosses it, with the map visible inside; on the two axial slices a small circle on its own is a stray fiber (the coronal slice runs along the tract, so there it shows as many small circles). Judge by where the tract lies -- at the internal capsule in the posterior limb (blue on the map), nothing in the thalamus or the lentiform nucleus; at the peduncle in the crus, in front of the substantia nigra -- and how complete the fan is in 3D: <b>Acceptable</b> or <b>Not acceptable</b>, with a note if you like; <b>Next</b> opens the next case. The verdicts are kept in the database's folder (tract-review.json), each with the version of the tracts it was about; when the tracts are made again, the earlier verdicts stay, and the case waits for a new one.</p>",
     async mount(el: HTMLElement) { root = el; await refreshFile(); await listCases(); say(`${cases.length} case${cases.length === 1 ? "" : "s"} with fiber tracts made at import.${fileProblem ? ` ${fileProblem}` : ""}`); },
     // Shown again (perhaps after the window's database changed): the verdicts and the list read again.
     onShow() { void refreshFile().then(listCases).then(render); },

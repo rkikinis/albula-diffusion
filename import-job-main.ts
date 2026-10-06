@@ -33,7 +33,9 @@ const server = args.server.replace(/\/+$/, "");
  *  person's interface (module.ts, face.ts, review.ts) and this program. A change there makes stored tracts stale. */
 async function codeFingerprint(): Promise<string> {
   const here = new URL("./", import.meta.url), parts: Uint8Array[] = [];
-  for (const u of await importGraph(new URL("./import-job.ts", here))) parts.push(new TextEncoder().encode(`${u.slice(here.href.length)}\n`), await Deno.readFile(new URL(u)));
+  // From the program itself (it brings hooks.ts and the vendors' readers), the program's own file left out: its
+  // arguments and messages do not shape the tracts.
+  for (const u of (await importGraph(new URL("./import-job-main.ts", here))).filter((u) => !u.endsWith("/import-job-main.ts"))) parts.push(new TextEncoder().encode(`${u.slice(here.href.length)}\n`), await Deno.readFile(new URL(u)));
   const all = new Uint8Array(parts.reduce((n, p) => n + p.length, 0)); let o = 0; for (const p of parts) { all.set(p, o); o += p.length; }
   return [...new Uint8Array(await crypto.subtle.digest("SHA-256", all as Uint8Array<ArrayBuffer>))].slice(0, 6).map((b) => b.toString(16).padStart(2, "0")).join("");
 }
@@ -62,7 +64,8 @@ try {
   const rpBytes = Deno.readFileSync(at("rapidparc", "rapidparc.safetensors"));
   const synthstrip = await synthstripVersion(server);
   if (!synthstrip) { say({ event: "error", said: "the segmentation server did not say which SynthStrip it runs (is it running?); nothing was made" }); exitCode = 1; throw new Error("no SynthStrip version"); }
-  const versions = { code: await codeFingerprint(), labeler: `rapidparc ${await hash(rpBytes)}, table ${await hash(modelJson)}`, synthstrip };
+  // The naming network's weights too, not only its table (critic 2026-10-06, R3-2).
+  const versions = { code: await codeFingerprint(), labeler: `rapidparc ${await hash(rpBytes)}, table ${await hash(modelJson)}, tractcloud ${await hash(Deno.readFileSync(at("tractcloud", "weights.f32")))}`, synthstrip };
   const labeler = loadRapidParc(rpBytes.buffer);
   const adapter = await navigator.gpu?.requestAdapter();
   if (!adapter) throw new Error("no graphics card is available to this program");

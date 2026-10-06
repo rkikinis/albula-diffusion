@@ -244,7 +244,9 @@ export async function brainOnT1(server: string, t1: ReadSeries, onProgress?: (li
  */
 export async function importGraph(entry: URL): Promise<string[]> {
   const seen = new Set<string>(), todo = [entry.href];
-  const spec = /(?:\bfrom\s*|\bimport\s*\(\s*|new URL\(\s*)"(\.{1,2}\/[^"]+\.(?:ts|wgsl))"/g;
+  // `from "./x"`, `import("./x")`, a bare `import "./x"` (critic 2026-10-06, R3-2: hooks.ts, which brings the vendors'
+  // b-value and gradient readers, came in that way and was missed), and workers by `new URL("./x", import.meta.url)`.
+  const spec = /(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+|new URL\(\s*)"(\.{1,2}\/[^"]+\.(?:ts|wgsl))"/g;
   while (todo.length) {
     const u = todo.pop()!;
     if (seen.has(u)) continue;

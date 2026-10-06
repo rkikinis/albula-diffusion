@@ -110,8 +110,16 @@ Deno.test("a segmentation server without SynthStrip is said as such at once, not
   } finally { ac.abort(); await srv.finished; }
 });
 
-Deno.test("the code fingerprint covers the files that make the tracts, not the review's drawing (critic R2-4)", async () => {
-  const g = (await importGraph(new URL("./import-job.ts", import.meta.url))).map((u) => u.split("/").slice(-2).join("/"));
-  for (const f of ["diffusion/tracking.ts", "diffusion/prepare.ts", "diffusion/csd-worker.ts", "tractcloud/tractcloud.ts", "diffusion/tracts-dicom.ts"]) assert(g.includes(f), `${f} is in the graph`);
-  for (const f of ["diffusion/tract-slice.ts", "diffusion/review.ts", "diffusion/module.ts", "diffusion/face.ts"]) assert(!g.includes(f), `${f} is not`);
+Deno.test("the code fingerprint covers the files that make the tracts, not the review's drawing (critic R2-4, R3-2)", async () => {
+  const here = new URL("./", import.meta.url);
+  const g = await importGraph(new URL("./import-job-main.ts", here));
+  const rel = g.map((u) => u.slice(here.href.length));
+  for (const f of ["tracking.ts", "prepare.ts", "csd-worker.ts", "tractcloud/tractcloud.ts", "tracts-dicom.ts", "hooks.ts", "diffusion-vendors.ts"]) assert(rel.includes(f), `${f} is in the graph`);
+  for (const f of ["tract-slice.ts", "review.ts", "module.ts", "face.ts"]) assert(!rel.includes(f), `${f} is not`);
+  // Deno's own module graph of the program, the extension's files: every one of them is in ours (workers, which Deno's
+  // static graph does not follow, are in ours besides).
+  const config = new URL("../../src/SlicerLive/deno.jsonc", here).pathname;
+  const out = await new Deno.Command(Deno.execPath(), { args: ["info", "--json", "--config", config, new URL("./import-job-main.ts", here).pathname], stdout: "piped", stderr: "null" }).output();
+  const deno = (JSON.parse(new TextDecoder().decode(out.stdout)) as { modules: { specifier: string }[] }).modules.map((m) => m.specifier).filter((u) => u.startsWith(here.href) && !u.includes("/vendor/"));
+  for (const u of deno) assert(g.includes(u), `${u.slice(here.href.length)} is in Deno's graph but not ours`);
 });
