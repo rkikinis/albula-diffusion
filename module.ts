@@ -49,7 +49,7 @@ import { MOTION_RULE, type MotionRuleId } from "./motion.ts";
 /** "Stop below FA"'s default under Advanced (the single-tensor tracker's; the UKF's comes from the tracking rule). */
 const ADV_MIN_FA = 0.15;
 import { DCM2NIIX_VERSION, secondOpinion, type SecondOpinion } from "./second-opinion.ts";
-import { assetUrl, holdDrawing, seriesDicomFiles, startPlacing, startSegmentationServer, synthstripBrainMask, type BrainMaskResult } from "albula";
+import { assetUrl, holdDrawing, seriesDicomFiles, startPlacing, restartSegmentationServer, startSegmentationServer, synthstripBrainMask, type BrainMaskResult } from "albula";
 import { createSegmentation, growIntoSegmentation, openDicomDatabase, openLoadFromDisk, paintInto, registerProbeRows, registerRayHits, runAction, saveSegmentationToDicom, showHideAllState } from "albula";
 import { buildTractIndex, tractsNear, type TractIndex } from "./tract-index.ts";
 import { sliceCrossings, trimEnds } from "./tract-slice.ts";
@@ -75,7 +75,7 @@ interface Computed { dwi: DiffusionSeries; fit: TensorFit; maxB: number; correct
 /** RULE 3's BRAIN for a fitted scan (critic, 2026-10-04, findings 2, 4, 8, 9): asked of the segmentation server when the
  *  maps are made but not waited for -- the maps do not use it -- and waited for by the tracking (brainFor). A failure
  *  that can go away (no server, a server without SynthStrip, a failed job) is asked again at the next tracking. */
-interface BrainState { note: string; reason?: "no-anatomy" | "moved" | "doubt" | "no-server" | "no-synthstrip" | "failed"; ask?: Promise<BrainMaskResult> }
+interface BrainState { note: string; reason?: "no-anatomy" | "moved" | "doubt" | "no-server" | "no-synthstrip" | "stuck" | "failed"; ask?: Promise<BrainMaskResult> }
 /** A reversed phase-encoding scan for a diffusion scan: b = 0 images of the same study, on its own grid (aligned by the scanner's coordinates). */
 interface Partner { id: string; name: string; frameIds: string[]; dims: number[]; ijkToRAS: number[]; phaseEncoding?: string }
 /** A node's recorded phase-encoding direction, as the diffusion interpreter read it. */
@@ -1117,6 +1117,17 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       st.disabled = !!busy;
       st.onclick = () => { void runAction(st, async () => { const r = await startSegmentationServer((l) => say(l)); say(r.ok ? `${r.message[0].toUpperCase()}${r.message.slice(1)}. Press the button above again.` : `The segmentation server did not start: ${r.message}.`); if (r.ok) cNow.brain.reason = undefined; render(); }, { busyLabel: "Starting…", doneLabel: "Started", failedLabel: "Did not start" }).catch(() => {}); };
       face.append(st);
+    }
+    // A STUCK SERVER (Ron's demo, 2026-10-06: idle, it never started the job): the wait ends after three minutes
+    // (brain-mask.ts) and this restarts it -- one button, then the main button again.
+    if (cNow?.brain.reason === "stuck") {
+      const rs = document.createElement("button");
+      rs.textContent = "Restart the segmentation server";
+      rs.title = "The program that finds the brain on the MRI of the anatomy stopped taking work. This stops it and starts it again (a minute or two); then press the button above again.";
+      rs.style.cssText = "width:100%;margin:0 0 4px";
+      rs.disabled = !!busy;
+      rs.onclick = () => { void runAction(rs, async () => { const r = await restartSegmentationServer((l) => say(l)); say(r.ok ? `${r.message[0].toUpperCase()}${r.message.slice(1)}. Press the button above again.` : `The segmentation server could not be restarted: ${r.message}.`); if (r.ok) cNow.brain.reason = undefined; render(); }, { busyLabel: "Restarting…", doneLabel: "Restarted", failedLabel: "Did not restart" }).catch(() => {}); };
+      face.append(rs);
     }
     if (!scan || !faceNear) { const p = document.createElement("p"); p.className = "sl-hint"; p.textContent = "Waits until the case has all three."; face.append(p); }
     if (note) { const p = document.createElement("p"); p.className = "sl-hint"; p.style.margin = "4px 0 0"; p.textContent = note; face.append(p); }

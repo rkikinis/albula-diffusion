@@ -10,7 +10,7 @@
 // is the library; import-job-main.ts is the program. The critic's round of 2026-10-05 (qa/2026-10-05-dmri-import-job.md)
 // shaped it: a study at a time (finding 3), the module's rules for the T1 and the partner, tested (6, 7, 14), stored
 // tracts current only for the same code, rules and inputs (1, 11), states that say what will and will not change (13).
-import { packRGB24, parseInstances, synthstripBrainMask, startSegmentationServer, volumesOfSeries, type BrainMask, type Volume } from "albula";
+import { packRGB24, parseInstances, restartSegmentationServer, synthstripBrainMask, startSegmentationServer, volumesOfSeries, type BrainMask, type Volume } from "albula";
 import { indexSeries, seriesFilePaths, writeNrrd, type IndexSeries } from "albula/server";
 import { fromDicomVolumes } from "./dwi.ts";
 import { DIRECTION_CHECK_RULE } from "./gradient-check.ts";
@@ -226,9 +226,16 @@ export async function brainOnT1(server: string, t1: ReadSeries, onProgress?: (li
   const stub = { nodes: new Map() } as unknown as Parameters<typeof synthstripBrainMask>[0];
   const key = `t1:${t1.facts.uid}`;
   let r = await synthstripBrainMask(stub, key, onProgress, { transport, upload });
+  const toRoot = { fetch: (input: Parameters<typeof fetch>[0], init?: RequestInit) => fetch(typeof input === "string" && input.startsWith("/") ? `${root}${input}` : input, init), base: transport.base };
   if (!r.ok && r.reason === "no-server") {
     onProgress?.("starting the segmentation server");
-    const s = await startSegmentationServer(onProgress, { fetch: (input, init) => fetch(typeof input === "string" && input.startsWith("/") ? `${root}${input}` : input, init), base: transport.base });
+    const s = await startSegmentationServer(onProgress, toRoot);
+    if (s.ok) r = await synthstripBrainMask(stub, key, onProgress, { transport, upload });
+  }
+  // A stuck server (queued jobs never started; Ron's demo, 2026-10-06): restarted once, then asked again.
+  if (!r.ok && r.reason === "stuck") {
+    onProgress?.("restarting the segmentation server: it had stopped taking work");
+    const s = await restartSegmentationServer(onProgress, toRoot);
     if (s.ok) r = await synthstripBrainMask(stub, key, onProgress, { transport, upload });
   }
   if (r.ok) return { mask: r.mask };
