@@ -3,7 +3,7 @@
 // (critic, 2026-10-05, qa/2026-10-05-dmri-import-job.md, findings 6, 7, 11, 14).
 //   deno test -A --no-check --config ../../src/SlicerLive/deno.jsonc import-job.test.ts
 import { assert, assertEquals } from "jsr:@std/assert@1";
-import { anatomyOf, colorFaPath, isCurrent, isDiffusionScan, jobRules, partnerOf, planCases, trackSets, writeColorFA, type SeriesFacts } from "./import-job.ts";
+import { anatomyOf, colorFaPath, isCurrent, isDiffusionScan, jobRules, partnerOf, planCases, synthstripVersion, trackSets, writeColorFA, type SeriesFacts } from "./import-job.ts";
 import { packRGB24 } from "albula";
 import type { TensorFit } from "./tensor.ts";
 import { SHORT } from "./tractcloud/name-tracts.ts";
@@ -82,4 +82,20 @@ Deno.test("the direction-colored map is stored beside the tracts: the Color FA, 
     const v = new Float32Array(raw.buffer);
     assertEquals([...v], [packRGB24(128, 0, 0), packRGB24(0, 0, 255)]);
   } finally { await Deno.remove(dir, { recursive: true }); }
+});
+
+Deno.test("the SynthStrip version is waited for, never recorded as unknown (a server still starting answered '?')", async () => {
+  let asked = 0;
+  const ac = new AbortController();
+  const srv = Deno.serve({ port: 0, signal: ac.signal, onListen: () => {} }, (req) => {
+    const p = new URL(req.url).pathname;
+    if (p.endsWith("/_status")) { asked++; return Response.json(asked < 3 ? {} : { health: { version: "0.15.0" } }); }
+    return Response.json(asked < 3 ? {} : { weights_installed: [{ id: "synthstrip", version: "1" }] });
+  });
+  try {
+    const base = `http://127.0.0.1:${(srv.addr as Deno.NetAddr).port}`;
+    assertEquals(await synthstripVersion(base, { pollMs: 10, waitMs: 5000 }), "haversack 0.15.0, synthstrip weights 1");
+    asked = -1000;
+    assertEquals(await synthstripVersion(base, { pollMs: 10, waitMs: 50 }), undefined);
+  } finally { ac.abort(); await srv.finished; }
 });

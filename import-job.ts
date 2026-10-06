@@ -235,12 +235,19 @@ export async function brainOnT1(server: string, t1: ReadSeries, onProgress?: (li
   return { why: r.message, kind: r.reason === "no-synthstrip" ? "cannot" : r.reason === "failed" ? "failed" : "waiting" };
 }
 /** haversack's and SynthStrip's versions, as the server reports them (finding 10). */
-export async function synthstripVersion(server: string): Promise<string> {
-  const root = server.replace(/\/+$/, "");
-  const st = await fetch(`${root}/_haversack/_status`).then((r) => r.json()).catch(() => ({})) as { health?: { version?: string } };
-  const task = await fetch(`${root}/_haversack/tasks/synthstrip:mask`).then((r) => r.json()).catch(() => ({})) as { weights_installed?: { id?: string; version?: string }[] };
-  const w = task.weights_installed?.find((x) => x.id === "synthstrip")?.version;
-  return `haversack ${st.health?.version ?? "?"}, synthstrip weights ${w ?? "?"}`;
+export async function synthstripVersion(server: string, opts: { waitMs?: number; pollMs?: number } = {}): Promise<string | undefined> {
+  // THE VERSION IS PART OF THE STALENESS KEY (jobRules), so an unknown one must not be recorded: a segmentation server
+  // still starting answered "?" on 2026-10-06, and every case made then would have counted as stale ever after. Asked
+  // again until both parts are known, up to `waitMs` (default 5 minutes); undefined when they never are.
+  const root = server.replace(/\/+$/, ""), until = Date.now() + (opts.waitMs ?? 5 * 60_000);
+  for (;;) {
+    const st = await fetch(`${root}/_haversack/_status`).then((r) => r.json()).catch(() => ({})) as { health?: { version?: string } };
+    const task = await fetch(`${root}/_haversack/tasks/synthstrip:mask`).then((r) => r.json()).catch(() => ({})) as { weights_installed?: { id?: string; version?: string }[] };
+    const v = st.health?.version, w = task.weights_installed?.find((x) => x.id === "synthstrip")?.version;
+    if (v && w) return `haversack ${v}, synthstrip weights ${w}`;
+    if (Date.now() >= until) return undefined;
+    await new Promise((r) => setTimeout(r, opts.pollMs ?? 5000));
+  }
 }
 
 // ── One case ─────────────────────────────────────────────────────────────────────────────────────────────────────

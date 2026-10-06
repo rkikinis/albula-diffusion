@@ -68,7 +68,9 @@ try {
   const modelJson = Deno.readFileSync(at("tractcloud", "model.json"));
   const model = loadModel(Deno.readFileSync(at("tractcloud", "weights.f32")).buffer, JSON.parse(new TextDecoder().decode(modelJson)) as ModelJson);
   const rpBytes = Deno.readFileSync(at("rapidparc", "rapidparc.safetensors"));
-  const versions = { code: await codeFingerprint(), labeler: `rapidparc ${await hash(rpBytes)}, table ${await hash(modelJson)}`, synthstrip: await synthstripVersion(server) };
+  const synthstrip = await synthstripVersion(server);
+  if (!synthstrip) { say({ event: "error", said: "the segmentation server did not say which SynthStrip it runs (is it running?); nothing was made" }); exitCode = 1; throw new Error("no SynthStrip version"); }
+  const versions = { code: await codeFingerprint(), labeler: `rapidparc ${await hash(rpBytes)}, table ${await hash(modelJson)}`, synthstrip };
   const labeler = loadRapidParc(rpBytes.buffer);
   const adapter = await navigator.gpu?.requestAdapter();
   if (!adapter) throw new Error("no graphics card is available to this program");
