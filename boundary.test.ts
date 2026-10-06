@@ -1,5 +1,6 @@
 // AN EXTENSION REACHES CORE ONLY THROUGH THE SDK (Albula's sdk/albula.ts, imported as "albula"; its tests also
-// "albula/testing"). Any other import must stay inside this repository or be a pinned package (jsr:, npm:). So a core
+// "albula/testing"; since SDK 8 a program that runs beside the server, the import job, also "albula/server",
+// sdk/server.ts). Any other import must stay inside this repository or be a pinned package (jsr:, npm:). So a core
 // refactor shows up as a change of the SDK, never as this extension breaking silently.
 //   deno test -A --no-check --config <Albula>/Contents/src/SlicerLive/deno.jsonc boundary.test.ts
 //
@@ -52,7 +53,7 @@ Deno.test("this extension imports core only through the SDK", () => {
     if (/src\/SlicerLive|SlicerLive\//.test(text)) flag("names core's folder");
     if (/globalThis\s*(?:as[^.]*)?\)?\s*\.?\s*__|\bglobalThis\.__/.test(text)) flag("reads a global core sets for itself (use the SDK)");
     function check(spec: string) {
-      if (spec === "albula" || spec === "albula/testing" || /^(jsr|npm):/.test(spec)) return;
+      if (spec === "albula" || spec === "albula/testing" || spec === "albula/server" || /^(jsr|npm):/.test(spec)) return;
       if (spec.startsWith(".") && inside(f, spec)) return;
       flag(`imports ${spec}`);
     }
