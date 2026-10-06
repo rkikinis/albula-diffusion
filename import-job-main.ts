@@ -16,7 +16,7 @@ import { setDicomLibrary, dcmjs } from "albula/server";
 import "./hooks.ts";
 import { loadModel, type ModelJson } from "./tractcloud/tractcloud.ts";
 import { loadRapidParc } from "./rapidparc/rapidparc.ts";
-import { makeTracts, planStudy, studiesOf, synthstripVersion } from "./import-job.ts";
+import { importGraph, makeTracts, planStudy, studiesOf, synthstripVersion } from "./import-job.ts";
 
 const args = parseArgs(Deno.args, { string: ["server", "db", "series", "assets"], boolean: ["dry-run", "force", "counts-only"] });
 const quiet = args["counts-only"];
@@ -32,16 +32,8 @@ const server = args.server.replace(/\/+$/, "");
 /** THE CODE THAT SHAPES THE RESULT, hashed (critic, finding 1): every module of the extension except its tests, the
  *  person's interface (module.ts, face.ts, review.ts) and this program. A change there makes stored tracts stale. */
 async function codeFingerprint(): Promise<string> {
-  const here = new URL("./", import.meta.url), files: string[] = [];
-  const walk = async (dir: URL, rel: string) => {
-    for await (const e of Deno.readDir(dir)) {
-      if (e.isDirectory && !["test", "vendor", "model", "node_modules"].includes(e.name)) await walk(new URL(`${e.name}/`, dir), `${rel}${e.name}/`);
-      else if (e.isFile && /\.(ts|wgsl)$/.test(e.name) && !/\.test\.ts$|bench\.ts$/.test(e.name) && !["module.ts", "face.ts", "review.ts", "import-job-main.ts"].includes(`${rel}${e.name}`)) files.push(`${rel}${e.name}`);
-    }
-  };
-  await walk(here, "");
-  const parts: Uint8Array[] = [];
-  for (const f of files.sort()) parts.push(new TextEncoder().encode(`${f}\n`), await Deno.readFile(new URL(f, here)));
+  const here = new URL("./", import.meta.url), parts: Uint8Array[] = [];
+  for (const u of await importGraph(new URL("./import-job.ts", here))) parts.push(new TextEncoder().encode(`${u.slice(here.href.length)}\n`), await Deno.readFile(new URL(u)));
   const all = new Uint8Array(parts.reduce((n, p) => n + p.length, 0)); let o = 0; for (const p of parts) { all.set(p, o); o += p.length; }
   return [...new Uint8Array(await crypto.subtle.digest("SHA-256", all as Uint8Array<ArrayBuffer>))].slice(0, 6).map((b) => b.toString(16).padStart(2, "0")).join("");
 }

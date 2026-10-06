@@ -16,7 +16,7 @@ import {
   lookFrom3D, nrrdDecode, nrrdGeometry, nrrdSplitHeader, orientView, queueModule, seriesDicomFiles, setLayout, setSliceOffset,
   sliceOffset, sliceOrientation, writeDatabaseFile, type DatabaseSeries, type ModuleContext, type ZarrDesc,
 } from "albula";
-import { TUMOR } from "./face.ts";
+import { isTumorName } from "./face.ts";
 import { colorFaPath, dicomToTracts, type TractSetData } from "./tracts-dicom.ts";
 import { crossingOutlines, sliceCrossings } from "./tract-slice.ts";
 
@@ -96,7 +96,8 @@ export function levelsOf(sl: Float32Array[]): Levels | undefined {
  * PAT08's "peduncle" in the lateral ventricles). The two tracts run close together in the pons and the medulla (each
  * 5-8 mm from the midline), about 12-17 mm from it through the cerebral peduncles and 22-25 mm through the posterior limb
  * of the internal capsule. So: half the distance between the two tracts' centers per millimeter of height, smoothed over
- * 5 mm; the peduncle where it first reaches 13 mm going up, the internal capsule where it first reaches 22 mm above that
+ * 5 mm; the peduncle where it first reaches 13 mm going up, the internal capsule where it first reaches 22 mm (or 85% of
+ * its peak, when lower) above that
  * (on the 59 stored tracts objects of the test cases: 10-25 mm apart, typically 15); the coronal slice through the judged
  * tract at the internal capsule. Undefined when either is not reached.
  */
@@ -116,13 +117,20 @@ export function levelsFromPair(left: Float32Array[], right: Float32Array[], judg
   const first = (from: number, thr: number) => at.findIndex((a, i) => a.z >= from && sm[i] >= thr);
   const c = first(lo, 13);
   if (c < 0) return undefined;
-  const k = first(at[c].z + 5, 22);
+  // The internal capsule at 22 mm -- or at 85% of the widest the two get, when that is less than 26 mm: on PAT13 and
+  // PAT31 the separation peaks at 22.2-22.3 mm, in the corona radiata, and 22 was met only there (critic 2026-10-06,
+  // R2-3); on the other 34 stored cases this moves the level 0-4 mm.
+  let peak = -Infinity;
+  sm.forEach((v, i) => { if (at[i].z >= at[c].z && v > peak) peak = v; });
+  const k = first(at[c].z + 5, Math.min(22, 0.85 * peak));
   if (k < 0) return undefined;
   return { crus: at[c].z, ic: at[k].z, coronal: Number.isFinite(at[k].y) ? +at[k].y.toFixed(1) : 0 };
 }
 
-/** One case's verdict on one version of its tracts (Ron's "6": a remake of the tracts keeps the verdicts on the old ones). */
-export interface Judgment { verdict?: "acceptable" | "not acceptable"; note?: string; judgedAt?: string; rules?: Record<string, unknown> }
+/** One case's verdict on one version of its tracts (Ron's "6": a remake of the tracts keeps the verdicts on the old ones).
+ *  `fibers` fingerprints the streamlines judged, so a remake that drew the very same ones carries the verdict over
+ *  (`carriedFrom`, the older tracts series; critic 2026-10-06, R2-4). */
+export interface Judgment { verdict?: "acceptable" | "not acceptable"; note?: string; judgedAt?: string; rules?: Record<string, unknown>; fibers?: string; carriedFrom?: string }
 /** One case's record in tract-review.json (version 2): the side, the levels Ron left (kept across remakes of the tracts:
  *  they are anatomy), and a judgment per tracts series. */
 export interface Review {
@@ -134,12 +142,48 @@ export interface Review {
 }
 export interface ReviewFile { version: 2; cases: Record<string, Review> }
 
-/** Merge one case's record into the file as it is on disk now (read just before writing: another window's verdicts on
- *  other cases are kept; critic 2026-10-06, finding 18). */
-export function mergeCase(onDisk: ReviewFile, key: string, mine: Review): ReviewFile {
+/** WHAT ONE ACTION CHANGES in a case: a verdict, a note, or the levels -- never the whole record. */
+export interface CasePatch {
+  patient: string; side: "left" | "right"; tracts: string;
+  levels?: Levels; rules?: Record<string, unknown>; fibers?: string;
+  verdict?: { verdict: NonNullable<Judgment["verdict"]>; judgedAt: string; carriedFrom?: string };
+  /** A note; "" removes it; undefined leaves it. */
+  note?: string;
+}
+
+/** Apply one action to the file AS IT IS ON DISK NOW (read just before writing). Only the fields the action names change:
+ *  a window whose copy is out of date can no longer erase a verdict, a note or levels another window -- or an earlier
+ *  session -- left (critic 2026-10-06, finding 18 and R2-1: the window's whole record used to win). */
+export function mergeCase(onDisk: ReviewFile, key: string, p: CasePatch): ReviewFile {
   const had = onDisk.cases[key];
-  const judgments = { ...(had?.judgments ?? {}), ...mine.judgments };
-  return { version: 2, cases: { ...onDisk.cases, [key]: { ...mine, judgments } } };
+  const j: Judgment = { ...(had?.judgments?.[p.tracts] ?? {}) };
+  if (p.rules) j.rules = p.rules;
+  if (p.fibers) j.fibers = p.fibers;
+  if (p.verdict) { j.verdict = p.verdict.verdict; j.judgedAt = p.verdict.judgedAt; if (p.verdict.carriedFrom) j.carriedFrom = p.verdict.carriedFrom; else delete j.carriedFrom; }
+  if (p.note !== undefined) { if (p.note) j.note = p.note; else delete j.note; }
+  const levels = p.levels ?? had?.levels;
+  const rec: Review = { patient: p.patient, side: p.side, ...(levels ? { levels } : {}), judgments: { ...(had?.judgments ?? {}), [p.tracts]: j } };
+  return { version: 2, cases: { ...onDisk.cases, [key]: rec } };
+}
+
+/** A fingerprint of the streamlines judged (their count and every coordinate), for carrying a verdict over a remake that
+ *  drew the very same fibers. */
+export function fibersFingerprint(sl: Float32Array[]): string {
+  let h1 = 0x811c9dc5, h2 = 0x01000193 ^ sl.length;
+  for (const f of sl) {
+    const b = new Uint8Array(f.buffer, f.byteOffset, f.byteLength);
+    for (let i = 0; i < b.length; i++) { h1 = Math.imul(h1 ^ b[i], 0x01000193); h2 = Math.imul(h2 ^ b[i], 0x5bd1e995) ^ (h2 >>> 15); }
+    h1 = Math.imul(h1 ^ 0xff, 0x01000193);
+  }
+  return `${sl.length}:${(h1 >>> 0).toString(16).padStart(8, "0")}${(h2 >>> 0).toString(16).padStart(8, "0")}`;
+}
+
+/** The verdict to carry to `tracts` (unjudged): the newest one given on an older tracts series of the same fibers. */
+export function carriedVerdict(rec: Review | undefined, tracts: string, fibers: string): { from: string; j: Judgment } | undefined {
+  if (!rec || rec.judgments?.[tracts]?.verdict) return undefined;
+  const same = Object.entries(rec.judgments ?? {}).filter(([s, j]) => s !== tracts && j.verdict && j.fibers === fibers)
+    .sort((a, b) => String(b[1].judgedAt ?? "").localeCompare(String(a[1].judgedAt ?? "")));
+  return same.length ? { from: same[0][0], j: same[0][1] } : undefined;
 }
 
 // ── The module ──────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -149,41 +193,51 @@ interface Case { dwi: DatabaseSeries; tracts: string; patient: string }
 function registerTractReview(ctx: ModuleContext): void {
   const { shell, live, store, device } = ctx;
   let root: HTMLElement | undefined, cases: Case[] = [], file: ReviewFile = { version: 2, cases: {} };
-  /** Whether the verdicts file can be written: it was read, or there is none yet. Never over a file that did not read
-   *  (critic 2026-10-06, finding 2). */
-  let fileState: "unknown" | "ok" | "absent" | "unreadable" = "unknown";
+  /** The verdicts file as last read: "ok" or "absent" can be written; "failed" (no answer, a server error) is read again
+   *  before anything is saved; "unreadable" (it read but is not a verdicts file) is never written over (critic
+   *  2026-10-06, finding 2 and R2-2). `fileProblem` stays on screen beside the buttons until a read succeeds. */
+  let fileState: "unknown" | "ok" | "absent" | "failed" | "unreadable" = "unknown", fileProblem = "";
+  const canWrite = () => fileState === "ok" || fileState === "absent";
+  /** The open case's own facts, for the actions' patches. */
+  let openPatient = "", openSide: "left" | "right" = "left", openRules: Record<string, unknown> | undefined, openFibers = "";
   /** The case open, by its diffusion scan's UID (critic 2026-10-06, finding 8: a row number moves when the list does). */
   let openKey = "", openTracts = "", busy = "", note = "", field: FiberField | undefined, drawn: Float32Array[] = [];
   let placed: Levels | undefined, levelsSaid = "";
   const say = (s: string) => { note = s; ctx.status(s); render(); };
   const currentIndex = () => cases.findIndex((c) => c.dwi.seriesInstanceUID === openKey);
 
-  async function readFile(): Promise<{ state: "ok" | "absent" | "unreadable"; file?: ReviewFile }> {
+  async function readFile(): Promise<{ state: "ok" | "absent" | "failed" | "unreadable"; file?: ReviewFile }> {
     const url = await databaseFileUrl(`SlicerAlbula-SEG/${REVIEWS}`);
-    if (!url) return { state: "unreadable" };
+    if (!url) return { state: "failed" };
     const r = await fetch(url, { cache: "no-store" }).catch(() => null);
-    if (!r) return { state: "unreadable" };
+    if (!r) return { state: "failed" };
     if (r.status === 404) return { state: "absent" };
-    if (!r.ok) return { state: "unreadable" };
+    if (!r.ok) return { state: "failed" };
     try { const j = await r.json() as { version?: number; cases?: Record<string, unknown> }; if (j?.version === 2 && j.cases) return { state: "ok", file: j as ReviewFile }; } catch { /* below */ }
     return { state: "unreadable" };
   }
-  async function readReviews(): Promise<void> {
+  const problemOf = (state: string) => state === "unreadable"
+    ? `The verdicts file (${REVIEWS}, in the database's SlicerAlbula-SEG folder) is not a verdicts file this version can read. Nothing will be saved over it, so nothing in it is lost; move it aside to start a new one.`
+    : state === "failed" ? "The verdicts could not be read just now (the database did not answer). Nothing is saved until they are read." : "";
+  /** Read the verdicts again (on showing the module, on opening a case, on Try again): the disk is the record, and
+   *  another window -- or this one before a failed read -- may have changed it. The window's database is the one read. */
+  async function refreshFile(): Promise<void> {
     const r = await readFile();
-    fileState = r.state;
-    if (r.file) file = r.file;
-    if (r.state === "unreadable") say(`The verdicts file (${REVIEWS}, in the database's SlicerAlbula-SEG folder) could not be read: nothing will be saved until it is moved aside or repaired, so no verdict in it is lost.`);
+    fileState = r.state; fileProblem = problemOf(r.state);
+    if (r.state === "ok") file = r.file!;
+    else if (r.state === "absent") file = { version: 2, cases: {} };
   }
-  /** Save ONE case, merged into the file as it is on disk now; never over a file that does not read. */
-  async function saveCase(key: string): Promise<boolean> {
+  /** Apply ONE action to the file as it is on disk now; never over a file that does not read. */
+  async function saveCase(key: string, patch: CasePatch): Promise<boolean> {
     const r = await readFile();
-    if (r.state === "unreadable") { fileState = "unreadable"; say(`The verdicts file could not be read, so this was not saved (nothing in it was overwritten).`); return false; }
-    const merged = mergeCase(r.file ?? { version: 2, cases: {} }, key, file.cases[key]);
+    if (r.state === "failed" || r.state === "unreadable") { fileState = r.state; fileProblem = problemOf(r.state); render(); return false; }
+    const merged = mergeCase(r.file ?? { version: 2, cases: {} }, key, patch);
     const w = await writeDatabaseFile(REVIEWS, JSON.stringify(merged, null, 2) + "\n");
-    if (!w.ok) { say(`The verdict could not be saved: ${w.why}.`); return false; }
-    file = merged; fileState = "ok";
+    if (!w.ok) { fileProblem = `The verdict could not be saved: ${w.why}.`; render(); return false; }
+    file = merged; fileState = "ok"; fileProblem = "";
     return true;
   }
+  const patchOf = (extra: Partial<CasePatch>): CasePatch => ({ patient: openPatient, side: openSide, tracts: openTracts, ...(openRules ? { rules: openRules } : {}), ...(openFibers ? { fibers: openFibers } : {}), ...extra });
 
   async function listCases(): Promise<void> {
     const db = await databaseSeries({ fresh: true });
@@ -199,15 +253,14 @@ function registerTractReview(ctx: ModuleContext): void {
 
   /** Ron's levels, when he moved them: the three views still in the orientations set, and at other positions. */
   function keepLevels(): void {
-    const r = file.cases[openKey];
-    if (!r || !placed || !hasCase()) return;
+    if (!openKey || !openTracts || !placed || !hasCase() || !canWrite()) return;
     if (sliceOrientation("Red") !== "Axial" || sliceOrientation("Yellow") !== "Axial" || sliceOrientation("Green") !== "Coronal") return;
     const c = sliceOffset("Red"), k = sliceOffset("Yellow"), y = sliceOffset("Green");
     if (c === undefined || k === undefined || y === undefined) return;
     const now = { crus: +c.toFixed(1), ic: +k.toFixed(1), coronal: +y.toFixed(1) };
     if (now.crus === placed.crus && now.ic === placed.ic && now.coronal === placed.coronal) return;
-    r.levels = now; placed = now;
-    void saveCase(openKey);
+    placed = now;
+    void saveCase(openKey, patchOf({ levels: now }));
   }
   /** Is the case still what the scene shows (its T1 or map loaded)? After File › Close Scene it is not. */
   const hasCase = () => [...live.nodes.values()].some((n) => n.type === "image");
@@ -254,12 +307,13 @@ function registerTractReview(ctx: ModuleContext): void {
     return res.imageId;
   }
 
-  /** The tumor's center (RAS x), from the segments named as a tumor (face.ts TUMOR, the Diffusion module's own rule). */
+  /** The tumor's center (RAS x), from the segments named as a tumor (face.ts isTumorName, the Diffusion module's own rule:
+   *  "Not tumor" is not; critic 2026-10-06, R2-6). */
   async function tumorCenterX(segIds: string[]): Promise<number | undefined> {
     let sx = 0, n = 0;
     for (const id of segIds) {
       const s = live.nodes.get(id); if (!s?.zarr) continue;
-      const labels = ((s.segments as { labelValue: number; name: string }[] | undefined) ?? []).filter((g) => TUMOR.test(g.name)).map((g) => g.labelValue);
+      const labels = ((s.segments as { labelValue: number; name: string }[] | undefined) ?? []).filter((g) => isTumorName(g.name)).map((g) => g.labelValue);
       if (!labels.length) continue;
       const z = await fetchZarrVolumeNative(live.blobBase(), s.zarr as ZarrDesc);
       const [nx, ny] = s.dims as number[], M = s.ijkToRAS as number[], lab = z.data as ArrayLike<number>;
@@ -275,23 +329,29 @@ function registerTractReview(ctx: ModuleContext): void {
     // ONE CASE ON SCREEN (critic 2026-10-06, findings 3 and 9): whatever is in the scene is closed first -- every time, the
     // first case too; an empty scene is a closed one; "keep" (something unsaved, the person said so) stops here.
     if (sceneHasData() && !(await closeScene()) && sceneHasData()) return;
-    draw([]); openKey = key; openTracts = c.tracts; placed = undefined; levelsSaid = "";
+    draw([]); openKey = key; openTracts = c.tracts; placed = undefined; levelsSaid = ""; openPatient = c.patient; openRules = undefined; openFibers = "";
     busy = "Opening…"; render();
     try {
+      await refreshFile();
       say(`Reading the fiber tracts of ${c.patient}…`);
       const files = await seriesDicomFiles(c.tracts);
       if (!files?.length) throw new Error("the stored fiber tracts are not in the open database");
       const t = await dicomToTracts(new Uint8Array(files[0]));
       const inputs = (t.provenance?.inputs ?? {}) as { t1?: string | null };
       const rules = t.provenance?.rules as Record<string, unknown> | undefined;
+      openRules = rules;
       const db = await databaseSeries();
       const t1 = inputs.t1 ?? undefined, t1Entry = db?.series.find((s) => s.seriesInstanceUID === t1);
       // THE TUMOR OUTLINE (critic 2026-10-06, finding 6): a SEG of this patient -- the diffusion scan's study, the T1's,
       // or another of the patient's -- named as a tumor by the Diffusion module's rule; its segments are checked by name
       // once loaded. When the description says nothing, the SEGs of the scan's and the T1's studies are tried.
       const patientSegs = (db?.series ?? []).filter((s) => s.modality === "SEG" && (s.patientID ?? s.patientName) === (c.dwi.patientID ?? c.dwi.patientName));
-      const named = patientSegs.filter((s) => TUMOR.test(s.description ?? ""));
-      const segs = (named.length ? named : patientSegs.filter((s) => s.studyInstanceUID === c.dwi.studyInstanceUID || s.studyInstanceUID === t1Entry?.studyInstanceUID)).map((s) => s.seriesInstanceUID);
+      // The scan's own study (and the T1's) first: a patient with a later, post-operative study must not have that outline
+      // decide the side (critic 2026-10-06, R2-7); the patient's other studies only when these have none.
+      const sameStudy = (s: DatabaseSeries) => s.studyInstanceUID === c.dwi.studyInstanceUID || s.studyInstanceUID === t1Entry?.studyInstanceUID;
+      const named = patientSegs.filter((s) => isTumorName(s.description ?? ""));
+      const namedHere = named.filter(sameStudy);
+      const segs = (namedHere.length ? namedHere : named.length ? named : patientSegs.filter(sameStudy)).map((s) => s.seriesInstanceUID);
       say(`Loading ${c.patient}'s MRI of the anatomy${segs.length ? " and the tumor outline" : ""}…`);
       const want = [...(t1 ? [t1] : []), ...segs];
       const r = want.length ? await loadDatabaseSeries(want, (l) => { note = l; render(); }) : { loaded: 0, failures: ["no MRI of the anatomy is recorded with the tracts"] };
@@ -308,12 +368,16 @@ function registerTractReview(ctx: ModuleContext): void {
       const tumorX = await tumorCenterX(segNodes.map((n) => n.id));
       const side = sideToJudge(tumorX, mid);
       const sl = side < 0 ? left : right;
+      openSide = side < 0 ? "left" : "right"; openFibers = fibersFingerprint(sl);
       const had = file.cases[key];
       const pair = levelsFromPair(left, right, side), fan = pair ? undefined : levelsOf(sl);
       const levels = had?.levels ?? pair ?? fan;
-      levelsSaid = had?.levels ? "the levels you left last time" : pair ? "" : fan ? "levels placed from this tract alone (the other side's is missing): check them" : "the levels could not be found from the tracts: please place them";
+      const bothThere = left.length >= 5 && right.length >= 5;
+      levelsSaid = had?.levels ? "the levels you left last time" : pair ? "" : fan ? `levels placed from this tract alone (${bothThere ? "the two tracts never got far enough apart to place them" : "the other side's is missing"}): check them` : "the levels could not be found from the tracts: please place them";
       const lv = levels ?? (() => { const zs = sl.flatMap((f) => [...f].filter((_, i) => i % 3 === 2)).sort((a, b) => a - b); const m = zs.length ? zs[zs.length >> 1] : 0; return { crus: Math.round(m - 10), ic: Math.round(m + 5), coronal: 0 }; })();
-      file.cases[key] = { patient: c.patient, side: side < 0 ? "left" : "right", ...(had?.levels ? { levels: had.levels } : {}), judgments: { ...(had?.judgments ?? {}), [c.tracts]: { ...(had?.judgments?.[c.tracts] ?? {}), ...(rules ? { rules } : {}) } } };
+      // A remake that drew the very same fibers keeps the verdict given on the older tracts (critic 2026-10-06, R2-4).
+      const carry = carriedVerdict(had, c.tracts, openFibers);
+      if (carry && canWrite()) await saveCase(key, patchOf({ verdict: { verdict: carry.j.verdict!, judgedAt: carry.j.judgedAt ?? new Date().toISOString(), carriedFrom: carry.from }, ...(carry.j.note ? { note: carry.j.note } : {}) }));
       setLayout(LAYOUT.conventionalWidescreen);
       orientView("Red", "axial"); orientView("Yellow", "axial"); orientView("Green", "coronal");
       setSliceOffset("Red", lv.crus); setSliceOffset("Yellow", lv.ic); setSliceOffset("Green", lv.coronal);
@@ -327,12 +391,10 @@ function registerTractReview(ctx: ModuleContext): void {
     } finally { busy = ""; render(); }
   }
 
-  async function judge(verdict: Judgment["verdict"]): Promise<void> {
-    const r = file.cases[openKey]; if (!r || !openTracts || !hasCase()) return;
-    const j = r.judgments[openTracts] ?? (r.judgments[openTracts] = {});
-    j.verdict = verdict; j.judgedAt = new Date().toISOString();
+  async function judge(verdict: NonNullable<Judgment["verdict"]>): Promise<void> {
+    if (!openKey || !openTracts || !hasCase() || !canWrite()) return;
     keepLevels();
-    await saveCase(openKey);
+    await saveCase(openKey, patchOf({ verdict: { verdict, judgedAt: new Date().toISOString() } }));
     render();
   }
 
@@ -344,23 +406,32 @@ function registerTractReview(ctx: ModuleContext): void {
     const list = shell.section(root, "1 · Cases", { band: "yellow", open: true, note: cases.length ? `${judged} of ${cases.length} judged` : "" });
     if (!cases.length) { const p = document.createElement("p"); p.className = "sl-hint"; p.textContent = "No fiber tracts made at import in the open database. They are made for each diffusion scan with an MRI of the anatomy when the import job runs."; list.append(p); }
     const table = document.createElement("table"); table.style.cssText = "width:100%;border-collapse:collapse;font-size:11px";
+    // The list scrolls in its own box, so the verdict buttons stay in sight with many cases (critic 2026-10-06, R2-7).
+    const box = document.createElement("div"); box.style.cssText = "max-height:30vh;overflow-y:auto"; box.append(table);
     for (const c of cases) {
       const key = c.dwi.seriesInstanceUID, r = file.cases[key], v = verdictOf(c), older = r && Object.entries(r.judgments ?? {}).some(([s, j]) => s !== c.tracts && j.verdict);
       const tr = document.createElement("tr");
       tr.style.cssText = `cursor:pointer;${key === openKey ? "background:rgba(248,215,100,.14)" : ""}`;
-      tr.innerHTML = `<td style="padding:2px 4px">${c.patient.replace(/[<&]/g, "")}</td><td style="padding:2px 4px;color:var(--sl-fg-muted)">${r?.side ?? ""}</td><td style="padding:2px 4px;color:${v === "acceptable" ? "var(--sl-ok)" : v ? "var(--sl-error)" : "var(--sl-fg-muted)"}">${v === "acceptable" ? "✓ acceptable" : v ? "✗ not acceptable" : older ? "— (judged on older tracts)" : "—"}</td>`;
+      if (key === openKey) tr.dataset.open = "1";
+      tr.innerHTML = `<td style="padding:2px 4px">${c.patient.replace(/[<&]/g, "")}</td><td style="padding:2px 4px;color:var(--sl-fg-muted)">${r?.side ?? (key === openKey ? openSide : "")}</td><td style="padding:2px 4px;color:${v === "acceptable" ? "var(--sl-ok)" : v ? "var(--sl-error)" : "var(--sl-fg-muted)"}">${v === "acceptable" ? "✓ acceptable" : v ? "✗ not acceptable" : older ? "— (judged on older tracts)" : "—"}</td>`;
       tr.title = `Open ${c.patient}: the T1, the direction-colored map and the corticospinal tract on the side without the tumor.`;
       tr.onclick = () => { void openCase(key); };
       table.append(tr);
     }
-    list.append(table);
+    list.append(box);
+    box.querySelector<HTMLElement>("tr[data-open]")?.scrollIntoView({ block: "nearest" });
     const i = currentIndex(), c = cases[i], r = c && file.cases[c.dwi.seriesInstanceUID], j = r?.judgments?.[c.tracts];
-    if (c && r && hasCase()) {
+    if (c && openPatient && hasCase()) {
       const here = shell.section(root, `2 · This case`, { band: "green", open: true, note: c.patient });
       const p = document.createElement("p"); p.className = "sl-hint";
-      p.textContent = `The ${r.side} corticospinal tract. Red view: axial at the cerebral peduncle; yellow: axial at the internal capsule; green: coronal through the tract; 3D from the front. Move a slider when a level is off: the level you leave is kept for next time.${levelsSaid ? ` (${levelsSaid[0].toUpperCase()}${levelsSaid.slice(1)}.)` : ""}`;
+      p.textContent = `The ${openSide} corticospinal tract. Red view: axial at the cerebral peduncle; yellow: axial at the internal capsule; green: coronal through the tract; 3D from the front. Move a slider when a level is off: the level you leave is kept for next time.${levelsSaid ? ` (${levelsSaid[0].toUpperCase()}${levelsSaid.slice(1)}.)` : ""}`;
       here.append(p);
       const v = shell.section(root, "3 · Verdict", { band: "yellow", open: true });
+      if (fileProblem) {
+        const warn = document.createElement("p"); warn.className = "sl-hint"; warn.style.color = "var(--sl-error)"; warn.textContent = fileProblem; v.append(warn);
+        if (fileState !== "unreadable") { const again = document.createElement("button"); again.textContent = "Try again"; again.title = "Read the verdicts again."; again.onclick = () => { void refreshFile().then(render); }; v.append(again); }
+      }
+      if (j?.carriedFrom) { const cf = document.createElement("p"); cf.className = "sl-hint"; cf.textContent = "This verdict was given on an earlier making of the tracts that drew exactly these fibers."; v.append(cf); }
       const crit = document.createElement("p"); crit.className = "sl-hint"; crit.textContent = "Judge by: at the internal capsule, the tract in the posterior limb (blue), nothing in the thalamus or the lentiform nucleus; at the peduncle, in the crus, in front of the substantia nigra; how complete the fan is, seen from the front in 3D. The outline on a slice is where the tract crosses it; a small circle is a stray fiber."; v.append(crit);
       const row = document.createElement("div"); row.style.cssText = "display:flex;gap:6px;margin:6px 0";
       const ok = document.createElement("button"), no = document.createElement("button");
@@ -368,12 +439,12 @@ function registerTractReview(ctx: ModuleContext): void {
       ok.style.cssText = `flex:1;${j?.verdict === "acceptable" ? "background:var(--sl-ok);color:#000" : "color:var(--sl-ok);border-color:var(--sl-ok)"}`;
       no.style.cssText = `flex:1;${j?.verdict === "not acceptable" ? "background:var(--sl-error);color:#000" : "color:var(--sl-error);border-color:var(--sl-error)"}`;
       ok.title = "Few errant fibers on the two axial slices, and a complete fan from the front."; no.title = "Too many errant fibers, or the fan incomplete.";
-      ok.disabled = no.disabled = !!busy || fileState === "unreadable";
+      ok.disabled = no.disabled = !!busy || !canWrite();
       ok.onclick = () => { void judge("acceptable"); }; no.onclick = () => { void judge("not acceptable"); };
       row.append(ok, no); v.append(row);
       const ta = document.createElement("textarea"); ta.placeholder = "Note (optional)"; ta.rows = 2; ta.value = j?.note ?? ""; ta.style.cssText = "width:100%;box-sizing:border-box";
-      ta.disabled = fileState === "unreadable";
-      ta.onchange = () => { const jj = r.judgments[c.tracts] ?? (r.judgments[c.tracts] = {}); jj.note = ta.value.trim() || undefined; void saveCase(c.dwi.seriesInstanceUID); };
+      ta.disabled = !canWrite();
+      ta.onchange = () => { void saveCase(c.dwi.seriesInstanceUID, patchOf({ note: ta.value.trim() })).then(render); };
       v.append(ta);
       const nav = document.createElement("div"); nav.style.cssText = "display:flex;gap:6px;align-items:center;margin-top:8px";
       const prev = document.createElement("button"), next = document.createElement("button"), pos = document.createElement("span");
@@ -392,8 +463,9 @@ function registerTractReview(ctx: ModuleContext): void {
     groups: ["Display"],
     tip: "Judge the corticospinal tract on the side without a tumor, case after case, for checking the fiber tracts.",
     help: "<p><b>For checking the fiber tracts</b> against an expert's eye. Each case is a diffusion scan whose fiber tracts were made when it was imported. Click a case: its MRI of the anatomy is shown with the direction-colored map over it (red left-right, green front-back, blue up-down), and only the corticospinal tract on the side without the tumor, in one color. The red view is an axial slice at the cerebral peduncle, the yellow one an axial slice at the internal capsule, the green one coronal through the tract; the 3D view is seen from the front. The slice levels are found from the two tracts; move a slider when one is off, and the level you leave is used next time. The outline on a slice is where the tract crosses it, with the map visible inside; a small circle on its own is a stray fiber. Judge by where the tract lies -- at the internal capsule in the posterior limb (blue on the map), nothing in the thalamus or the lentiform nucleus; at the peduncle in the crus, in front of the substantia nigra -- and how complete the fan is in 3D: <b>Acceptable</b> or <b>Not acceptable</b>, with a note if you like; <b>Next</b> opens the next case. The verdicts are kept in the database's folder (tract-review.json), each with the version of the tracts it was about; when the tracts are made again, the earlier verdicts stay, and the case waits for a new one.</p>",
-    async mount(el: HTMLElement) { root = el; await readReviews(); await listCases(); say(`${cases.length} case${cases.length === 1 ? "" : "s"} with fiber tracts made at import.`); },
-    onShow() { void listCases().then(render); },
+    async mount(el: HTMLElement) { root = el; await refreshFile(); await listCases(); say(`${cases.length} case${cases.length === 1 ? "" : "s"} with fiber tracts made at import.${fileProblem ? ` ${fileProblem}` : ""}`); },
+    // Shown again (perhaps after the window's database changed): the verdicts and the list read again.
+    onShow() { void refreshFile().then(listCases).then(render); },
   });
 }
 

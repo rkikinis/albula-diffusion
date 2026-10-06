@@ -198,14 +198,14 @@ export async function planStudy(dbDir: string, rows: IndexSeries[], study: strin
 }
 
 /** The stored tracts objects of a diffusion series, with what made them (from the index as it is NOW: finding 8). */
-export async function storedTracts(dbDir: string, dwiUID: string): Promise<{ seriesUID: string; rules?: Record<string, unknown>; inputs?: Partial<CaseInputs>; made?: string }[]> {
+export async function storedTracts(dbDir: string, dwiUID: string): Promise<{ seriesUID: string; seriesNumber: number; rules?: Record<string, unknown>; inputs?: Partial<CaseInputs>; made?: string }[]> {
   const rows = await indexSeries(dbDir), study = rows.find((y) => y.seriesUID === dwiUID)?.studyUID;
-  const out: { seriesUID: string; rules?: Record<string, unknown>; inputs?: Partial<CaseInputs>; made?: string }[] = [];
+  const out: { seriesUID: string; seriesNumber: number; rules?: Record<string, unknown>; inputs?: Partial<CaseInputs>; made?: string }[] = [];
   for (const r of rows.filter((x) => x.description === TRACTS_DESCRIPTION && x.studyUID === study)) {
     for (const p of await seriesFilePaths(dbDir, r.seriesUID)) {
       try {
         const t = await dicomToTracts(await Deno.readFile(p));
-        if (t.referencedSeries === dwiUID) out.push({ seriesUID: r.seriesUID, rules: t.provenance?.rules as Record<string, unknown> | undefined, inputs: t.provenance?.inputs as Partial<CaseInputs> | undefined, made: String(t.provenance?.made ?? "") });
+        if (t.referencedSeries === dwiUID) out.push({ seriesUID: r.seriesUID, seriesNumber: Number(r.seriesNumber) || 0, rules: t.provenance?.rules as Record<string, unknown> | undefined, inputs: t.provenance?.inputs as Partial<CaseInputs> | undefined, made: String(t.provenance?.made ?? "") });
       } catch { /* not a readable tracts object of ours */ }
     }
   }
@@ -237,6 +237,25 @@ export async function brainOnT1(server: string, t1: ReadSeries, onProgress?: (li
   if (r.ok) return { mask: r.mask };
   return { why: r.message, kind: r.reason === "no-synthstrip" ? "cannot" : r.reason === "failed" ? "failed" : "waiting" };
 }
+/**
+ * THE CODE THAT MAKES THE TRACTS, hashed (critic 2026-10-06, R2-4): the files the job's own module reaches through its
+ * relative imports (static, dynamic, and workers by `new URL("./x.ts", import.meta.url)`), not the whole folder -- a
+ * change to the review's drawing or the panel must not remake every case and send Ron's verdicts to "older tracts".
+ */
+export async function importGraph(entry: URL): Promise<string[]> {
+  const seen = new Set<string>(), todo = [entry.href];
+  const spec = /(?:\bfrom\s*|\bimport\s*\(\s*|new URL\(\s*)"(\.{1,2}\/[^"]+\.(?:ts|wgsl))"/g;
+  while (todo.length) {
+    const u = todo.pop()!;
+    if (seen.has(u)) continue;
+    seen.add(u);
+    if (!u.endsWith(".ts")) continue;
+    // Comments out first (this one's own example would count as an import).
+    const text = (await Deno.readTextFile(new URL(u))).replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:"'])\/\/.*$/gm, "$1");
+    for (const m of text.matchAll(spec)) todo.push(new URL(m[1], u).href);
+  }
+  return [...seen].sort();
+}
 /** haversack's and SynthStrip's versions, as the server reports them (finding 10). */
 export async function synthstripVersion(server: string, opts: { waitMs?: number; pollMs?: number; start?: boolean } = {}): Promise<string | undefined> {
   // THE VERSION IS PART OF THE STALENESS KEY (jobRules), so an unknown one must not be recorded: a segmentation server
@@ -244,8 +263,8 @@ export async function synthstripVersion(server: string, opts: { waitMs?: number;
   // the server is started when it does not answer (as brainOnT1 did; critic 2026-10-06, finding 14); a server without
   // SynthStrip (a Mac without the developer tools) is said as such -- its cases come out "cannot be made on this Mac";
   // otherwise asked again until both parts are known, up to `waitMs` (default 5 minutes); undefined when never.
-  // SynthStrip's weights are reported once on disk; before its first job they are "not yet installed" -- the key then
-  // changes once, after the first case (suspected by the critic; one remake, not a loss).
+  // SynthStrip's weights are reported once on disk; before its first job they are "not yet installed" -- makeTracts asks
+  // again after its first brain mask and records the real version (critic 2026-10-06, R2-5).
   const root = server.replace(/\/+$/, ""), until = Date.now() + (opts.waitMs ?? 5 * 60_000);
   let started = false;
   for (;;) {
@@ -306,7 +325,7 @@ export function trackSets(sl: Float32Array[], tract: Int32Array, side: Int8Array
  */
 export async function makeTracts(dbDir: string, dbId: string, server: string, plan: { dwi: ReadSeries; partner?: ReadSeries; t1?: ReadSeries }, device: GPUDevice, model: TractCloudModel,
   labeler: RapidParcModel, versions: { code: string; labeler: string; synthstrip: string }, onProgress?: (line: string) => void, opts: { force?: boolean; dryRun?: boolean } = {}): Promise<CaseOutcome> {
-  const rules = jobRules(versions);
+  let rules = jobRules(versions);
   const inputs: CaseInputs = { diffusion: plan.dwi.facts.uid, partner: plan.partner?.facts.uid ?? null, t1: plan.t1?.facts.uid ?? null };
   const stored = await storedTracts(dbDir, plan.dwi.facts.uid);
   // CURRENT = the same code, rules and inputs AND its Color FA beside it (critic 2026-10-06, finding 16: a job stopped
@@ -321,6 +340,13 @@ export async function makeTracts(dbDir: string, dbId: string, server: string, pl
   onProgress?.("finding the brain on the MRI of the anatomy");
   const brain = await brainOnT1(server, plan.t1, onProgress);
   if (!brain.mask) return { state: brain.kind ?? "waiting", why: `the brain on the MRI of the anatomy: ${brain.why}` };
+  // SYNTHSTRIP'S WEIGHTS ARRIVE WITH ITS FIRST JOB (critic 2026-10-06, R2-5): on a fresh installation the version asked
+  // before the run says "not yet installed". Asked again now that a mask was made; the shared `versions` is updated, so
+  // this case and every later one record the real version (and the next run does not remake them all).
+  if (/not yet installed/.test(versions.synthstrip)) {
+    const v = await synthstripVersion(server, { waitMs: 0, start: false });
+    if (v) { versions.synthstrip = v; rules = jobRules(versions); }
+  }
   const dwi = fromDicomVolumes(plan.dwi.frames, plan.dwi.facts.description);
   const t1v = plan.t1.frames[0], stages: StageTimes = {};
   onProgress?.("correcting, aligning and tracking the whole brain");
@@ -338,8 +364,9 @@ export async function makeTracts(dbDir: string, dbId: string, server: string, pl
   const provenance = { rules, inputs, made: new Date().toISOString(), seconds: +seconds.toFixed(1), stages: stageText(stages),
     streamlines: r.sl.length, onePointLeftOut: r.sl.filter((p) => p.length < 6).length, corrected: r.corrected, alignedToT1: aligned,
     trackingRuleApplied: r.rule.id, motionRuleApplied: r.prep.motionRule, ...(r.prep.directions ? { directions: { rule: r.prep.directions.rule, verdict: r.prep.directions.verdict, used: r.prep.directions.best.label, Q: r.prep.directions.best.Q, recordOverBest: r.prep.directions.recordOverBest } } : {}), ...(r.alignment ? { alignment: r.alignment } : {}), brain: r.fit.seedMaskRule ?? r.fit.maskRule };
-  // Several objects can follow each other under one scan (remade after a change): numbered from 900 by their time.
-  const seriesNumber = 900 + stored.length;
+  // Several objects can follow each other under one scan (remade after a change): numbered from 900 by their time -- one
+  // above the highest stored, so a deleted older one never makes the newest share a number (critic 2026-10-06, R2-7).
+  const seriesNumber = Math.max(899, ...stored.map((x) => x.seriesNumber)) + 1;
   const written = await tractsToDicom(sets, { patientStudy: patientStudyOf(plan.dwi.header), frameOfReferenceUID: forUID, seriesInstanceUID: plan.dwi.facts.uid, instances: plan.dwi.instances,
     alsoReferenced: [...(aligned ? [{ seriesInstanceUID: plan.t1.facts.uid, instances: plan.t1.instances }] : []), ...(plan.partner ? [{ seriesInstanceUID: plan.partner.facts.uid, instances: plan.partner.instances }] : [])] },
     { algorithmName: "UKF two-tensor (Albula's port of UKFTractography)", algorithmVersion: `tracking rule ${r.rule.id}`, algorithmParameters: JSON.stringify(r.rule.ukf).slice(0, 10240),

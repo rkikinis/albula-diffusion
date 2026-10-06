@@ -3,7 +3,7 @@
 // (critic, 2026-10-05, qa/2026-10-05-dmri-import-job.md, findings 6, 7, 11, 14).
 //   deno test -A --no-check --config ../../src/SlicerLive/deno.jsonc import-job.test.ts
 import { assert, assertEquals } from "jsr:@std/assert@1";
-import { anatomyOf, colorFaPath, isCurrent, isDiffusionScan, jobRules, partnerOf, planCases, synthstripVersion, trackSets, writeColorFA, type SeriesFacts } from "./import-job.ts";
+import { anatomyOf, colorFaPath, importGraph, isCurrent, isDiffusionScan, jobRules, partnerOf, planCases, synthstripVersion, trackSets, writeColorFA, type SeriesFacts } from "./import-job.ts";
 import { packRGB24 } from "albula";
 import type { TensorFit } from "./tensor.ts";
 import { SHORT } from "./tractcloud/name-tracts.ts";
@@ -108,4 +108,10 @@ Deno.test("a segmentation server without SynthStrip is said as such at once, not
     assertEquals(await synthstripVersion(`http://127.0.0.1:${(srv.addr as Deno.NetAddr).port}`, { pollMs: 10, waitMs: 5000 }), "haversack 0.15.0, no SynthStrip");
     assert(performance.now() - t0 < 1000);
   } finally { ac.abort(); await srv.finished; }
+});
+
+Deno.test("the code fingerprint covers the files that make the tracts, not the review's drawing (critic R2-4)", async () => {
+  const g = (await importGraph(new URL("./import-job.ts", import.meta.url))).map((u) => u.split("/").slice(-2).join("/"));
+  for (const f of ["diffusion/tracking.ts", "diffusion/prepare.ts", "diffusion/csd-worker.ts", "tractcloud/tractcloud.ts", "diffusion/tracts-dicom.ts"]) assert(g.includes(f), `${f} is in the graph`);
+  for (const f of ["diffusion/tract-slice.ts", "diffusion/review.ts", "diffusion/module.ts", "diffusion/face.ts"]) assert(!g.includes(f), `${f} is not`);
 });

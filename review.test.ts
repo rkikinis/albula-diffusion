@@ -1,7 +1,7 @@
 // The Tract review's own arithmetic (review.ts): which streamlines are judged, on which side, at which levels.
 //   deno test -A --no-check --config ../../src/SlicerLive/deno.jsonc review.test.ts
 import { assert, assertEquals } from "jsr:@std/assert@1";
-import { CST, cstOf, levelsFromPair, levelsOf, mergeCase, midlineX, sideToJudge, type Review, type ReviewFile } from "./review.ts";
+import { carriedVerdict, CST, cstOf, fibersFingerprint, levelsFromPair, levelsOf, mergeCase, midlineX, sideToJudge, type Review, type ReviewFile } from "./review.ts";
 import type { TractSetData } from "./tracts-dicom.ts";
 
 /** A synthetic corticospinal tract as the real ones are (the test cases, 2026-10-06): 60 fibers from z = -40 (brainstem)
@@ -64,16 +64,51 @@ Deno.test("the levels from the two tracts' separation: the peduncle where each i
   assertEquals(levelsFromPair(left, [], -1), undefined, "one side missing: not from the pair");
 });
 
-Deno.test("a verdict is saved into the file as it is on disk: other cases kept, and the verdict on older tracts kept (Ron's '6')", () => {
+Deno.test("a pair that never gets far apart: the internal capsule at 85% of the widest, not at its peak (critic R2-3)", () => {
+  // Half-separation 4 mm up to z = -10, rising 0.6 mm per mm to a peak of 22.3 mm at z = 20.5, then falling.
+  const half = (z: number) => (z < -10 ? 4 : z < 20.5 ? 4 + (z + 10) * 0.6 : 22.3 - (z - 20.5) * 0.6);
+  const one = (side: number) => Array.from({ length: 30 }, (_, k) => {
+    const pts: number[] = [];
+    for (let z = -40; z <= 60; z += 1) pts.push(side * half(z) + Math.cos(k) * 0.8, 10 + Math.sin(k) * 0.8, z);
+    return new Float32Array(pts);
+  });
+  const l = levelsFromPair(one(-1), one(1), 1)!;
+  assert(l, "levels found");
+  // 85% of ~22 is ~19: reached near z = 15, five or so millimeters below the peak.
+  assert(l.ic <= 16 && l.ic >= 12, `internal capsule at ${l.ic}, below the peak`);
+});
+
+Deno.test("an action changes only what it names: a window with an out-of-date copy cannot erase a verdict (critic R2-1)", () => {
   const onDisk: ReviewFile = { version: 2, cases: {
-    a: { patient: "A", side: "left", judgments: { "tracts-1": { verdict: "acceptable", judgedAt: "t1" } } },
+    a: { patient: "A", side: "left", levels: { crus: -10, ic: 5, coronal: 3 }, judgments: { "tracts-1": { verdict: "acceptable", judgedAt: "t1" }, "tracts-2": { verdict: "acceptable", judgedAt: "t2", note: "fine" } } },
     b: { patient: "B", side: "right", judgments: { "tracts-9": { verdict: "not acceptable" } } },
   } };
-  // Case a's tracts were remade (tracts-2); this window has only the new, unjudged-then-judged record.
-  const mine: Review = { patient: "A", side: "left", levels: { crus: -10, ic: 5, coronal: 3 }, judgments: { "tracts-2": { verdict: "not acceptable", judgedAt: "t2" } } };
-  const merged = mergeCase(onDisk, "a", mine);
-  assertEquals(merged.cases.b, onDisk.cases.b, "another case kept");
-  assertEquals(merged.cases.a.judgments["tracts-1"].verdict, "acceptable", "the verdict on the old tracts kept");
-  assertEquals(merged.cases.a.judgments["tracts-2"].verdict, "not acceptable");
-  assertEquals(merged.cases.a.levels, mine.levels);
+  const base = { patient: "A", side: "left" as const, tracts: "tracts-2" };
+  // A note from another window: the verdict on the same tracts stays, the levels stay, case b stays.
+  const n = mergeCase(onDisk, "a", { ...base, note: "second look" });
+  assertEquals(n.cases.a.judgments["tracts-2"].verdict, "acceptable");
+  assertEquals(n.cases.a.judgments["tracts-2"].note, "second look");
+  assertEquals(n.cases.a.levels, { crus: -10, ic: 5, coronal: 3 });
+  assertEquals(n.cases.b, onDisk.cases.b);
+  assertEquals(n.cases.a.judgments["tracts-1"].verdict, "acceptable", "the verdict on older tracts kept (Ron's '6')");
+  // Levels moved: the verdict and the note stay.
+  const l = mergeCase(n, "a", { ...base, levels: { crus: 16, ic: 25, coronal: 12.7 } });
+  assertEquals(l.cases.a.judgments["tracts-2"], n.cases.a.judgments["tracts-2"]);
+  assertEquals(l.cases.a.levels!.crus, 16);
+  // A verdict: the note stays; an empty note removes it.
+  const v = mergeCase(l, "a", { ...base, verdict: { verdict: "not acceptable", judgedAt: "t3" } });
+  assertEquals([v.cases.a.judgments["tracts-2"].verdict, v.cases.a.judgments["tracts-2"].note], ["not acceptable", "second look"]);
+  assertEquals(mergeCase(v, "a", { ...base, note: "" }).cases.a.judgments["tracts-2"].note, undefined);
+  // A case not on disk yet.
+  assertEquals(mergeCase({ version: 2, cases: {} }, "c", { patient: "C", side: "right", tracts: "t", verdict: { verdict: "acceptable", judgedAt: "x" } }).cases.c.judgments.t.verdict, "acceptable");
+});
+
+Deno.test("a remake that drew the very same fibers carries the verdict over; different fibers do not (critic R2-4)", () => {
+  const sl = tract(-20), same = fibersFingerprint(sl.map((f) => f.slice())), other = fibersFingerprint(tract(-21));
+  assertEquals(fibersFingerprint(sl), same);
+  assert(same !== other);
+  const rec: Review = { patient: "A", side: "left", judgments: { old: { verdict: "acceptable", judgedAt: "t1", fibers: same }, older: { verdict: "not acceptable", judgedAt: "t0", fibers: same } } };
+  assertEquals(carriedVerdict(rec, "new", same)?.from, "old", "the newest verdict on the same fibers");
+  assertEquals(carriedVerdict(rec, "new", other), undefined);
+  assertEquals(carriedVerdict({ ...rec, judgments: { ...rec.judgments, new: { verdict: "not acceptable" } } }, "new", same), undefined, "a verdict of its own wins");
 });
