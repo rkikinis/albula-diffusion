@@ -10,16 +10,14 @@
 import { parseNiftiVolumes } from "albula";
 import { fromFsl } from "./dwi.ts";
 import { fitTensors } from "./tensor.ts";
-import { prepareUkfData } from "./ukf.ts";
-import { correctWithReversed, sortByDistance, stageText, streamlineDistances, tractName, trackUkfSeeds, wholeBrainSeeds, type StageTimes, type TrackTiming } from "./planning.ts";
-import { everyBrainVoxel, seedsFor, TRACKING_RULE, TRACKING_RULES, ukfDataFor, withBrainFromT1, type MaskGrid, type TrackingRuleId } from "./tracking-rules.ts";
+import { sortByDistance, stageText, streamlineDistances, tractName, type StageTimes } from "./planning.ts";
+import { wholeBrainTracts } from "./pipeline.ts";
+import { TRACKING_RULE, TRACKING_RULES, type MaskGrid, type TrackingRuleId } from "./tracking-rules.ts";
 import type { Rigid } from "./registration.ts";
-import type { FieldFit } from "./distortion.ts";
-import { prepareScan } from "./prepare.ts";
-import { MOTION_RULE, type MotionRuleId } from "./motion.ts";
-import { edgeFluid, outsideBrain, OUTSIDE_RULE } from "./outside-brain.ts";
+import type { MotionRuleId } from "./motion.ts";
+import { OUTSIDE_RULE } from "./outside-brain.ts";
 import type { TractCloudModel } from "./tractcloud/tractcloud.ts";
-import { nameTracts, SHORT, type Named } from "./tractcloud/name-tracts.ts";
+import { SHORT, type Named } from "./tractcloud/name-tracts.ts";
 import { loadRapidParc, type RapidParcModel } from "./rapidparc/rapidparc.ts";
 /** Where tracking rule 3's brain mask for a library case lives (Contents/tools/synthstrip-masks.ts writes it). */
 export const synthstripMaskPath = (ds: string, id: string) => `${ds}/derivatives/synthstrip/sub-${id}/anat/sub-${id}_ses-preop_desc-synthstrip_mask.nii.gz`;
@@ -27,9 +25,6 @@ export const synthstripMaskPath = (ds: string, id: string) => `${ds}/derivatives
 let rp: RapidParcModel | undefined;
 const defaultRapidParc = () => rp ??= loadRapidParc(Deno.readFileSync(new URL("./rapidparc/model/rapidparc.safetensors", import.meta.url)).buffer);
 import { addScanNoise, noiseSigma } from "./agreement.ts";
-import { estimateResponses, kernelFromResponses } from "./responses.ts";
-import { csdVolume } from "./csd-volume.ts";
-import { trackPttParallel } from "./ptt.ts";
 
 export const CASE_DEFAULTS = { stopFA: 0.15, maxB: 1500, margins: [0, 5, 6, 8] } as const;
 
@@ -97,57 +92,29 @@ export async function runCase(ds: string, id: string, device: GPUDevice, model: 
     try { const m = (await parseNiftiVolumes(Deno.readFileSync(f)))[0]; brainT1 = { dims: m.dims, ijkToRAS: m.ijkToRAS, data: m.data as ArrayLike<number> }; }
     catch { throw new Error(`${id}: tracking rule 3 needs SynthStrip's brain mask at ${f} (run Contents/tools/synthstrip-masks.ts ${id})`); }
   }
-  const field: { fit?: FieldFit; sign?: 1 | -1 } = {};
-  let corrected = await correctWithReversed(dwi, rev.volumes.filter((_, i) => rev.bValues[i] < 50).map((v) => v.data), "PA", undefined,
-    { partnerGrid: { dims: rev.volumes[0].dims, ijkToRAS: rev.volumes[0].ijkToRAS }, times: stages, rule: opts.distortionRule, apply: false, field,
-      // The scanner's record of the phase-encoding directions (the BIDS sidecars), when present: PAT03's and CON02's "PA"
-      // scans are not reversed pairs (planning.ts correctWithReversed).
-      phaseEncoding: { scan: sidecarPE(`dwi/sub-${id}_ses-preop_acq-AP_dwi.json`), partner: sidecarPE(`dwi/sub-${id}_ses-preop_acq-PA_dwi.json`) } });
-  // Head movement, the field and the T1 in one resampling (prepare.ts, the module's path too).
-  const prep = await prepareScan(dwi, { ...(field.fit ? { field: { fit: field.fit, sign: field.sign ?? -1 } } : {}),
+  const r = await wholeBrainTracts({ dwi,
+    partner: { b0s: rev.volumes.filter((_, i) => rev.bValues[i] < 50).map((v) => v.data), grid: { dims: rev.volumes[0].dims, ijkToRAS: rev.volumes[0].ijkToRAS }, name: "PA" },
+    // The scanner's record of the phase-encoding directions (the BIDS sidecars), when present: PAT03's and CON02's "PA"
+    // scans are not reversed pairs (planning.ts correctWithReversed).
+    phaseEncoding: { scan: sidecarPE(`dwi/sub-${id}_ses-preop_acq-AP_dwi.json`), partner: sidecarPE(`dwi/sub-${id}_ses-preop_acq-PA_dwi.json`) },
     ...(t1Vol ? { t1: { dims: t1Vol.dims as [number, number, number], ijkToRAS: t1Vol.ijkToRAS, data: t1Vol.data as ArrayLike<number> } } : {}),
-    motionRule: opts.motionRule ?? MOTION_RULE, ...(opts.motionRounds ? { motionRounds: opts.motionRounds } : {}), phaseEncoding: sidecarPE(`dwi/sub-${id}_ses-preop_acq-AP_dwi.json`), times: stages });
-  dwi = prep.dwi;
-  if (prep.said) corrected += `; ${prep.said}`;
-  const alignment = prep.alignment;
-  const tFit = performance.now();
-  let fit = fitTensors(dwi, { maxB: CASE_DEFAULTS.maxB, maskMethod: opts.maskMethod, seedMask: opts.seedMask });
-  // On the T1-aligned grid only: a doubtful alignment left the scan in the scanner's place, where a T1 mask does not fit,
-  // and the case is then tracked under rule 2 and recorded so (critic, 2026-10-04, finding 10).
-  let rule = TRACKING_RULES[opts.trackingRule ?? TRACKING_RULE], outsideGridMl: number | undefined;
-  if (brainT1 && alignment && !alignment.doubt) ({ fit, outsideGridMl } = withBrainFromT1(fit, brainT1, undefined, rule.fluidMdMax, rule.fluidShellVoxels));
-  else if (rule.brain === "t1-synthstrip") rule = TRACKING_RULES[2];
-  const t1 = performance.now();
-  stages.fit = t1 - tFit;
-  const detail: TrackTiming = { prepare: 0, gpu: 0, assemble: 0, between: 0 };
-  let shell: number | undefined;
-  let sl: Float32Array[], csdSeconds = 0;
-  if (method === "ptt") {
-    const k = kernelFromResponses(estimateResponses(dwi));
-    const fod = await csdVolume(dwi, fit.mask, k, opts.csdWorkerUrl ? { workerUrl: opts.csdWorkerUrl } : {});
-    csdSeconds = fod.seconds;
-    sl = await trackPttParallel(fod, wholeBrainSeeds(fit, opts.seeds, opts.seedDraw), opts.pttWorkerUrl ? { workerUrl: opts.pttWorkerUrl } : {});
-  } else {
-    // THE TRACKING RULE (tracking-rules.ts): its shell, mask, seeds and thresholds; opts.ukf overrides single settings.
-    const tData = performance.now(), data = ukfDataFor(dwi, fit, rule), ts = performance.now();
-    shell = data.shell;
-    const seeds = opts.seedEveryVoxel ? everyBrainVoxel(fit) : seedsFor(fit, rule, { count: opts.seeds, draw: opts.seedDraw });
-    stages.seeds = performance.now() - ts;
-    const ukf = { ...rule.ukf, ...(opts.ukf ?? {}) };
-    sl = await trackUkfSeeds(device, data, seeds, ukf.stoppingFA as number, undefined, detail, ukf);
-    stages.trackDetail = { ...detail, data: ts - tData };
-  }
+    ...(brainT1 ? { brainT1 } : {}) }, device, model,
+    { method, labeler: opts.labeler === "tractcloud" ? "tractcloud" : opts.labeler ?? defaultRapidParc(),
+      ...(opts.distortionRule ? { distortionRule: opts.distortionRule } : {}), ...(opts.trackingRule ? { trackingRule: opts.trackingRule } : {}),
+      ...(opts.motionRule !== undefined ? { motionRule: opts.motionRule } : {}), ...(opts.motionRounds ? { motionRounds: opts.motionRounds } : {}),
+      ...(opts.maskMethod ? { maskMethod: opts.maskMethod } : {}), ...(opts.seedMask !== undefined ? { seedMask: opts.seedMask } : {}),
+      ...(opts.seeds !== undefined ? { seeds: opts.seeds } : {}), ...(opts.seedDraw !== undefined ? { seedDraw: opts.seedDraw } : {}),
+      ...(opts.seedEveryVoxel ? { seedEveryVoxel: true } : {}), ...(opts.ukf ? { ukf: opts.ukf } : {}), ...(opts.nameSeed !== undefined ? { nameSeed: opts.nameSeed } : {}),
+      ...(opts.pttWorkerUrl ? { pttWorkerUrl: opts.pttWorkerUrl } : {}), ...(opts.csdWorkerUrl ? { csdWorkerUrl: opts.csdWorkerUrl } : {}) }, stages);
+  const { sl, named, outside, corrected, alignment, prep, rule, shell, outsideGridMl, csdSeconds } = r, fit = r.fit;
   const t2 = performance.now();
-  stages.track = t2 - t1 - csdSeconds * 1000 - (stages.seeds ?? 0);
-  const rapidParc = opts.labeler === "tractcloud" ? undefined : opts.labeler ?? defaultRapidParc();
-  const named = await nameTracts(device, model, sl, { ...(opts.nameSeed !== undefined ? { seed: opts.nameSeed } : {}), ...(rapidParc ? { rapidParc } : {}) });
-  stages.name = named.seconds * 1000;
+  // As before the pipeline was shared: tracking includes its signal and seeds; reading, correction and fit are the rest.
+  const trackMs = (stages.track ?? 0) + (stages.seeds ?? 0), nameMs = named.seconds * 1000, readFitMs = (t2 - t0) - trackMs - csdSeconds * 1000 - nameMs;
   const tDist = performance.now();
   const OTHER = model.json.tracts.length - 1;
   let short = 0, other = 0;
   for (const t of named.tract) { if (t === SHORT) short++; else if (t === OTHER) other++; }
-  // Streamlines that cross the fluid at the brain's edge would keep no tract's name (outside-brain.ts; off: OUTSIDE_RULE.on).
-  const outside = OUTSIDE_RULE.on ? outsideBrain(sl, fit, edgeFluid(fit)) : new Uint8Array(sl.length);
+  // The streamlines crossing the fluid at the brain's edge (pipeline.ts; none while OUTSIDE_RULE is off).
   let outsideCount = 0; for (const o of outside) outsideCount += o;
   let tracts: CaseTract[] = [], tumorVoxels = 0;
   const maskFile = `${ds}/derivatives/tumor_masks/sub-${id}/anat/sub-${id}_space_T1_label-tumor.nii`;
@@ -165,5 +132,5 @@ export async function runCase(ds: string, id: string, device: GPUDevice, model: 
   stages.distances = t3 - tDist;
   stages.total = t3 - t0;
   return { id, corrected, ...(alignment ? { alignment } : {}), motionRule: prep.motionRule, ...(prep.motion ? { motion: { largest: prep.motion.largest, residual: { before: +prep.motion.residual.before.toFixed(4), after: +prep.motion.residual.after.toFixed(4) } } } : {}), trackingRule: method === "ukf" ? rule.id : undefined, brain: fit.seedMaskRule ?? fit.maskRule, ...(outsideGridMl !== undefined ? { brainOutsideGridMl: +outsideGridMl.toFixed(1) } : {}), shell, stages, stagesText: stageText(stages), ...(opts.keep ? { kept: { sl, named, outside } } : {}), ...(added !== undefined ? { noiseSigma: +added.toFixed(2) } : {}), streamlines: sl.length, short, other, named: sl.length - short - other - outsideCount, outsideBrain: outsideCount, outsideRule: OUTSIDE_RULE.on ? OUTSIDE_RULE.id : 0, tumorVoxels, method,
-    seconds: { read_correct_fit: +((t1 - t0) / 1000).toFixed(1), csd: +csdSeconds.toFixed(1), track: +((t2 - t1 - csdSeconds * 1000) / 1000).toFixed(1), name: +named.seconds.toFixed(1), total: +((t3 - t0) / 1000).toFixed(1) }, tracts };
+    seconds: { read_correct_fit: +(readFitMs / 1000).toFixed(1), csd: +csdSeconds.toFixed(1), track: +(trackMs / 1000).toFixed(1), name: +named.seconds.toFixed(1), total: +((t3 - t0) / 1000).toFixed(1) }, tracts };
 }
