@@ -17,7 +17,7 @@ import {
   sliceOffset, sliceOrientation, writeDatabaseFile, type DatabaseSeries, type ModuleContext, type ZarrDesc,
 } from "albula";
 import { isTumorName } from "./face.ts";
-import { colorFaPath, dicomToTracts, type TractSetData } from "./tracts-dicom.ts";
+import { b0Path, colorFaPath, dicomToTracts, type TractSetData } from "./tracts-dicom.ts";
 import { crossingOutlines, sliceCrossings } from "./tract-slice.ts";
 
 export const CST = "corticospinal tract";
@@ -311,14 +311,18 @@ function registerTractReview(ctx: ModuleContext): void {
   });
 
   async function loadColorFA(tracts: string, name: string): Promise<string | undefined> {
-    const url = await databaseFileUrl(colorFaPath(tracts));
+    return await loadStored(colorFaPath(tracts), name, true);
+  }
+  /** A volume the import job stored beside the tracts (the Color FA, packed as RGB; the b = 0 image, plain). */
+  async function loadStored(path: string, name: string, rgb: boolean): Promise<string | undefined> {
+    const url = await databaseFileUrl(path);
     const r = url ? await fetch(url).catch(() => null) : null;
     if (!r?.ok) return undefined;
     const { f, body } = nrrdSplitHeader(new Uint8Array(await r.arrayBuffer()));
     const sizes = (f["sizes"] ?? "").split(/\s+/).filter(Boolean).map(Number) as [number, number, number];
     const raw = await nrrdDecode(f, body, sizes[0] * sizes[1] * sizes[2] * 4);
     const data = new Float32Array(raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength));
-    const res = await loadVolumeIntoScene(live, store, { dims: sizes, ijkToRAS: nrrdGeometry(f).ijkToRAS, data, dtype: "<f4", name }, { name, extra: { rgb24: true, autoVolumeRendering: false, recomputable: true } });
+    const res = await loadVolumeIntoScene(live, store, { dims: sizes, ijkToRAS: nrrdGeometry(f).ijkToRAS, data, dtype: "<f4", name }, { name, extra: { ...(rgb ? { rgb24: true } : {}), autoVolumeRendering: false, recomputable: true } });
     return res.imageId;
   }
 
@@ -374,6 +378,9 @@ function registerTractReview(ctx: ModuleContext): void {
       const t1Node = t1 ? nodeOf(t1) : undefined;
       const segNodes = [...live.nodes.values()].filter((n) => n.type === "segmentation" && segs.includes(String((n.dicom as { seriesInstanceUID?: string } | undefined)?.seriesInstanceUID ?? (n.origin as Record<string, unknown> | undefined)?.seriesInstanceUID)));
       const mapId = await loadColorFA(c.tracts, `${c.patient} Color FA (made at import)`);
+      // The b = 0 image (T2-weighted: the substantia nigra and the red nucleus dark, Ron 2026-10-06), for a view's gear ›
+      // Image; tracts made before it was stored have none.
+      await loadStored(b0Path(c.tracts), `${c.patient} b=0 (made at import)`, false);
       for (const cmp of [...live.nodes.values()].filter((n) => n.type === "sliceComposite")) {
         if (t1Node) live.write({ op: "patch", id: cmp.id, path: "#/refs/background", value: [t1Node.id] });
         live.write({ op: "patch", id: cmp.id, path: "#/refs/foreground", value: mapId ? [mapId] : [] });
