@@ -118,8 +118,8 @@ Deno.test("the code fingerprint covers the files that make the tracts, not the r
   for (const f of ["tract-slice.ts", "review.ts", "module.ts", "face.ts"]) assert(!rel.includes(f), `${f} is not`);
   // Deno's own module graph of the program, the extension's files: every one of them is in ours (workers, which Deno's
   // static graph does not follow, are in ours besides).
-  const config = new URL("../../src/SlicerLive/deno.jsonc", here).pathname;
-  const out = await new Deno.Command(Deno.execPath(), { args: ["info", "--json", "--config", config, new URL("./import-job-main.ts", here).pathname], stdout: "piped", stderr: "null" }).output();
+  // (Without core's configuration: "albula" stays unresolved, which leaves the extension's own files -- all this needs.)
+  const out = await new Deno.Command(Deno.execPath(), { args: ["info", "--json", new URL("./import-job-main.ts", here).pathname], stdout: "piped", stderr: "null" }).output();
   const deno = (JSON.parse(new TextDecoder().decode(out.stdout)) as { modules: { specifier: string }[] }).modules.map((m) => m.specifier).filter((u) => u.startsWith(here.href) && !u.includes("/vendor/"));
   for (const u of deno) assert(g.includes(u), `${u.slice(here.href.length)} is in Deno's graph but not ours`);
 });
