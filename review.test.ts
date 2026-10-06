@@ -54,11 +54,11 @@ function pair(): { left: Float32Array[]; right: Float32Array[] } {
   return { left: one(-1), right: one(1) };
 }
 
-Deno.test("the levels from the two tracts' separation: the peduncle where each is 13 mm from the midline, the internal capsule at 22 mm", () => {
+Deno.test("the levels from the two tracts' separation: the peduncle where each is 11 mm from the midline, the internal capsule at 22 mm", () => {
   const { left, right } = pair();
   const l = levelsFromPair(left, right, -1)!;
   assert(l, "no levels");
-  assert(Math.abs(l.crus - 5) <= 2, `peduncle at ${l.crus}, not near 5`);
+  assert(Math.abs(l.crus - 2) <= 2, `peduncle at ${l.crus}, not near 2 (half-separation 11 mm)`);
   assert(Math.abs(l.ic - 20) <= 2, `internal capsule at ${l.ic}, not near 20`);
   assert(Math.abs(l.coronal - 10) <= 1);
   assertEquals(levelsFromPair(left, [], -1), undefined, "one side missing: not from the pair");

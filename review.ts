@@ -94,13 +94,18 @@ export function levelsOf(sl: Float32Array[]): Levels | undefined {
 /**
  * THE LEVELS FROM ANATOMY, when both corticospinal tracts are there (critic 2026-10-06, finding 4: the fan rule above put
  * PAT08's "peduncle" in the lateral ventricles). The two tracts run close together in the pons and the medulla (each
- * 5-8 mm from the midline), about 12-17 mm from it through the cerebral peduncles and 22-25 mm through the posterior limb
+ * 5-8 mm from the midline), about 9-11 mm from it through the cerebral peduncles (measured; CRUS_HALF_MM) and 22-25 mm through the posterior limb
  * of the internal capsule. So: half the distance between the two tracts' centers per millimeter of height, smoothed over
- * 5 mm; the peduncle where it first reaches 13 mm going up, the internal capsule where it first reaches 22 mm (or 85% of
+ * 5 mm; the peduncle where it first reaches CRUS_HALF_MM going up, the internal capsule where it first reaches 22 mm (or 85% of
  * its peak, when lower) above that
  * (on the 59 stored tracts objects of the test cases: 10-25 mm apart, typically 15); the coronal slice through the judged
  * tract at the internal capsule. Undefined when either is not reached.
  */
+/** Half the two tracts' separation at the cerebral peduncle (mm). 13 put the slice at the junction of the midbrain and
+ *  the diencephalon, the third ventricle behind it (critic 2026-10-06, anatomy finding 1, CON07 and PAT08); 11 puts it in
+ *  the midbrain proper -- crura, interpeduncular fossa, tegmentum, aqueduct -- on 7 of 7 cases looked at on the T1
+ *  (PAT19, PAT08, PAT28, PAT26, CON07, PAT11, PAT14), 2-4 mm lower. */
+export const CRUS_HALF_MM = 11;
 export function levelsFromPair(left: Float32Array[], right: Float32Array[], judged: -1 | 1): Levels | undefined {
   if (left.length < 5 || right.length < 5) return undefined;
   const zs: number[] = [];
@@ -115,7 +120,7 @@ export function levelsFromPair(left: Float32Array[], right: Float32Array[], judg
   }
   const sm = at.map((_, i) => { const w = at.slice(Math.max(0, i - 2), i + 3).filter((b) => Number.isFinite(b.half)); return w.length ? w.reduce((s, b) => s + b.half, 0) / w.length : NaN; });
   const first = (from: number, thr: number) => at.findIndex((a, i) => a.z >= from && sm[i] >= thr);
-  const c = first(lo, 13);
+  const c = first(lo, CRUS_HALF_MM);
   if (c < 0) return undefined;
   // The internal capsule at 22 mm -- or at 85% of the widest the two get, when that is less than 26 mm: on PAT13 and
   // PAT31 the separation peaks at 22.2-22.3 mm, in the corona radiata, and 22 was met only there (critic 2026-10-06,
