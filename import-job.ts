@@ -13,6 +13,7 @@
 import { parseInstances, synthstripBrainMask, startSegmentationServer, volumesOfSeries, type BrainMask, type Volume } from "albula";
 import { indexSeries, seriesFilePaths, writeNrrd, type IndexSeries } from "albula/server";
 import { fromDicomVolumes } from "./dwi.ts";
+import { DIRECTION_CHECK_RULE } from "./gradient-check.ts";
 import { wholeBrainTracts, PIPELINE_MAX_B } from "./pipeline.ts";
 import { DISTORTION_RULE } from "./distortion.ts";
 import { MOTION_RULE } from "./motion.ts";
@@ -40,7 +41,7 @@ const MAX_SERIES_FILES = 4000;
  * are current only when all of it AND the inputs are the same (Ron, 2026-10-05: "remake automatically, versioned").
  */
 export function jobRules(versions: { code: string; labeler: string; synthstrip: string }): Record<string, string | number> {
-  return { distortion: DISTORTION_RULE, motion: MOTION_RULE, registration: REGISTRATION_RULE, tracking: TRACKING_RULE,
+  return { directions: DIRECTION_CHECK_RULE, distortion: DISTORTION_RULE, motion: MOTION_RULE, registration: REGISTRATION_RULE, tracking: TRACKING_RULE,
     outside: OUTSIDE_RULE.on ? OUTSIDE_RULE.id : 0, maxB: PIPELINE_MAX_B, tractColors: TRACT_COLORS_VERSION,
     code: versions.code, labeler: versions.labeler, synthstrip: versions.synthstrip };
 }
@@ -307,7 +308,7 @@ export async function makeTracts(dbDir: string, dbId: string, server: string, pl
   const seconds = (performance.now() - t0) / 1000;
   const provenance = { rules, inputs, made: new Date().toISOString(), seconds: +seconds.toFixed(1), stages: stageText(stages),
     streamlines: r.sl.length, onePointLeftOut: r.sl.filter((p) => p.length < 6).length, corrected: r.corrected, alignedToT1: aligned,
-    trackingRuleApplied: r.rule.id, motionRuleApplied: r.prep.motionRule, ...(r.alignment ? { alignment: r.alignment } : {}), brain: r.fit.seedMaskRule ?? r.fit.maskRule };
+    trackingRuleApplied: r.rule.id, motionRuleApplied: r.prep.motionRule, ...(r.prep.directions ? { directions: { rule: r.prep.directions.rule, verdict: r.prep.directions.verdict, used: r.prep.directions.best.label, Q: r.prep.directions.best.Q, recordOverBest: r.prep.directions.recordOverBest } } : {}), ...(r.alignment ? { alignment: r.alignment } : {}), brain: r.fit.seedMaskRule ?? r.fit.maskRule };
   // Several objects can follow each other under one scan (remade after a change): numbered from 900 by their time.
   const seriesNumber = 900 + stored.length;
   const written = await tractsToDicom(sets, { patientStudy: patientStudyOf(plan.dwi.header), frameOfReferenceUID: forUID, seriesInstanceUID: plan.dwi.facts.uid, instances: plan.dwi.instances,

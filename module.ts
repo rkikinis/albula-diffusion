@@ -44,6 +44,7 @@ import { edgeFluid, OUTSIDE_RULE, outsideBrain } from "./outside-brain.ts";
 import { seedsFor, TRACKING_RULE, TRACKING_RULES, ukfDataFor, withBrainFromT1, type TrackingRuleId } from "./tracking-rules.ts";
 import type { FieldFit } from "./distortion.ts";
 import { prepareScan } from "./prepare.ts";
+import type { GradientCheck } from "./gradient-check.ts";
 import { MOTION_RULE, type MotionRuleId } from "./motion.ts";
 /** "Stop below FA"'s default under Advanced (the single-tensor tracker's; the UKF's comes from the tracking rule). */
 const ADV_MIN_FA = 0.15;
@@ -100,6 +101,7 @@ interface TractGroup {
  *  against the same structure. */
 interface Run { sl: Float32Array[]; named: Named; sorted: Sorted; structure: Structure; label: string; withinMm: number; method: Method;
   /** The tracking rule the whole-brain run was made under, and its brain in words (BrainState.note). */ rule?: TrackingRuleId; brain?: string;
+  /** gradient-check.ts, in words, when the directions were not confirmed as recorded: kept with the tracts it shaped (critic, finding 6). */ directions?: string;
   /** The tracts ("tract:side") Add lines has already added to: a second press would start from the same points and
    *  draw the same lines again, so they are skipped (Ron, 2026-10-01: he pressed it, then saw the corticospinal tract
    *  was not on). */
@@ -177,6 +179,8 @@ const isIdentity = (m: number[]) => m.every((v, i) => Math.abs(v - IDENTITY4[i])
 export function registerDiffusionPanel(ctx: ModuleContext): void {
   const { shell, live, store, device, status } = ctx;
   const computed = new Map<string, Computed>();
+  /** gradient-check.ts per scan: it depends on the scan alone, so a re-made map does not pay for it again (critic, finding 8). */
+  const directionsChecked = new Map<string, GradientCheck>();
   const groups: TractGroup[] = [];
   const runs = new Map<string, Run>();
   const seenScans = new Set<string>();
@@ -464,7 +468,9 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     const z = anatOk ? await fetchZarrVolumeNative(live.blobBase(), anatOk.zarr as ZarrDesc) : undefined;
     const prep = await prepareScan(dwi, { ...(field.fit ? { field: { fit: field.fit, sign: field.sign ?? -1 } } : {}),
       ...(anatOk && z ? { t1: { dims: anatOk.dims as [number, number, number], ijkToRAS: anatOk.ijkToRAS as number[], data: z.data as ArrayLike<number> } } : {}),
-      motionRule, ...(scan.phaseEncoding ? { phaseEncoding: scan.phaseEncoding } : {}), times, say });
+      motionRule, ...(scan.phaseEncoding ? { phaseEncoding: scan.phaseEncoding } : {}), times, say,
+      ...(directionsChecked.has(scan.browserId) ? { directions: directionsChecked.get(scan.browserId) } : {}) });
+    if (prep.directions) directionsChecked.set(scan.browserId, prep.directions);
     dwi = prep.dwi;
     // The distortion line keeps the alignment; the movement has its own row (critic, 2026-10-05, finding 7).
     if (prep.alignmentSaid) corrected += `; ${prep.alignmentSaid}`;
@@ -730,7 +736,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       // A NEW RUN REPLACES THE LAST ONE for this scan (critic, finding 5: a second press doubled every tract).
       groups.splice(0, groups.length, ...withoutLastRun(groups, scan.browserId));   // face.ts
       const pick = (idx: number[]) => idx.map((i) => sl[i]);
-      runs.set(scan.browserId, { sl, named, sorted, structure, label: target.label, withinMm, method, added: new Set(), dist, maxB: c.maxB, partnerId: c.partnerId, anatomyId: c.anatomyId ?? "", rule: method === "ukf" ? c.rule : undefined, brain: method === "ukf" ? c.brain.note : "" });
+      runs.set(scan.browserId, { sl, named, sorted, structure, label: target.label, withinMm, method, added: new Set(), dist, maxB: c.maxB, partnerId: c.partnerId, anatomyId: c.anatomyId ?? "", rule: method === "ukf" ? c.rule : undefined, brain: method === "ukf" ? c.brain.note : "", ...(c.directions ? { directions: c.directions } : {}) });
       // The anatomy behind the slices, where the tracts' crossings are drawn (Yogesh Rathi via Ron, 2026-10-01), and over
       // it this scan's own map -- never another patient's left from before (critic, 2026-10-01, finding 3).
       const anat = anatomyFor(scan);
@@ -1352,6 +1358,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
         listBox.append(cav);
         // Which brain these tracts were followed in, kept with the run (critic, 2026-10-04, finding 9).
         const runNow = runs.get(scan.browserId);
+        if (runNow?.directions) { const dl = document.createElement("p"); dl.className = "sl-hint"; dl.textContent = `${runNow.directions[0].toUpperCase()}${runNow.directions.slice(1)}.`; listBox.append(dl); }
         if (runNow?.brain) { const bl = document.createElement("p"); bl.className = "sl-hint"; bl.textContent = `${runNow.brain[0].toUpperCase()}${runNow.brain.slice(1)}.`; listBox.append(bl); }
       }
       const as = document.createElement("div");

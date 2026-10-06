@@ -1,9 +1,9 @@
-// The gradient-direction check (gradient-check.ts): its candidates, and the fact it and its test on the case library rest
-// on -- a table changed by an orthogonal Q gives exactly the tensors Q D Qᵀ, so each candidate's tensors can be turned
-// instead of refitted, and a corrupted table scores the same candidates relabeled.
+// The gradient-direction check (gradient-check.ts): its candidates; the check itself on the synthetic head (the record
+// kept, a scan without a shell at b ≤ 1500 still checked, too few directions said, not thrown); and the fact it rests on
+// -- a table changed by an orthogonal Q gives exactly the tensors Q D Qᵀ, so candidates can be turned, not refitted.
 //   deno test -A --no-check gradient-check.test.ts
 import { assert } from "jsr:@std/assert@1";
-import { candidates } from "./gradient-check.ts";
+import { candidates, checkGradientTable, withCheckedDirections } from "./gradient-check.ts";
 import { fitTensors } from "./tensor.ts";
 import { M, move, protocol, scan } from "./test/phantom.ts";
 
@@ -12,22 +12,51 @@ const orthonormal = (Q: number[]) => [0, 1, 2].every((a) => [0, 1, 2].every((b) 
 // Two tables are the same check if Q and -Q (a direction has no sign).
 const same = (A: number[], B: number[]) => A.every((x, i) => Math.abs(x - B[i]) < 1e-9) || A.every((x, i) => Math.abs(x + B[i]) < 1e-9);
 
-Deno.test("candidates: 24 distinct swaps and flips, the record first; two lost tilts only for a tilted scan", () => {
+Deno.test("candidates: the record first; the 24 swaps and flips of the patient's axes; those of the image's axes that differ, each paired with its twin; two lost tilts from 10°", () => {
   const straight = candidates(M);
   assert(straight.length === 24, `${straight.length} candidates for an untilted scan`);
   assert(straight[0].label === "as recorded" && same(straight[0].Q, [1, 0, 0, 0, 1, 0, 0, 0, 1]));
+  const distinct = (cs: { Q: number[]; label: string }[]) => { for (let a = 0; a < cs.length; a++) for (let b = a + 1; b < cs.length; b++) assert(!same(cs[a].Q, cs[b].Q), `${cs[a].label} = ${cs[b].label}`); };
   for (const c of straight) assert(orthonormal(c.Q), c.label);
-  for (let a = 0; a < 24; a++) for (let b = a + 1; b < 24; b++) assert(!same(straight[a].Q, straight[b].Q), `${straight[a].label} = ${straight[b].label}`);
-  // A scan tilted 10° about the left-right axis.
-  const th = 10 * Math.PI / 180, c = Math.cos(th), s = Math.sin(th);
-  const tilted = [-2.5, 0, 0, 0, 0, 2.5 * c, -2.5 * s, 0, 0, 2.5 * s, 2.5 * c, 0, 0, 0, 0, 1];
-  const t = candidates(tilted);
-  assert(t.length === 26, `${t.length} candidates for a tilted scan`);
-  for (const k of [24, 25]) {
-    assert(orthonormal(t[k].Q) && det(t[k].Q) > 0, `${t[k].label}: not a rotation`);
-    const angle = Math.acos(Math.min(1, (t[k].Q[0] + t[k].Q[4] + t[k].Q[8] - 1) / 2)) * 180 / Math.PI;
-    assert(Math.abs(angle - 10) < 1e-6, `${t[k].label}: turns ${angle.toFixed(3)}°, not the scan's 10°`);
+  distinct(straight);
+  // Tilted about the left-right axis: 12° (a lost tilt is offered) and 6° (it is not: below GRADIENT_CHECK.tiltMinDeg).
+  const tilted = (deg: number) => { const th = deg * Math.PI / 180, c = Math.cos(th), s = Math.sin(th); return [-2.5, 0, 0, 0, 0, 2.5 * c, -2.5 * s, 0, 0, 2.5 * s, 2.5 * c, 0, 0, 0, 0, 1]; };
+  const t12 = candidates(tilted(12)), t6 = candidates(tilted(6));
+  for (const cs of [t12, t6]) {
+    distinct(cs);
+    for (const c of cs) assert(orthonormal(c.Q), c.label);
+    assert(cs.filter((c) => c.kind === "patient").length === 23, "the 23 swaps and flips of the patient's axes besides the record");
+    for (const [i, c] of cs.entries()) if (c.twin !== undefined) assert(cs[c.twin].twin === i && cs[c.twin].kind !== c.kind, `${c.label}: twin not mutual`);
   }
+  assert(t6.every((c) => c.kind !== "tilt"), "a 6° tilt is offered");
+  const tilts = t12.filter((c) => c.kind === "tilt");
+  assert(tilts.length === 2, `${tilts.length} lost tilts for a 12° scan`);
+  for (const c of tilts) {
+    assert(det(c.Q) > 0, `${c.label}: not a rotation`);
+    const angle = Math.acos(Math.min(1, (c.Q[0] + c.Q[4] + c.Q[8] - 1) / 2)) * 180 / Math.PI;
+    assert(Math.abs(angle - 12) < 1e-6, `${c.label}: turns ${angle.toFixed(3)}°, not the scan's 12°`);
+  }
+  // At 45° the nearest axis-aligned frame is still a rotation away (critic finding 12: per-column rounding made it singular).
+  for (const c of candidates(tilted(45))) assert(orthonormal(c.Q), `45°: ${c.label}`);
+});
+
+// Detection itself (a flip or swap found) is tested on real brains, by Contents/tools/gradient-check-sweep.ts: the synthetic
+// head's fibers circle a nearly vertical axis, so an up-down flip scores about as well as the truth there (270 against
+// 263 mm a seed) -- a symmetry no brain has.
+Deno.test("the check on the synthetic head: never 'corrected' on a right record; a scan without a shell at b ≤ 1500 is still checked", async () => {
+  const { bValues, gradients } = protocol(), c: [number, number, number] = [0, 0, 0];
+  const dwi = scan(bValues.map(() => move([0, 0, 0], [0, 0, 0], c)), bValues, gradients, 4);
+  const ok = await checkGradientTable(dwi);
+  assert(ok.best.kind === "record" && (ok.verdict === "as recorded" || ok.verdict === "unconfirmed"), `the record: ${ok.verdict}, ${ok.best.label}`);
+  assert(withCheckedDirections(dwi, ok) === dwi, "the record's directions changed");
+  // No shell at or below b = 1500 (critic finding 5): the lowest shell is fitted instead of refusing.
+  const high = { ...dwi, bValues: bValues.map((b) => (b > 0 ? 2800 : 0)) };
+  const h = await checkGradientTable(high);
+  assert(h.verdict !== "not checked", `b = 2800 only: ${h.verdict} ${h.why ?? ""}`);
+  // Too few directions for any tensor: "not checked", said, no throw.
+  const few = { ...dwi, volumes: dwi.volumes.slice(0, 5), bValues: bValues.slice(0, 5), gradients: gradients.slice(0, 5) };
+  const f = await checkGradientTable(few);
+  assert(f.verdict === "not checked" && f.best.kind === "record" && !!f.why, `five volumes: ${f.verdict}`);
 });
 
 Deno.test("a table turned by Q gives the tensors turned by Q (Q D Qᵀ), so candidates are turned, not refitted", () => {

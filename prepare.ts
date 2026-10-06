@@ -28,16 +28,19 @@ export interface Prepared {
  * `dwi` as acquired (the field NOT applied: correctWithReversed with apply false), the field when there is one, the T1
  * when there is one. `motionRule` 0 when the scan was corrected before (a preprocessed dataset) or the rule is off.
  */
-export async function prepareScan(dwi: DiffusionSeries, opts: { field?: { fit: FieldFit; sign: 1 | -1 }; t1?: Grid3; motionRule?: MotionRuleId; /** The scanner's record of the phase-encoding direction ("j-", or DICOM's "ROW" / "COL"), for the eddy currents when no field gives the axis. */ phaseEncoding?: string; /** motion.ts rounds (default two). */ motionRounds?: number; times?: StageTimes; say?: (s: string) => void; /** false: the directions are used as recorded, unchecked (for checking tools only). */ checkDirections?: boolean } = {}): Promise<Prepared> {
+export async function prepareScan(dwi: DiffusionSeries, opts: { field?: { fit: FieldFit; sign: 1 | -1 }; t1?: Grid3; motionRule?: MotionRuleId; /** The scanner's record of the phase-encoding direction ("j-", or DICOM's "ROW" / "COL"), for the eddy currents when no field gives the axis. */ phaseEncoding?: string; /** motion.ts rounds (default two). */ motionRounds?: number; times?: StageTimes; say?: (s: string) => void; /** false: the directions are used as recorded, unchecked (for checking tools only). */ checkDirections?: boolean; /** The check already made for this scan (the module keeps it per scan: it depends on nothing the person can change; critic finding 8). */ directions?: GradientCheck } = {}): Promise<Prepared> {
   const rule = opts.motionRule ?? MOTION_RULE, field = opts.field, said: string[] = [];
   // THE DIRECTIONS FIRST: everything after (the movement's predictions, the tensors, the tracts) uses them. A table that
   // does not fit the images is replaced by the one that does, and that is said; "undecided" keeps the record and says so.
   let directions: GradientCheck | undefined, directionsSaid: string | undefined;
   if (opts.checkDirections !== false) {
-    opts.say?.("Checking the scanner's diffusion directions against the images…");
-    const t = performance.now();
-    directions = await checkGradientTable(dwi);
-    if (opts.times) opts.times.directions = performance.now() - t;
+    if (opts.directions) directions = opts.directions;
+    else {
+      opts.say?.("Checking the scanner's diffusion directions against the images…");
+      const t = performance.now();
+      directions = await checkGradientTable(dwi);
+      if (opts.times) opts.times.directions = performance.now() - t;
+    }
     dwi = withCheckedDirections(dwi, directions);
     if (directions.verdict !== "as recorded") { directionsSaid = directions.said; said.push(directions.said); }
   }
