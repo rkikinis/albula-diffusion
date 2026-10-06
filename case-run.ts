@@ -41,6 +41,8 @@ export interface CaseResult {
   alignment?: { T: Rigid; doubt?: string };
   /** motion.ts: the head-movement rule the case was put in place by (0: none), and with rule 1 what it found. */
   motionRule: MotionRuleId; motion?: { largest: { mm: number; degrees: number }; residual: { before: number; after: number } };
+  /** gradient-check.ts: the directions' verdict, what the images preferred, the swaps-and-flips margin, the tilt contest. */
+  directions?: { verdict: string; best: string; overNext: number; tilt?: { settled: boolean; overNext: number } };
   seconds: { read_correct_fit: number; csd: number; track: number; name: number; total: number };
   /** Step by step (planning.ts StageTimes, milliseconds), and the same in words. */
   stages: StageTimes;
@@ -131,6 +133,6 @@ export async function runCase(ds: string, id: string, device: GPUDevice, model: 
   const t3 = performance.now();
   stages.distances = t3 - tDist;
   stages.total = t3 - t0;
-  return { id, corrected, ...(alignment ? { alignment } : {}), motionRule: prep.motionRule, ...(prep.motion ? { motion: { largest: prep.motion.largest, residual: { before: +prep.motion.residual.before.toFixed(4), after: +prep.motion.residual.after.toFixed(4) } } } : {}), trackingRule: method === "ukf" ? rule.id : undefined, brain: fit.seedMaskRule ?? fit.maskRule, ...(outsideGridMl !== undefined ? { brainOutsideGridMl: +outsideGridMl.toFixed(1) } : {}), shell, stages, stagesText: stageText(stages), ...(opts.keep ? { kept: { sl, named, outside } } : {}), ...(added !== undefined ? { noiseSigma: +added.toFixed(2) } : {}), streamlines: sl.length, short, other, named: sl.length - short - other - outsideCount, outsideBrain: outsideCount, outsideRule: OUTSIDE_RULE.on ? OUTSIDE_RULE.id : 0, tumorVoxels, method,
+  return { id, corrected, ...(alignment ? { alignment } : {}), ...(prep.directions ? { directions: { verdict: prep.directions.verdict, best: prep.directions.best.label, overNext: prep.directions.overNext, ...(prep.directions.tilt ? { tilt: { settled: prep.directions.tilt.settled, overNext: prep.directions.tilt.overNext } } : {}) } } : {}), motionRule: prep.motionRule, ...(prep.motion ? { motion: { largest: prep.motion.largest, residual: { before: +prep.motion.residual.before.toFixed(4), after: +prep.motion.residual.after.toFixed(4) } } } : {}), trackingRule: method === "ukf" ? rule.id : undefined, brain: fit.seedMaskRule ?? fit.maskRule, ...(outsideGridMl !== undefined ? { brainOutsideGridMl: +outsideGridMl.toFixed(1) } : {}), shell, stages, stagesText: stageText(stages), ...(opts.keep ? { kept: { sl, named, outside } } : {}), ...(added !== undefined ? { noiseSigma: +added.toFixed(2) } : {}), streamlines: sl.length, short, other, named: sl.length - short - other - outsideCount, outsideBrain: outsideCount, outsideRule: OUTSIDE_RULE.on ? OUTSIDE_RULE.id : 0, tumorVoxels, method,
     seconds: { read_correct_fit: +(readFitMs / 1000).toFixed(1), csd: +csdSeconds.toFixed(1), track: +(trackMs / 1000).toFixed(1), name: +named.seconds.toFixed(1), total: +((t3 - t0) / 1000).toFixed(1) }, tracts };
 }

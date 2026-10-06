@@ -59,7 +59,7 @@ export function resampleInto(data: ArrayLike<number>, from: Grid, to: Grid): Flo
  * a step not run is absent. Said in the status line, so it reaches the session log too (Ron: "extend the timing reporting").
  */
 export interface StageTimes {
-  read?: number; align?: number; field?: number; apply?: number; motion?: number; register?: number; resample?: number; fit?: number;
+  read?: number; directions?: number; align?: number; field?: number; apply?: number; motion?: number; register?: number; resample?: number; fit?: number;
   seeds?: number; track?: number; trackDetail?: TrackTiming & { data?: number };
   name?: number; distances?: number; draw?: number; total?: number;
 }
@@ -68,7 +68,7 @@ export function stageText(t: StageTimes): string {
   const d = t.trackDetail;
   const parts: string[] = [];
   const add = (label: string, v?: number, extra = "") => { if (v !== undefined) parts.push(`${label} ${sec(v)}${extra}`); };
-  add("read", t.read); add("align partner", t.align); add("distortion field", t.field); add("apply field", t.apply); add("head movement", t.motion); add("align to the T1", t.register); add("onto the T1", t.resample); add("mask + tensor", t.fit);
+  add("read", t.read); add("directions checked", t.directions); add("align partner", t.align); add("distortion field", t.field); add("apply field", t.apply); add("head movement", t.motion); add("align to the T1", t.register); add("onto the T1", t.resample); add("mask + tensor", t.fit);
   add("seeds", t.seeds);
   add("tracking", t.track, d ? ` (signal ${sec(d.data ?? 0)}, seeds ${sec(d.prepare)}, card ${sec(d.gpu)}, fibers ${sec(d.assemble)}, page ${sec(d.between)})` : "");
   add("naming", t.name); add("distances", t.distances); add("drawing", t.draw);

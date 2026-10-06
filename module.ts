@@ -70,7 +70,7 @@ interface Scan { browserId: string; name: string; frameIds: string[]; bValues: n
   /** The scanner's record of the phase-encoding direction (diffusion-vendors.ts phaseEncodingOf: "j-", or "ROW" / "COL"). */
   phaseEncoding?: string }
 /** What has been computed for a scan, kept while the scan is in the scene. */
-interface Computed { dwi: DiffusionSeries; fit: TensorFit; maxB: number; corrected: string; partnerId: string; /** motion.ts: the head-movement rule asked for (the cache's key), the rule actually applied, and what it did in words. */ motionAsked: MotionRuleId; motionRule: MotionRuleId; movement?: string; /** The anatomy MRI the scan was aligned to ("" none). */ anatomyId?: string; /** The tracking rule the fit's brain mask serves (tracking-rules.ts): 2 until rule 3's brain is put in (brainFor). */ rule: TrackingRuleId; /** Rule 3's brain: what was used, in words, and why not when it was not. */ brain: BrainState; faId?: string; colorFaId?: string; ukf?: UkfData; fod?: FodVolume }
+interface Computed { dwi: DiffusionSeries; fit: TensorFit; maxB: number; corrected: string; partnerId: string; /** motion.ts: the head-movement rule asked for (the cache's key), the rule actually applied, and what it did in words. */ motionAsked: MotionRuleId; motionRule: MotionRuleId; movement?: string; /** gradient-check.ts: the directions' check, in words, when they were not used as recorded. */ directions?: string; /** The anatomy MRI the scan was aligned to ("" none). */ anatomyId?: string; /** The tracking rule the fit's brain mask serves (tracking-rules.ts): 2 until rule 3's brain is put in (brainFor). */ rule: TrackingRuleId; /** Rule 3's brain: what was used, in words, and why not when it was not. */ brain: BrainState; faId?: string; colorFaId?: string; ukf?: UkfData; fod?: FodVolume }
 /** RULE 3's BRAIN for a fitted scan (critic, 2026-10-04, findings 2, 4, 8, 9): asked of the segmentation server when the
  *  maps are made but not waited for -- the maps do not use it -- and waited for by the tracking (brainFor). A failure
  *  that can go away (no server, a server without SynthStrip, a failed job) is asked again at the next tracking. */
@@ -483,9 +483,9 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       : !anatOk ? { note: fromScan + "the MRI of the anatomy has a transform (Transforms module): harden or remove it", reason: "moved" }
       : !aligned ? { note: fromScan + "the scan could not be aligned to the MRI of the anatomy", reason: "doubt" }
       : { note: "", ask: askBrain(anatOk.id) };
-    const c: Computed = { dwi, fit, maxB: adv.maxB, corrected, motionAsked: motionRule, motionRule: prep.motionRule, ...(prep.movementSaid ? { movement: prep.movementSaid } : {}), partnerId: partner?.id ?? "", anatomyId: anatOk?.id ?? "", rule: wantT1 ? 2 : TRACKING_RULE, brain };
+    const c: Computed = { dwi, fit, maxB: adv.maxB, corrected, motionAsked: motionRule, motionRule: prep.motionRule, ...(prep.movementSaid ? { movement: prep.movementSaid } : {}), ...(prep.directionsSaid ? { directions: prep.directionsSaid } : {}), partnerId: partner?.id ?? "", anatomyId: anatOk?.id ?? "", rule: wantT1 ? 2 : TRACKING_RULE, brain };
     computed.set(scan.browserId, c);
-    say(`Maps made from ${fit.used.length} volumes up to b = ${adv.maxB}; distortion ${corrected}${c.movement ? `; ${c.movement}` : ""}. ${stageText(times)}.`);
+    say(`Maps made from ${fit.used.length} volumes up to b = ${adv.maxB}${c.directions ? `; ${c.directions}` : ""}; distortion ${corrected}${c.movement ? `; ${c.movement}` : ""}. ${stageText(times)}.`);
     return c;
   }
   const dropMaps = (c: Computed) => {
