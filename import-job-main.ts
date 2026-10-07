@@ -13,6 +13,7 @@
 // `--assets` is where the networks' weights are (the app's vendor/diffusion/); by default beside this file.
 import { parseArgs } from "jsr:@std/cli@1/parse-args";
 import { setDicomLibrary, dcmjs } from "albula/server";
+import { parseNiftiVolumes } from "albula";
 import "./hooks.ts";
 import { loadModel, type ModelJson } from "./tractcloud/tractcloud.ts";
 import { loadRapidParc } from "./rapidparc/rapidparc.ts";
@@ -67,6 +68,11 @@ try {
   // The naming network's weights too, not only its table (critic 2026-10-06, R3-2).
   const versions = { code: await codeFingerprint(), labeler: `rapidparc ${await hash(rpBytes)}, table ${await hash(modelJson)}, tractcloud ${await hash(Deno.readFileSync(at("tractcloud", "weights.f32")))}`, synthstrip };
   const labeler = loadRapidParc(rpBytes.buffer);
+  // The template brain for the head's own frame (head-frame.ts), from the extension's template/ folder.
+  const tp = (f: string) => assets ? `${assets}/template/${f}` : new URL(`./template/${f}`, import.meta.url);
+  const tv = (await parseNiftiVolumes(Deno.readFileSync(tp("mni152-2009c-asym-t1w.nii.gz"))))[0], tb = (await parseNiftiVolumes(Deno.readFileSync(tp("mni152-2009c-asym-brain-mask.nii.gz"))))[0];
+  versions.labeler += `, template ${await hash(Deno.readFileSync(tp("mni152-2009c-asym-t1w.nii.gz")))}`;
+  const template = { t1: { dims: tv.dims as [number, number, number], ijkToRAS: tv.ijkToRAS, data: tv.data as ArrayLike<number> }, brain: Uint8Array.from(tb.data as ArrayLike<number>, (x) => (x > 0.5 ? 1 : 0)) };
   const adapter = await navigator.gpu?.requestAdapter();
   if (!adapter) throw new Error("no graphics card is available to this program");
   const L = adapter.limits;
@@ -88,7 +94,7 @@ try {
       const t0 = performance.now();
       try {
         const out = await makeTracts(db.path, db.id, server, plan, device, model, labeler, versions,
-          (line) => say({ event: "progress", case: k, series: plan.dwi.facts.uid, said: line }), { force: args.force, dryRun: args["dry-run"] });
+          (line) => say({ event: "progress", case: k, series: plan.dwi.facts.uid, said: line }), { force: args.force, dryRun: args["dry-run"], template });
         if (out.state === "made") n.made++; else if (out.state === "would be made") n.wouldBeMade++; else if (out.state === "current") n.current++; else n[out.state]++;
         if (out.state === "failed") exitCode = 1;
         say({ event: "case", case: k, series: plan.dwi.facts.uid, study, t1: plan.t1?.facts.uid ?? null, partner: plan.partner?.facts.uid ?? null, ...out,

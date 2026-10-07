@@ -26,7 +26,9 @@ import { SHORT } from "./tractcloud/name-tracts.ts";
 import { tractColor, TRACT_COLORS_VERSION } from "./tractcloud/tract-colors.ts";
 import type { TractCloudModel } from "./tractcloud/tractcloud.ts";
 import type { RapidParcModel } from "./rapidparc/rapidparc.ts";
-import { b0Path, colorFaPath, dicomToTracts, tractsToDicom, UNNAMED, type TractSetData } from "./tracts-dicom.ts";
+import { b0Path, colorFaBrainstemPath, colorFaPath, dicomToTracts, tractsToDicom, UNNAMED, type TractSetData } from "./tracts-dicom.ts";
+import { alignTemplate, frames, HEAD_FRAME_RULE, TALAIRACH_RISE_DEG, type M4 } from "./head-frame.ts";
+import type { Grid3 } from "./registration.ts";
 
 /** The description every stored tracts object carries: how the job finds its own objects in the index. */
 export const TRACTS_DESCRIPTION = "Fiber tracts (whole brain)";
@@ -44,7 +46,7 @@ const MAX_SERIES_FILES = 4000;
 export function jobRules(versions: { code: string; labeler: string; synthstrip: string }): Record<string, string | number> {
   return { directions: DIRECTION_CHECK_RULE, distortion: DISTORTION_RULE, motion: MOTION_RULE, registration: REGISTRATION_RULE, tracking: TRACKING_RULE,
     outside: OUTSIDE_RULE.on ? OUTSIDE_RULE.id : 0, maxB: PIPELINE_MAX_B, tractColors: TRACT_COLORS_VERSION,
-    code: versions.code, labeler: versions.labeler, synthstrip: versions.synthstrip };
+    headFrame: HEAD_FRAME_RULE, code: versions.code, labeler: versions.labeler, synthstrip: versions.synthstrip };
 }
 /** The inputs a case was made from: a reversed scan or a T1 that arrives later makes the case stale (finding 11). */
 export interface CaseInputs { diffusion: string; partner: string | null; t1: string | null }
@@ -326,14 +328,14 @@ export function trackSets(sl: Float32Array[], tract: Int32Array, side: Int8Array
  * by the same code, rules and inputs are already stored.
  */
 export async function makeTracts(dbDir: string, dbId: string, server: string, plan: { dwi: ReadSeries; partner?: ReadSeries; t1?: ReadSeries }, device: GPUDevice, model: TractCloudModel,
-  labeler: RapidParcModel, versions: { code: string; labeler: string; synthstrip: string }, onProgress?: (line: string) => void, opts: { force?: boolean; dryRun?: boolean } = {}): Promise<CaseOutcome> {
+  labeler: RapidParcModel, versions: { code: string; labeler: string; synthstrip: string }, onProgress?: (line: string) => void, opts: { force?: boolean; dryRun?: boolean; template?: { t1: Grid3; brain: Uint8Array } } = {}): Promise<CaseOutcome> {
   let rules = jobRules(versions);
   const inputs: CaseInputs = { diffusion: plan.dwi.facts.uid, partner: plan.partner?.facts.uid ?? null, t1: plan.t1?.facts.uid ?? null };
   const stored = await storedTracts(dbDir, plan.dwi.facts.uid);
   // CURRENT = the same code, rules and inputs AND its Color FA beside it (critic 2026-10-06, finding 16: a job stopped
   // between storing the tracts and the map left tracts that counted as current forever, without the map).
   // ... and the b = 0 image beside it (2026-10-06: the substantia nigra for the tract review).
-  const hasMap = async (uid: string) => !!(await Deno.stat(`${dbDir}/${colorFaPath(uid)}`).catch(() => null)) && !!(await Deno.stat(`${dbDir}/${b0Path(uid)}`).catch(() => null));
+  const hasMap = async (uid: string) => (await Promise.all([colorFaPath(uid), colorFaBrainstemPath(uid), b0Path(uid)].map((p) => Deno.stat(`${dbDir}/${p}`).then(() => true, () => false)))).every(Boolean);
   let current: (typeof stored)[number] | undefined;
   for (const s of stored) if (isCurrent(s, rules, inputs) && await hasMap(s.seriesUID)) { current = s; break; }
   if (current && !opts.force) return { state: "current", seriesUID: current.seriesUID };
@@ -364,7 +366,18 @@ export async function makeTracts(dbDir: string, dbId: string, server: string, pl
   const aligned = !!r.alignment && !r.alignment.doubt;
   const forUID = String(((aligned ? plan.t1.header : plan.dwi.header)["00200052"]?.Value?.[0]) ?? "");
   const seconds = (performance.now() - t0) / 1000;
-  const provenance = { rules, inputs, made: new Date().toISOString(), seconds: +seconds.toFixed(1), stages: stageText(stages),
+  // THE HEAD'S OWN FRAME (head-frame.ts; Ron, 2026-10-06: "You must use anatomic orientation, not scanner orientation"):
+  // the template aligned to the T1, weighted to the diencephalon and the midbrain; the two frames go into the record, and
+  // the direction-colored maps are colored in them.
+  let headFrame: { rule: number; templateToPatient: M4; talairach: M4; brainstem: M4; stages: { name: string; cost: number; costAtStart: number }[]; seconds: number } | undefined;
+  if (opts.template) {
+    onProgress?.("finding the head's own frame (the template on the T1, deep structures first)");
+    const h0 = performance.now(), t1g = { dims: t1v.dims as [number, number, number], ijkToRAS: t1v.ijkToRAS, data: t1v.data as ArrayLike<number> };
+    const fit = await alignTemplate(t1g, opts.template.t1, opts.template.brain), fr = frames(fit, TALAIRACH_RISE_DEG);
+    headFrame = { rule: HEAD_FRAME_RULE, templateToPatient: fit.templateToPatient, talairach: fr.talairach.toPatient, brainstem: fr.brainstem.toPatient,
+      stages: fit.stages.map((x) => ({ name: x.name, cost: +x.cost.toFixed(4), costAtStart: +x.costAtStart.toFixed(4) })), seconds: +((performance.now() - h0) / 1000).toFixed(1) };
+  }
+  const provenance = { rules, inputs, made: new Date().toISOString(), seconds: +seconds.toFixed(1), stages: stageText(stages), ...(headFrame ? { headFrame } : {}),
     streamlines: r.sl.length, onePointLeftOut: r.sl.filter((p) => p.length < 6).length, corrected: r.corrected, alignedToT1: aligned,
     trackingRuleApplied: r.rule.id, motionRuleApplied: r.prep.motionRule, ...(r.prep.directions ? { directions: { rule: r.prep.directions.rule, verdict: r.prep.directions.verdict, used: r.prep.directions.best.label, Q: r.prep.directions.best.Q, recordOverBest: r.prep.directions.recordOverBest } } : {}), ...(r.alignment ? { alignment: r.alignment } : {}), brain: r.fit.seedMaskRule ?? r.fit.maskRule };
   // Several objects can follow each other under one scan (remade after a change): numbered from 900 by their time -- one
@@ -389,12 +402,16 @@ export async function makeTracts(dbDir: string, dbId: string, server: string, pl
   // THE DIRECTION-COLORED MAP BESIDE THEM (the tract review, Contents/docs/TRACT-REVIEW.md, Ron's "1 a"): on the grid the
   // tracts are on, after every correction, so a viewer needs no fit. A display aid, regenerable from the scan: the
   // database's cache folder, named by the tracts' series. Its failure does not undo the tracts.
-  try { await writeColorFA(dbDir, written.seriesInstanceUID, r.fit); await writeB0(dbDir, written.seriesInstanceUID, r.dwi, r.fit); }
+  try {
+    await writeColorFA(dbDir, written.seriesInstanceUID, r.fit, headFrame?.talairach);
+    await writeColorFA(dbDir, written.seriesInstanceUID, r.fit, headFrame?.brainstem, colorFaBrainstemPath(written.seriesInstanceUID));
+    await writeB0(dbDir, written.seriesInstanceUID, r.dwi, r.fit);
+  }
   catch (e) { return { state: "made", ...out, said: `${out.said}; the direction-colored map or the b = 0 image was not stored (${(e as Error).message})` }; }
   return { state: "made", ...out };
 }
 
-export { b0Path, colorFaPath };
+export { b0Path, colorFaBrainstemPath, colorFaPath };
 
 /** The Color FA of `fit` (tensor.ts colorFA: FA times the principal direction's components), one byte a color packed
  *  into one float sample as the slice views draw it (packRGB24, the Diffusion module's own form), as a gzipped NRRD. */
@@ -426,9 +443,20 @@ export async function writeB0(dbDir: string, tractsSeriesUID: string, dwi: Diffu
 }
 /** The Color FA of `fit` (tensor.ts colorFA: FA times the principal direction's components), one byte a color packed
  *  into one float sample as the slice views draw it (packRGB24, the Diffusion module's own form), as a gzipped NRRD. */
-export async function writeColorFA(dbDir: string, tractsSeriesUID: string, fit: TensorFit): Promise<void> {
-  const rgb = colorFA(fit), n = fit.fa.length, packed = new Float32Array(n), q = (x: number) => Math.max(0, Math.min(255, Math.round(x * 255)));
+export async function writeColorFA(dbDir: string, tractsSeriesUID: string, fit: TensorFit, frame?: M4, rel = colorFaPath(tractsSeriesUID)): Promise<void> {
+  const rgb = frame ? colorFAInFrame(fit, frame) : colorFA(fit), n = fit.fa.length, packed = new Float32Array(n), q = (x: number) => Math.max(0, Math.min(255, Math.round(x * 255)));
   for (let v = 0; v < n; v++) packed[v] = packRGB24(q(rgb[3 * v]), q(rgb[3 * v + 1]), q(rgb[3 * v + 2]));
   const bytes = await writeNrrd({ dims: fit.dims, ijkToRAS: fit.ijkToRAS, data: packed, dtype: "<f4" } as Volume, { encoding: "gzip" });
-  await writeCacheFile(dbDir, colorFaPath(tractsSeriesUID), bytes);
+  await writeCacheFile(dbDir, rel, bytes);
+}
+/** THE COLOR FA IN THE HEAD'S FRAME: red, green and blue are the principal direction's share along the frame's left-right,
+ *  back-front and down-up axes (the frame matrix's first three columns), times FA -- not the scanner's (Ron, 2026-10-06). */
+export function colorFAInFrame(fit: TensorFit, frame: M4): Float32Array {
+  const ax = [0, 1, 2].map((c) => { const v = [frame[c], frame[4 + c], frame[8 + c]], l = Math.hypot(...v) || 1; return v.map((x) => x / l); });
+  const n = fit.fa.length, out = new Float32Array(3 * n);
+  for (let v = 0; v < n; v++) {
+    const d = [fit.v1[3 * v], fit.v1[3 * v + 1], fit.v1[3 * v + 2]];
+    for (let c = 0; c < 3; c++) out[3 * v + c] = Math.abs(d[0] * ax[c][0] + d[1] * ax[c][1] + d[2] * ax[c][2]) * fit.fa[v];
+  }
+  return out;
 }

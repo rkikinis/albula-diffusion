@@ -27,6 +27,11 @@
       "NOTICE",
       "LICENSE-UKF.txt"
     ],
+    "template": [
+      "template/mni152-2009c-asym-t1w.nii.gz",
+      "template/mni152-2009c-asym-brain-mask.nii.gz",
+      "template/LICENSE.txt"
+    ],
     "rapidparc": [
       "rapidparc/model/rapidparc.safetensors",
       "rapidparc/model/hemiaug.safetensors",
