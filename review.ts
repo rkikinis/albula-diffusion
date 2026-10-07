@@ -237,6 +237,10 @@ export function intoFrame(sl: Float32Array[], Finv: M4): Float32Array[] {
 // head's up (axial) or front (coronal).
 export const frameAxial = (F: M4, h: number): M4 => mul4(F, [-1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, h, 0, 0, 0, 1]);
 export const frameCoronal = (F: M4, y: number): M4 => mul4(F, [-1, 0, 0, 0, 0, 0, 1, y, 0, 1, 0, 0, 0, 0, 0, 1]);
+/** The frame's sagittal plane at left-right position x (x = 0: the midsagittal plane): the slice's x is the head's front,
+ *  its y the head's up, its normal the head's right -- as Slicer's sagittal (Ron, 2026-10-07: "when you bring up the cases,
+ *  show the crus slice location on the mid sagittal"). */
+export const frameSagittal = (F: M4, x: number): M4 => mul4(F, [0, 0, 1, x, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1]);
 /** A crossing's and a border's coordinates in a slice's own plane (its x and y columns, from its origin). */
 export function inPlane(plane: number[], p: ArrayLike<number>): [number, number] {
   const d = [p[0] - plane[3], p[1] - plane[7], p[2] - plane[11]];
@@ -298,7 +302,7 @@ function registerTractReview(ctx: ModuleContext): void {
   let openCst: { left: Float32Array[]; right: Float32Array[] } = { left: [], right: [] }, drawing: "left" | "right" | undefined;
   /** The open case's head frames (frame -> patient RAS), when its tracts carry them (head-frame.ts). */
   let openFrames: { bs: M4; tal: M4 } | undefined;
-  const LABEL = { red: "Brainstem axial", yellow: "Talairach axial", green: "Talairach coronal" };
+  const LABEL = { red: "Brainstem axial", yellow: "Talairach axial", green: "Midsagittal" };
   /** A frame plane's height from a view's offset along its normal: offset = AC·n + h (frameAxial / frameCoronal). */
   const heightOf = (F: M4, axis: 1 | 2, offset: number) => offset - (F[3] * F[axis] + F[7] * F[4 + axis] + F[11] * F[8 + axis]);
   /** Whether the tract's crossing outlines are drawn on the slices (Ron, 2026-10-06: off while drawing the crus border). */
@@ -406,7 +410,9 @@ function registerTractReview(ctx: ModuleContext): void {
     const c = sliceOffset("Red"), k = sliceOffset("Yellow"), y = sliceOffset("Green");
     if (c === undefined || k === undefined || y === undefined) return;
     const F = openFrames;
-    const now: Levels = F ? { crus: +heightOf(F.bs, 2, c).toFixed(1), ic: +heightOf(F.tal, 2, k).toFixed(1), coronal: +heightOf(F.tal, 1, y).toFixed(1), frame: "head-1" }
+    // In frame cases the green view is the midsagittal plane: its offset is kept in `coronal`'s place as the frame's x
+    // (normally 0), so the record keeps one shape.
+    const now: Levels = F ? { crus: +heightOf(F.bs, 2, c).toFixed(1), ic: +heightOf(F.tal, 2, k).toFixed(1), coronal: +heightOf(F.tal, 0, y).toFixed(1), frame: "head-1" }
       : { crus: +c.toFixed(1), ic: +k.toFixed(1), coronal: +y.toFixed(1) };
     if (now.crus === placed.crus && now.ic === placed.ic && now.coronal === placed.coronal) return;
     placed = now;
@@ -588,12 +594,16 @@ function registerTractReview(ctx: ModuleContext): void {
       if (carry && canWrite()) await saveCase(key, patchOf({ verdict: { verdict: carry.j.verdict!, judgedAt: carry.j.judgedAt ?? new Date().toISOString(), carriedFrom: carry.from }, ...(carry.j.note ? { note: carry.j.note } : {}) }));
       setLayout(LAYOUT.conventionalWidescreen);
       if (F) {
-        setSlicePlane("Red", frameAxial(F.bs, lv.crus), LABEL.red); setSlicePlane("Yellow", frameAxial(F.tal, lv.ic), LABEL.yellow); setSlicePlane("Green", frameCoronal(F.tal, lv.coronal), LABEL.green);
+        // The green view on the head's midsagittal plane, where the red (crus) and yellow (internal capsule) slices show as
+        // lines (Ron, 2026-10-07); it replaces the coronal through the tract in frame cases.
+        setSlicePlane("Red", frameAxial(F.bs, lv.crus), LABEL.red); setSlicePlane("Yellow", frameAxial(F.tal, lv.ic), LABEL.yellow); setSlicePlane("Green", frameSagittal(F.tal, 0), LABEL.green);
       } else {
         orientView("Red", "axial"); orientView("Yellow", "axial"); orientView("Green", "coronal");
         setSliceOffset("Red", lv.crus); setSliceOffset("Yellow", lv.ic); setSliceOffset("Green", lv.coronal);
       }
-      placed = { crus: +lv.crus.toFixed(1), ic: +lv.ic.toFixed(1), coronal: +lv.coronal.toFixed(1) };
+      // In frame cases the green view sits at the midsagittal plane (x = 0), whatever an older record's coronal said: the
+      // comparison in keepLevels is with that, so opening a case writes nothing.
+      placed = F ? { crus: +lv.crus.toFixed(1), ic: +lv.ic.toFixed(1), coronal: 0, frame: "head-1" } : { crus: +lv.crus.toFixed(1), ic: +lv.ic.toFixed(1), coronal: +lv.coronal.toFixed(1) };
       fullTract = sl;
       drawShown();
       lookFrom3D("A");
@@ -674,7 +684,7 @@ function registerTractReview(ctx: ModuleContext): void {
     if (c && openPatient && hasCase()) {
       const here = shell.section(root, `2 · This case`, { band: "green", open: true, note: c.patient });
       const p = document.createElement("p"); p.className = "sl-hint";
-      p.textContent = `The ${openSide} corticospinal tract. ${openFrames ? "In the head's own frames: red view, the cerebral peduncle on the brainstem's plane (the pontomesencephalic junction's), colored in that frame; yellow, the internal capsule on the Talairach (AC-PC) plane; green, coronal in that frame" : "Red view: axial at the cerebral peduncle; yellow: axial at the internal capsule; green: coronal through the tract"}; 3D from the front. Move a slider when a level is off: the level you leave is kept for next time.${levelsSaid ? ` (${levelsSaid[0].toUpperCase()}${levelsSaid.slice(1)}.)` : ""}`;
+      p.textContent = `The ${openSide} corticospinal tract. ${openFrames ? "In the head's own frames: red view, the cerebral peduncle on the brainstem's plane (the pontomesencephalic junction's), colored in that frame; yellow, the internal capsule on the Talairach (AC-PC) plane; green, the midsagittal plane, with the red and yellow slices as lines" : "Red view: axial at the cerebral peduncle; yellow: axial at the internal capsule; green: coronal through the tract"}; 3D from the front. Move a slider when a level is off: the level you leave is kept for next time.${levelsSaid ? ` (${levelsSaid[0].toUpperCase()}${levelsSaid.slice(1)}.)` : ""}`;
       here.append(p);
       const v = shell.section(root, "3 · Verdict", { band: "yellow", open: true });
       if (fileProblem) {
