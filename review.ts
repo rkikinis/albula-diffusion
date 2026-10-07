@@ -232,6 +232,8 @@ function registerTractReview(ctx: ModuleContext): void {
   let openPatient = "", openSide: "left" | "right" = "left", openRules: Record<string, unknown> | undefined, openFibers = "";
   /** Both corticospinal tracts of the open case (the crus borders are drawn on both sides), and the side being drawn. */
   let openCst: { left: Float32Array[]; right: Float32Array[] } = { left: [], right: [] }, drawing: "left" | "right" | undefined;
+  /** Whether the tract's crossing outlines are drawn on the slices (Ron, 2026-10-06: off while drawing the crus border). */
+  let showOutline = true;
   /** The case open, by its diffusion scan's UID (critic 2026-10-06, finding 8: a row number moves when the list does). */
   let openKey = "", openTracts = "", busy = "", note = "", field: FiberField | undefined, drawn: Float32Array[] = [];
   let placed: Levels | undefined, levelsSaid = "";
@@ -332,7 +334,7 @@ function registerTractReview(ctx: ModuleContext): void {
       const o: [number, number, number] = [nrm[0] * d, nrm[1] * d, nrm[2] * d];
       const cs = drawn.length ? sliceCrossings([drawn], { origin: o, normal: nrm }) : [];
       const unit = (a: number, b: number, c: number): [number, number, number] => { const l = Math.hypot(a, b, c) || 1; return [a / l, b / l, c / l]; };
-      const loops = crossingOutlines(cs.map((c) => c.p), o, unit(m[0], m[4], m[8]), unit(m[1], m[5], m[9]), OUTLINE_MM);
+      const loops = !showOutline ? [] : crossingOutlines(cs.map((c) => c.p), o, unit(m[0], m[4], m[8]), unit(m[1], m[5], m[9]), OUTLINE_MM);
       // Ron's crus borders, on the view whose level they were drawn at.
       const borders = Object.values(file.cases[openKey]?.crusBorder ?? {}).filter((b) => b && Math.abs(nrm[2]) > 0.9 && Math.abs(b.z - d * Math.sign(nrm[2])) < 1.5);
       view.setOverlay(String(n.layoutName ?? n.name), "tract-review", [...loops.map((points) => ({ kind: "polyline" as const, points, color: [...FIBER_RGB, 1], widthPx: 1.5, closed: true })),
@@ -549,6 +551,11 @@ function registerTractReview(ctx: ModuleContext): void {
       pos.textContent = `${i + 1} of ${cases.length}`;
       nav.append(prev, next, pos); v.append(nav);
       const cb = shell.section(root, "4 · Crus border", { band: "green", open: true });
+      const show = document.createElement("label"); show.style.cssText = "display:flex;gap:6px;align-items:center;margin:2px 0 6px";
+      const box = document.createElement("input"); box.type = "checkbox"; box.checked = showOutline;
+      box.onchange = () => { showOutline = box.checked; drawDots(); };
+      show.title = "Show or hide the yellow outline of where the tract crosses the slices; the tract in 3D is not affected.";
+      show.append(box, document.createTextNode("Show the tract's outline on the slices")); cb.append(show);
       const hint = document.createElement("p"); hint.className = "sl-hint";
       hint.textContent = "Optional: draw the border between each crus and the substantia nigra on the red view; the fibers of that side dorsal to your line are counted.";
       cb.append(hint);
