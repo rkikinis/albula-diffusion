@@ -135,7 +135,7 @@ Deno.test("the head-frame planes: an axial at height h and a coronal at y, and c
   const A = frameAxial(F, 7), o = apply4(F, [0, 0, 7]);
   assertEquals([A[3], A[7], A[11]].map((v) => +v.toFixed(6)), o.map((v) => +v.toFixed(6)), "the axial's origin is the frame's (0, 0, h)");
   const p = apply4(F, [3, 4, 7]), q = inPlane(A, p);
-  assert(Math.abs(q[0] - 3) < 1e-9 && Math.abs(q[1] - 4) < 1e-9, "in-plane coordinates are the frame's x and y");
+  assert(Math.abs(q[0] + 3) < 1e-9 && Math.abs(q[1] - 4) < 1e-9, "in-plane x is the head's left (radiological), y its front");
   const C = frameCoronal(F, -6), n = [C[2], C[6], C[10]], fy = [F[1], F[5], F[9]];
   assert(Math.abs(n[0] * fy[0] + n[1] * fy[1] + n[2] * fy[2] - 1) < 1e-9, "the coronal's normal is the frame's front-back axis");
   // Streamlines carried into the frame land at the frame's coordinates.

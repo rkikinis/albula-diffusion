@@ -222,8 +222,13 @@ export function intoFrame(sl: Float32Array[], Finv: M4): Float32Array[] {
 }
 /** A frame's axial plane at height h, and its coronal plane at front-back position y, as slice matrices (sliceToRAS:
  *  columns the slice's x, y, normal, then its origin). */
-export const frameAxial = (F: M4, h: number): M4 => mul4(F, [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, h, 0, 0, 0, 1]);
-export const frameCoronal = (F: M4, y: number): M4 => mul4(F, [1, 0, 0, 0, 0, 0, 1, y, 0, 1, 0, 0, 0, 0, 0, 1]);
+//
+// RADIOLOGICAL, as every other view (2026-10-07: the frame views were drawn with the patient's right on the screen's
+// right, mirrored against the scanner views, and Ron's "left" borders landed on the patient's right crus): the slice's
+// x axis is the head's LEFT (-x), as Slicer's own axial and coronal (sliceToRAS x = (-1, 0, 0)); the normal stays the
+// head's up (axial) or front (coronal).
+export const frameAxial = (F: M4, h: number): M4 => mul4(F, [-1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, h, 0, 0, 0, 1]);
+export const frameCoronal = (F: M4, y: number): M4 => mul4(F, [-1, 0, 0, 0, 0, 0, 1, y, 0, 1, 0, 0, 0, 0, 0, 1]);
 /** A crossing's and a border's coordinates in a slice's own plane (its x and y columns, from its origin). */
 export function inPlane(plane: number[], p: ArrayLike<number>): [number, number] {
   const d = [p[0] - plane[3], p[1] - plane[7], p[2] - plane[11]];
