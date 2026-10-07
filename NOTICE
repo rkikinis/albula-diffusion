@@ -30,4 +30,9 @@ These parts are under their own licenses, which apply to them instead:
    (rapidparc/rapidparc.ts) is written here from RapidParc's source and paper: Bisten, von Bornhaupt, Grün, Bauer, Rüber, Schultz,
    Imaging Neuroscience 4, 2026 (doi:10.1162/IMAG.a.1168); Mike Halle's tractline (Apache-2.0) was the second reading.
 
+5. template/ — the MNI ICBM 152 non-linear 2009c asymmetric template (T1-weighted image and brain mask, as distributed by
+   TemplateFlow), Copyright (C) 1993-2004 Louis Collins, McConnell Brain Imaging Centre, Montreal Neurological Institute,
+   McGill University; use, copy, modify and distribution permitted with the notice (template/LICENSE.txt). Used to find
+   the head's own frame (head-frame.ts); the landmarks there are the AFIDs project's consensus placements on it.
+
 The papers each part rests on are listed in references.ts.
