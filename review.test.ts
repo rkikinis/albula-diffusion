@@ -1,7 +1,7 @@
 // The Tract review's own arithmetic (review.ts): which streamlines are judged, on which side, at which levels.
 //   deno test -A --no-check --config ../../src/SlicerLive/deno.jsonc review.test.ts
 import { assert, assertEquals } from "jsr:@std/assert@1";
-import { carriedVerdict, CST, cstOf, dorsalTo, fibersFingerprint, frameAxial, frameCoronal, inPlane, intoFrame, levelsFromPair, levelsOf, mergeCase, midlineX, sideToJudge, type Review, type ReviewFile } from "./review.ts";
+import { carriedVerdict, CST, cstOf, dorsalTo, ventralOf, fibersFingerprint, frameAxial, frameCoronal, inPlane, intoFrame, levelsFromPair, levelsOf, mergeCase, midlineX, sideToJudge, type Review, type ReviewFile } from "./review.ts";
 import type { TractSetData } from "./tracts-dicom.ts";
 
 /** A synthetic corticospinal tract as the real ones are (the test cases, 2026-10-06): 60 fibers from z = -40 (brainstem)
@@ -157,4 +157,12 @@ Deno.test("frame borders and levels are kept apart from the scanner's; a redraw 
   const m3 = mergeCase(m2, "a", { ...base, levels: { crus: -18, ic: 9, coronal: 2, frame: "head-1" } });
   assertEquals(m3.cases.a.levels, { crus: 1, ic: 2, coronal: 3 }, "the scanner levels stay");
   assertEquals(m3.cases.a.frameLevels!.crus, -18);
+});
+
+Deno.test("the tract without the fibers dorsal to a border: crossing behind the line removes a streamline, missing the slice keeps it", () => {
+  // A scanner-axial border at z = 0 along y = 0 from x = -5 to 5 (dorsal = y < 0).
+  const b = { points: [[-5, 0, 0], [5, 0, 0]] as [number, number, number][], z: 0, drawnAt: "t" };
+  const through = (y: number) => new Float32Array([0, y, -5, 0, y, 5]);
+  const r = ventralOf([through(3), through(-3), through(2), new Float32Array([0, 0, 10, 0, 0, 20])], b);
+  assertEquals([r.kept.length, r.removed, r.notCrossing], [3, 1, 1]);
 });

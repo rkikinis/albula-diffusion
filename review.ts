@@ -235,6 +235,23 @@ export function inPlane(plane: number[], p: ArrayLike<number>): [number, number]
   return [d[0] * plane[0] + d[1] * plane[4] + d[2] * plane[8], d[0] * plane[1] + d[1] * plane[5] + d[2] * plane[9]];
 }
 
+/**
+ * THE TRACT WITHOUT THE FIBERS DORSAL TO A BORDER (Ron, 2026-10-07: "give me the CST after removing streamlines that are
+ * on the wrong side of my lines"): a streamline that crosses the border's slice dorsal to the line, anywhere along it, is
+ * left out; one that does not cross that slice at all is kept and counted apart. Display only -- the stored tracts stay.
+ */
+export function ventralOf(sl: Float32Array[], b: CrusBorder): { kept: Float32Array[]; removed: number; notCrossing: number } {
+  const P = b.plane, line = P ? b.points.map((p) => inPlane(P, p)) : b.points.map((p) => [p[0], p[1]] as [number, number]);
+  const plane = P ? { origin: [P[3], P[7], P[11]] as [number, number, number], normal: [P[2], P[6], P[10]] as [number, number, number] } : { origin: [0, 0, b.z] as [number, number, number], normal: [0, 0, 1] as [number, number, number] };
+  const kept: Float32Array[] = []; let removed = 0, notCrossing = 0;
+  for (const f of sl) {
+    const cs = sliceCrossings([[f]], plane).map((c) => (P ? inPlane(P, c.p) : [c.p[0], c.p[1]] as [number, number]));
+    if (!cs.length) { notCrossing++; kept.push(f); continue; }
+    if (dorsalTo(line, cs) > 0) removed++; else kept.push(f);
+  }
+  return { kept, removed, notCrossing };
+}
+
 /** A fingerprint of the streamlines judged (their count and every coordinate), for carrying a verdict over a remake that
  *  drew the very same fibers. */
 export function fibersFingerprint(sl: Float32Array[]): string {
@@ -278,6 +295,17 @@ function registerTractReview(ctx: ModuleContext): void {
   const heightOf = (F: M4, axis: 1 | 2, offset: number) => offset - (F[3] * F[axis] + F[7] * F[4 + axis] + F[11] * F[8 + axis]);
   /** Whether the tract's crossing outlines are drawn on the slices (Ron, 2026-10-06: off while drawing the crus border). */
   let showOutline = true;
+  /** Whether the judged tract is drawn without the fibers dorsal to Ron's crus border on its side (when there is one). */
+  let trimByBorder = true;
+  /** The judged side's whole tract, as stored; what is drawn is it, or it trimmed by the border. */
+  let fullTract: Float32Array[] = [];
+  const borderOfSide = () => { const r = file.cases[openKey]; return (openFrames ? r?.frameBorder : r?.crusBorder)?.[openSide]; };
+  function shownTract(): { sl: Float32Array[]; trim?: ReturnType<typeof ventralOf> } {
+    const b = borderOfSide();
+    if (!trimByBorder || !b) return { sl: fullTract };
+    const t = ventralOf(fullTract, b);
+    return { sl: t.kept, trim: t };
+  }
   /** The case open, by its diffusion scan's UID (critic 2026-10-06, finding 8: a row number moves when the list does). */
   let openKey = "", openTracts = "", busy = "", note = "", field: FiberField | undefined, drawn: Float32Array[] = [];
   let placed: Levels | undefined, levelsSaid = "";
@@ -525,7 +553,8 @@ function registerTractReview(ctx: ModuleContext): void {
         setSliceOffset("Red", lv.crus); setSliceOffset("Yellow", lv.ic); setSliceOffset("Green", lv.coronal);
       }
       placed = { crus: +lv.crus.toFixed(1), ic: +lv.ic.toFixed(1), coronal: +lv.coronal.toFixed(1) };
-      draw(sl);
+      fullTract = sl;
+      draw(shownTract().sl);
       lookFrom3D("A");
       const why = tumorX === undefined ? (patientSegs.length ? "no outline named as a tumor was found for this patient, so the left is shown" : "no tumor outline for this patient, so the left is shown") : `the tumor is on the ${side < 0 ? "right" : "left"}`;
       say([`${c.patient}: the ${side < 0 ? "left" : "right"} corticospinal tract (${why}), ${sl.length.toLocaleString()} fibers`, ...(mapId ? [] : ["the direction-colored map was not stored with these tracts"]), ...(b0Id ? [] : ["no b = 0 image was stored with these tracts"]), ...(levelsSaid ? [levelsSaid] : []), ...(r.failures.length ? [`not everything loaded: ${r.failures[0]}`] : [])].join("; ") + ".");
@@ -550,10 +579,11 @@ function registerTractReview(ctx: ModuleContext): void {
     const points = ((node?.controlPoints as { position: [number, number, number] }[] | undefined) ?? []).map((c) => c.position);
     if (id) live.write({ op: "del", id });
     if (keep && side && points.length >= 2) {
+      keepLevels();   // the level the border was drawn at is the case's level too (PAT31, 2026-10-07: it was kept only on leaving)
       const off = sliceOffset("Red") ?? points[0][2], F = openFrames;
       const z = F ? heightOf(F.bs, 2, off) : off;
       await saveCase(openKey, patchOf({ crusBorder: { side, points, z: +z.toFixed(1), drawnAt: new Date().toISOString(), ...(F ? { plane: frameAxial(F.bs, z) } : {}) } }));
-      drawDots();
+      draw(shownTract().sl);
       say(`The ${side} crus border is saved with the case.`);
     } else if (keep) say("The border needs at least two points; nothing was saved.");
     render();
@@ -637,6 +667,14 @@ function registerTractReview(ctx: ModuleContext): void {
       box.onchange = () => { showOutline = box.checked; drawDots(); };
       show.title = "Show or hide the yellow outline of where the tract crosses the slices; the tract in 3D is not affected.";
       show.append(box, document.createTextNode("Show the tract's outline on the slices")); cb.append(show);
+      if (borderOfSide()) {
+        const st = shownTract(), trim = document.createElement("label"); trim.style.cssText = "display:flex;gap:6px;align-items:center;margin:2px 0 6px";
+        const tb = document.createElement("input"); tb.type = "checkbox"; tb.checked = trimByBorder;
+        tb.onchange = () => { trimByBorder = tb.checked; draw(shownTract().sl); render(); };
+        trim.title = "Leave out of the drawing the fibers that cross the crus slice dorsal to your border on this side; the stored tracts are not changed.";
+        trim.append(tb, document.createTextNode(`Without the fibers dorsal to my ${openSide} border` + (st.trim ? ` (${st.trim.kept.length} of ${fullTract.length} kept${st.trim.notCrossing ? `, ${st.trim.notCrossing} not reaching that slice` : ""})` : "")));
+        cb.append(trim);
+      }
       const hint = document.createElement("p"); hint.className = "sl-hint";
       hint.textContent = "Optional: draw the border between each crus and the substantia nigra on the red view; the fibers of that side dorsal to your line are counted.";
       cb.append(hint);
