@@ -153,11 +153,13 @@ Deno.test("BIDS diffusion: a T1 the writers cannot take is skipped and named, an
   try {
     const p = `${root}/sub-01/ses-pre/anat/sub-01_ses-pre_T1w.nii`;
     const b = Deno.readFileSync(p), v = new DataView(b.buffer);
-    v.setFloat32(112, 0.5, true);
+    // Since 2026-10-07 a scaled or fractional T1 IS written (its own scale, or rounded under one Rescale Slope); what the
+    // writers still cannot take is a value that is not a number -- a scale of 1e38 overflows float32 to infinity.
+    v.setFloat32(112, 1e38, true);
     Deno.writeFileSync(p, b);
     const r = await skippedOf(root);
     assertEquals(r.objects.map((o) => o.role), ["dwi-AP"]);
-    assert(r.skipped.some((k) => /T1w\.nii/.test(k.file) && /fractional/.test(k.why)), JSON.stringify(r.skipped));
+    assert(r.skipped.some((k) => /T1w\.nii/.test(k.file) && /not numbers/.test(k.why)), JSON.stringify(r.skipped));
     assert(r.skipped.some((k) => /no T1 series/.test(k.why)), "the mask says why it was not used");
   } finally { await Deno.remove(root, { recursive: true }); }
 });
