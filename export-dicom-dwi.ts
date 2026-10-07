@@ -78,18 +78,41 @@ export async function diffusionToEnhancedMR(
   const pos = (k: number) => lps([M[3] + k * M[2], M[7] + k * M[6], M[11] + k * M[10]]).map(ds10);
 
   // Pixel data: stored integers only (a diffusion scan is 16-bit as acquired); refuse anything else rather than round.
-  // Signed when any value is negative; unsigned when any is above 32767 and none negative; both at once cannot be stored.
-  let lo = Infinity, hi = -Infinity;
-  for (const v of dwi.volumes) for (let i = 0; i < v.data.length; i++) {
-    const x = v.data[i];
-    if (!Number.isInteger(x)) throw new Error(`a diffusion volume holds a fractional value (${x}); DICOM pixels are whole numbers`);
-    if (x < lo) lo = x; if (x > hi) hi = x;
+  // A NIFTI WITH A VALUE SCALE (scl_slope / scl_inter; ds004910, Philips through dcm2niix: whole numbers times 1.816...)
+  // is read as fractions; its stored whole numbers are written with the scale as Rescale Slope / Intercept, which the
+  // reader applies (logic/readers/dicom-series.ts), so the values read back are the same (2026-10-07; "writing the stored
+  // integers with their scale is still to do", logic/import/bids.ts). Only a scale shared by every volume, and only when
+  // every value comes back to within float32 rounding; anything else is still refused.
+  const scaleOf = (meta?: Record<string, unknown>) => {
+    const s = Number(meta?.sclSlope), b = Number(meta?.sclInter);
+    return Number.isFinite(s) && s !== 0 ? { slope: s, inter: Number.isFinite(b) ? b : 0 } : undefined;
+  };
+  const allWhole = dwi.volumes.every((v) => { for (let i = 0; i < v.data.length; i++) if (!Number.isInteger(v.data[i])) return false; return true; });
+  const sc = allWhole ? { slope: 1, inter: 0 } : scaleOf(dwi.volumes[0].meta);
+  if (!sc || dwi.volumes.some((v) => { const o = scaleOf(v.meta); return !allWhole && (!o || o.slope !== sc.slope || o.inter !== sc.inter); })) {
+    const x = dwi.volumes.flatMap((v) => Array.from(v.data as ArrayLike<number>).find((y) => !Number.isInteger(y)) ?? [])[0];
+    throw new Error(`a diffusion volume holds a fractional value (${x}) and no value scale shared by every volume; DICOM pixels are whole numbers`);
   }
-  const signed = lo < 0;
-  if (signed ? (lo < -32768 || hi > 32767) : hi > 65535) throw new Error(`the values run from ${lo} to ${hi}, past what a 16-bit DICOM pixel holds`);
+  // The slope and intercept as written (DS, ten digits) are the ones the stored numbers are checked against.
+  const slope = ds10(sc.slope), inter = ds10(sc.inter);
   const n3 = nx * ny * nz;
+  const stored = new Float64Array(n3 * nv);
+  let lo = Infinity, hi = -Infinity;
+  dwi.volumes.forEach((v, t) => {
+    for (let i = 0; i < v.data.length; i++) {
+      const x = v.data[i], w = slope === 1 && inter === 0 ? x : Math.round((x - inter) / slope);
+      if (Math.abs(w * slope + inter - x) > Math.abs(x) * 1e-6 + 1e-9) {
+        throw new Error(`a diffusion volume holds a value (${x}) that its value scale (${slope}, ${inter}) does not turn back into a whole number; DICOM pixels are whole numbers`);
+      }
+      stored[t * n3 + i] = w;
+      if (w < lo) lo = w; if (w > hi) hi = w;
+    }
+  });
+  // Signed when any value is negative; unsigned when any is above 32767 and none negative; both at once cannot be stored.
+  const signed = lo < 0;
+  if (signed ? (lo < -32768 || hi > 32767) : hi > 65535) throw new Error(`the stored values run from ${lo} to ${hi}, past what a 16-bit DICOM pixel holds`);
   const px = signed ? new Int16Array(n3 * nv) : new Uint16Array(n3 * nv);
-  dwi.volumes.forEach((v, t) => px.set(v.data as ArrayLike<number>, t * n3));
+  px.set(stored);
 
   const now = new Date();
   const p2 = (n: number) => String(n).padStart(2, "0");
@@ -162,7 +185,7 @@ export async function diffusionToEnhancedMR(
         AnatomicRegionSequence: [{ CodeValue: "12738006", CodingSchemeDesignator: "SCT", CodeMeaning: "Brain" }],
         FrameLaterality: "U",
       }],
-      PixelValueTransformationSequence: [{ RescaleIntercept: 0, RescaleSlope: 1, RescaleType: "US" }],
+      PixelValueTransformationSequence: [{ RescaleIntercept: inter, RescaleSlope: slope, RescaleType: "US" }],
       MRImageFrameTypeSequence: [{
         FrameType: ["DERIVED", "PRIMARY", "DIFFUSION", "NONE"], PixelPresentation: "MONOCHROME",
         VolumetricProperties: "VOLUME", VolumeBasedCalculationTechnique: "NONE", ComplexImageComponent: "MAGNITUDE",
