@@ -19,6 +19,7 @@ import {
 import { isTumorName } from "./face.ts";
 import { b0Path, colorFaBrainstemPath, colorFaPath, colorFaTalairachPath, dicomToTracts, type TractSetData } from "./tracts-dicom.ts";
 import { apply4, inv4, mul4, type M4 } from "./head-frame.ts";
+import { gateTract, type GateResult, type PackedColorMap } from "./cst-gates.ts";
 import { crossingOutlines, sliceCrossings } from "./tract-slice.ts";
 
 export const CST = "corticospinal tract";
@@ -300,11 +301,26 @@ function registerTractReview(ctx: ModuleContext): void {
   /** The judged side's whole tract, as stored; what is drawn is it, or it trimmed by the border. */
   let fullTract: Float32Array[] = [];
   const borderOfSide = () => { const r = file.cases[openKey]; return (openFrames ? r?.frameBorder : r?.crusBorder)?.[openSide]; };
-  function shownTract(): { sl: Float32Array[]; trim?: ReturnType<typeof ventralOf> } {
+  /** THE AUTOMATIC ANATOMICAL GATES (cst-gates.ts; Ron, 2026-10-07: "Now we need to automate. I am not a scalable
+   *  resource"): on in frame cases; the crus gate on the red view's slice, the posterior-limb gate on the yellow's. */
+  const loadedMaps = new Map<string, PackedColorMap>();
+  let autoGates = true, gateCache: { key: string; r: GateResult } | undefined;
+  const maps: { bs?: PackedColorMap; tal?: PackedColorMap } = {};
+  function gated(sl: Float32Array[]): { sl: Float32Array[]; gate?: GateResult } {
+    const F = openFrames;
+    if (!autoGates || !F || !maps.bs || !maps.tal) return { sl };
+    const r0 = sliceOffset("Red"), y0 = sliceOffset("Yellow");
+    if (r0 === undefined || y0 === undefined) return { sl };
+    const hr = +heightOf(F.bs, 2, r0).toFixed(1), hy = +heightOf(F.tal, 2, y0).toFixed(1);
+    const key = `${openKey}|${openSide}|${sl.length}|${hr}|${hy}`;
+    if (gateCache?.key !== key) gateCache = { key, r: gateTract(sl, openSide === "left" ? -1 : 1, frameAxial(F.bs, hr), maps.bs, frameAxial(F.tal, hy), maps.tal) };
+    return { sl: gateCache.r.kept, gate: gateCache.r };
+  }
+  function shownTract(): { sl: Float32Array[]; trim?: ReturnType<typeof ventralOf>; gate?: GateResult } {
     const b = borderOfSide();
-    if (!trimByBorder || !b) return { sl: fullTract };
-    const t = ventralOf(fullTract, b);
-    return { sl: t.kept, trim: t };
+    const t = trimByBorder && b ? ventralOf(fullTract, b) : undefined;
+    const g = gated(t ? t.kept : fullTract);
+    return { sl: g.sl, ...(t ? { trim: t } : {}), ...(g.gate ? { gate: g.gate } : {}) };
   }
   /** The case open, by its diffusion scan's UID (critic 2026-10-06, finding 8: a row number moves when the list does). */
   let openKey = "", openTracts = "", busy = "", note = "", field: FiberField | undefined, drawn: Float32Array[] = [];
@@ -441,6 +457,7 @@ function registerTractReview(ctx: ModuleContext): void {
     const sizes = (f["sizes"] ?? "").split(/\s+/).filter(Boolean).map(Number) as [number, number, number];
     const raw = await nrrdDecode(f, body, sizes[0] * sizes[1] * sizes[2] * 4);
     const data = new Float32Array(raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength));
+    if (rgb) loadedMaps.set(path, { dims: sizes, ijkToRAS: nrrdGeometry(f).ijkToRAS, data });
     const res = await loadVolumeIntoScene(live, store, { dims: sizes, ijkToRAS: nrrdGeometry(f).ijkToRAS, data, dtype: "<f4", name }, { name, extra: { ...(rgb ? { rgb24: true } : {}), autoVolumeRendering: false, recomputable: true } });
     if (!rgb) {
       // THE b = 0's WINDOW ON THE BRAIN (critic 2026-10-06, b = 0 finding 5): the automatic one spans the eyes and the
@@ -509,6 +526,8 @@ function registerTractReview(ctx: ModuleContext): void {
       const mapId = await loadColorFA(c.tracts, `${c.patient} Color FA${openFrames ? ", head's Talairach frame" : ""} (made at import)`);
       // THE CRUS IN THE BRAINSTEM'S OWN COLORS (Ron, 2026-10-06): the red view shows the map colored in the brainstem frame.
       const bsMapId = openFrames ? await loadStored(colorFaBrainstemPath(c.tracts), `${c.patient} Color FA, head's brainstem frame (made at import)`, true) : undefined;
+      maps.bs = openFrames ? loadedMaps.get(colorFaBrainstemPath(c.tracts)) : undefined; maps.tal = openFrames ? loadedMaps.get(colorFaTalairachPath(c.tracts)) : undefined;
+      loadedMaps.clear(); gateCache = undefined;
       // The b = 0 image (T2-weighted: the substantia nigra and the red nucleus dark, Ron 2026-10-06), for a view's gear ›
       // Image; tracts made before it was stored have none.
       const b0Id = await loadStored(b0Path(c.tracts), `${c.patient} b=0 (made at import)`, false);
@@ -667,6 +686,15 @@ function registerTractReview(ctx: ModuleContext): void {
       box.onchange = () => { showOutline = box.checked; drawDots(); };
       show.title = "Show or hide the yellow outline of where the tract crosses the slices; the tract in 3D is not affected.";
       show.append(box, document.createTextNode("Show the tract's outline on the slices")); cb.append(show);
+      if (openFrames && maps.bs && maps.tal) {
+        const st = shownTract(), g = st.gate, lab = document.createElement("label"); lab.style.cssText = "display:flex;gap:6px;align-items:center;margin:2px 0 6px";
+        const gb = document.createElement("input"); gb.type = "checkbox"; gb.checked = autoGates;
+        gb.onchange = () => { autoGates = gb.checked; draw(shownTract().sl); render(); };
+        lab.title = "Leave out of the drawing the fibers that do not pass the crus (on the red view's slice: in the pink, in front of the green band) and the posterior limb (on the yellow view's slice: in the blue). Computed at the levels the views show; the stored tracts are not changed.";
+        lab.append(gb, document.createTextNode("Automatic anatomical gates: crus and posterior limb" + (g ? ` (${g.kept.length} kept; crus -${g.failedCrus}${g.noCrus ? ", crus not found" : ""}, limb -${g.failedLimb}${g.noLimb ? ", limb not found" : ""})` : "")));
+        cb.append(lab);
+        if (g) { const again = document.createElement("button"); again.textContent = "Gates at these levels"; again.title = "Apply the gates again at the levels the red and yellow views show now."; again.onclick = () => { gateCache = undefined; draw(shownTract().sl); render(); }; cb.append(again); }
+      }
       if (borderOfSide()) {
         const st = shownTract(), trim = document.createElement("label"); trim.style.cssText = "display:flex;gap:6px;align-items:center;margin:2px 0 6px";
         const tb = document.createElement("input"); tb.type = "checkbox"; tb.checked = trimByBorder;
