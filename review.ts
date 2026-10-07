@@ -773,4 +773,9 @@ function registerTractReview(ctx: ModuleContext): void {
   });
 }
 
-queueModule(registerTractReview);
+/** OFF THE MODULE MENU since 2026-10-07 (Ron: "there is no proper user interface to populate that page ... That is not
+ *  sustainable"; "Yes" to hiding it until the tracts are made by the app itself at import, with a case dashboard in the
+ *  manner of SlicerLive's ReMINDer example -- after Mike Halle's haversack infrastructure work lands). The code, the
+ *  verdicts file and its tests stay; true puts the page back. Record: Contents/docs/TRACT-REVIEW.md, "Paused". */
+export const TRACT_REVIEW_IN_MENU = false;
+if (TRACT_REVIEW_IN_MENU) queueModule(registerTractReview);
