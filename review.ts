@@ -449,8 +449,16 @@ function registerTractReview(ctx: ModuleContext): void {
           return dot > 0.999 && Math.abs(po - d) < 1.5; }
         return Math.abs(nrm[2]) > 0.9 && Math.abs(b.z - d * Math.sign(nrm[2])) < 1.5;
       });
+      // The automatic crus border (the FA ridge's; orange) on the view whose plane it was found on.
+      const g = lastShown?.gate, gp = g?.crusPlane, autoLine: [number, number, number][] = [];
+      if (g?.crusBorder && gp && g.crusBorder.length >= 3) {
+        const pn: [number, number, number] = [gp[2], gp[6], gp[10]], po = gp[3] * pn[0] + gp[7] * pn[1] + gp[11] * pn[2];
+        if (pn[0] * nrm[0] + pn[1] * nrm[1] + pn[2] * nrm[2] > 0.999 && Math.abs(po - d) < 0.6)
+          for (const [x, y] of [...g.crusBorder].sort((a, b) => a[0] - b[0])) autoLine.push([gp[3] + x * gp[0] + y * gp[1], gp[7] + x * gp[4] + y * gp[5], gp[11] + x * gp[8] + y * gp[9]]);
+      }
       view.setOverlay(String(n.layoutName ?? n.name), "tract-review", [...loops.map((points) => ({ kind: "polyline" as const, points, color: [...FIBER_RGB, 1], widthPx: 1.5, closed: true })),
-        ...borders.map((b) => ({ kind: "polyline" as const, points: b!.points, color: [0.35, 0.85, 1, 1], widthPx: 2 }))]);
+        ...borders.map((b) => ({ kind: "polyline" as const, points: b!.points, color: [0.35, 0.85, 1, 1], widthPx: 2 })),
+        ...(autoLine.length >= 2 ? [{ kind: "polyline" as const, points: autoLine, color: [1, 0.55, 0.15, 1], widthPx: 2 }] : [])]);
     }
   }
   live.subscribe((c) => {
@@ -706,7 +714,7 @@ function registerTractReview(ctx: ModuleContext): void {
         const gb = document.createElement("input"); gb.type = "checkbox"; gb.checked = autoGates;
         gb.onchange = () => { autoGates = gb.checked; drawShown(); render(); };
         lab.title = "Leave out of the drawing the fibers that do not pass the crus (on the red view's slice: in the pink, in front of the green band) and the posterior limb (on the yellow view's slice: in the blue). Computed at the levels the views show; the stored tracts are not changed.";
-        lab.append(gb, document.createTextNode("Automatic anatomical gates, crus and posterior limb (experimental)" + (g ? `: ${g.kept.length} kept of ${g.kept.length + g.failedCrus + g.failedLimb}${st.trim ? " left after your border" : ""}; ${g.failedCrus} left out at the crus${g.noCrus ? " (crus not found: not applied)" : ""}, ${g.failedLimb} at the posterior limb${g.noLimb ? " (not found: not applied)" : ""}` : "")));
+        lab.append(gb, document.createTextNode("Automatic anatomical gates: crus (the FA ridge's border, orange on the red view) and posterior limb (experimental)" + (g ? `: ${g.kept.length} kept of ${g.kept.length + g.failedCrus + g.failedLimb}${st.trim ? " left after your border" : ""}; ${g.failedCrus} left out at the crus${g.noCrus ? " (crus not found: not applied)" : ""}, ${g.failedLimb} at the posterior limb${g.noLimb ? " (not found: not applied)" : ""}` : "")));
         cb.append(lab);
         if (g) { const again = document.createElement("button"); again.textContent = "Gates at these levels"; again.title = "Apply the gates again at the levels the red and yellow views show now."; again.onclick = () => { gateCache = undefined; drawShown(); render(); }; cb.append(again); }
       }

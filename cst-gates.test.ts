@@ -29,3 +29,16 @@ Deno.test("the posterior limb: the blue band 10-35 mm from the midline on its si
   assertEquals(at(15, -5), 1, "the limb's blue");
   assertEquals(at(4, -5), 0, "a blue strip near the midline is not the limb");
 });
+
+Deno.test("the crus border from the FA ridge: behind the ridge, where FA has fallen half-way to the level behind", async () => {
+  const { crusBorderFromRidge, dorsalOfBorder } = await import("./cst-gates.ts");
+  // Left side (x > 0): the surface at y = 8 (outside FA 0), a pink crus y 3..8 (FA 0.7, red 0.45), behind it y < 3 tegmentum
+  // (FA 0.4, blue): the border should come out near y = 3.
+  const img = slice((x, y) => x < 3 || x > 20 ? [0, 0, 0] : y >= 8 ? [0, 0, 0] : y >= 3 ? [0.45, 0.05, 0.53] : [0.05, 0.05, 0.4]);
+  const b = crusBorderFromRidge(img, 1);
+  assert(b.length > 10, `columns found: ${b.length}`);
+  for (const [, y] of b) assert(y > 1 && y < 4, `border at y = ${y}, not near 3`);
+  assertEquals(dorsalOfBorder(b, [10, 0]), true, "behind it");
+  assertEquals(dorsalOfBorder(b, [10, 6]), false, "in the crus");
+  assertEquals(crusBorderFromRidge(img, -1).length, 0, "nothing on the right");
+});
