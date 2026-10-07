@@ -1,7 +1,7 @@
 // The Tract review's own arithmetic (review.ts): which streamlines are judged, on which side, at which levels.
 //   deno test -A --no-check --config ../../src/SlicerLive/deno.jsonc review.test.ts
 import { assert, assertEquals } from "jsr:@std/assert@1";
-import { carriedVerdict, CST, cstOf, dorsalTo, fibersFingerprint, levelsFromPair, levelsOf, mergeCase, midlineX, sideToJudge, type Review, type ReviewFile } from "./review.ts";
+import { carriedVerdict, CST, cstOf, dorsalTo, fibersFingerprint, frameAxial, frameCoronal, inPlane, intoFrame, levelsFromPair, levelsOf, mergeCase, midlineX, sideToJudge, type Review, type ReviewFile } from "./review.ts";
 import type { TractSetData } from "./tracts-dicom.ts";
 
 /** A synthetic corticospinal tract as the real ones are (the test cases, 2026-10-06): 60 fibers from z = -40 (brainstem)
@@ -126,4 +126,19 @@ Deno.test("a crus border is kept per side; drawing one side keeps the other and 
   assertEquals(Object.keys(m.cases.a.crusBorder!).sort(), ["left", "right"]);
   assertEquals(m.cases.a.judgments.t.verdict, "acceptable");
   assertEquals(mergeCase(m, "a", { patient: "A", side: "left", tracts: "t", note: "n" }).cases.a.crusBorder, m.cases.a.crusBorder, "another action keeps the borders");
+});
+
+Deno.test("the head-frame planes: an axial at height h and a coronal at y, and coordinates in them", async () => {
+  const { pitch4, mul4, apply4 } = await import("./head-frame.ts");
+  // A frame tipped 30 degrees with its origin at (5, -10, 2).
+  const F = mul4([1, 0, 0, 5, 0, 1, 0, -10, 0, 0, 1, 2, 0, 0, 0, 1], pitch4(30));
+  const A = frameAxial(F, 7), o = apply4(F, [0, 0, 7]);
+  assertEquals([A[3], A[7], A[11]].map((v) => +v.toFixed(6)), o.map((v) => +v.toFixed(6)), "the axial's origin is the frame's (0, 0, h)");
+  const p = apply4(F, [3, 4, 7]), q = inPlane(A, p);
+  assert(Math.abs(q[0] - 3) < 1e-9 && Math.abs(q[1] - 4) < 1e-9, "in-plane coordinates are the frame's x and y");
+  const C = frameCoronal(F, -6), n = [C[2], C[6], C[10]], fy = [F[1], F[5], F[9]];
+  assert(Math.abs(n[0] * fy[0] + n[1] * fy[1] + n[2] * fy[2] - 1) < 1e-9, "the coronal's normal is the frame's front-back axis");
+  // Streamlines carried into the frame land at the frame's coordinates.
+  const back = intoFrame([new Float32Array(p)], (await import("./registration.ts")).inv4(F))[0];
+  assert(Math.abs(back[0] - 3) < 1e-4 && Math.abs(back[1] - 4) < 1e-4 && Math.abs(back[2] - 7) < 1e-4);
 });

@@ -14,10 +14,11 @@
 import {
   closeScene, databaseFileUrl, databaseSeries, FiberField, fetchZarrVolumeNative, LAYOUT, loadDatabaseSeries, loadVolumeIntoScene,
   lookFrom3D, nrrdDecode, nrrdGeometry, nrrdSplitHeader, orientView, queueModule, seriesDicomFiles, setLayout, setSliceOffset,
-  sliceOffset, sliceOrientation, writeDatabaseFile, startPlacing, placingMarkupId, endPlacing, type DatabaseSeries, type ModuleContext, type ZarrDesc,
+  sliceOffset, sliceOrientation, writeDatabaseFile, startPlacing, placingMarkupId, endPlacing, setSlicePlane, type DatabaseSeries, type ModuleContext, type ZarrDesc,
 } from "albula";
 import { isTumorName } from "./face.ts";
-import { b0Path, colorFaPath, dicomToTracts, type TractSetData } from "./tracts-dicom.ts";
+import { b0Path, colorFaBrainstemPath, colorFaPath, dicomToTracts, type TractSetData } from "./tracts-dicom.ts";
+import { apply4, inv4, mul4, type M4 } from "./head-frame.ts";
 import { crossingOutlines, sliceCrossings } from "./tract-slice.ts";
 
 export const CST = "corticospinal tract";
@@ -48,7 +49,10 @@ export function sideToJudge(tumorX: number | undefined, midline: number): -1 | 1
   return tumorX === undefined || !Number.isFinite(tumorX) ? -1 : tumorX > midline ? -1 : 1;
 }
 
-export interface Levels { crus: number; ic: number; coronal: number }
+export interface Levels { crus: number; ic: number; coronal: number;
+  /** "head-1": the levels are heights in the head's frames (the crus in the brainstem frame, the internal capsule and the
+   *  coronal in the Talairach frame; head-frame.ts), not the scanner's z / y. Absent: the scanner's (before 2026-10-07). */
+  frame?: "head-1" }
 
 /**
  * THE TWO AXIAL LEVELS FROM THE TRACT (RAS z, mm) and the coronal one (RAS y). On real tracts (the test cases, 2026-10-06)
@@ -148,7 +152,9 @@ export interface Review {
    *  height), for counting the fibers dorsal to it (2026-10-06: "I could draw a line to separate the crus from sn"). */
   crusBorder?: Partial<Record<"left" | "right", CrusBorder>>;
 }
-export interface CrusBorder { points: [number, number, number][]; z: number; drawnAt: string }
+export interface CrusBorder { points: [number, number, number][]; z: number; drawnAt: string;
+  /** The slice the border was drawn on (its sliceToRAS), when it was a head-frame plane; without it, the scanner's axial at z. */
+  plane?: number[] }
 export interface ReviewFile { version: 2; cases: Record<string, Review> }
 
 /** WHAT ONE ACTION CHANGES in a case: a verdict, a note, or the levels -- never the whole record. */
@@ -196,6 +202,20 @@ export function dorsalTo(border: [number, number][], crossings: [number, number]
   return crossings.filter(([x, y]) => y < yAt(x)).length;
 }
 
+/** Streamlines carried into a frame's coordinates (`Finv`: patient RAS -> frame). */
+export function intoFrame(sl: Float32Array[], Finv: M4): Float32Array[] {
+  return sl.map((f) => { const o = new Float32Array(f.length); for (let i = 0; i < f.length; i += 3) { const p = apply4(Finv, [f[i], f[i + 1], f[i + 2]]); o[i] = p[0]; o[i + 1] = p[1]; o[i + 2] = p[2]; } return o; });
+}
+/** A frame's axial plane at height h, and its coronal plane at front-back position y, as slice matrices (sliceToRAS:
+ *  columns the slice's x, y, normal, then its origin). */
+export const frameAxial = (F: M4, h: number): M4 => mul4(F, [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, h, 0, 0, 0, 1]);
+export const frameCoronal = (F: M4, y: number): M4 => mul4(F, [1, 0, 0, 0, 0, 0, 1, y, 0, 1, 0, 0, 0, 0, 0, 1]);
+/** A crossing's and a border's coordinates in a slice's own plane (its x and y columns, from its origin). */
+export function inPlane(plane: number[], p: ArrayLike<number>): [number, number] {
+  const d = [p[0] - plane[3], p[1] - plane[7], p[2] - plane[11]];
+  return [d[0] * plane[0] + d[1] * plane[4] + d[2] * plane[8], d[0] * plane[1] + d[1] * plane[5] + d[2] * plane[9]];
+}
+
 /** A fingerprint of the streamlines judged (their count and every coordinate), for carrying a verdict over a remake that
  *  drew the very same fibers. */
 export function fibersFingerprint(sl: Float32Array[]): string {
@@ -232,6 +252,11 @@ function registerTractReview(ctx: ModuleContext): void {
   let openPatient = "", openSide: "left" | "right" = "left", openRules: Record<string, unknown> | undefined, openFibers = "";
   /** Both corticospinal tracts of the open case (the crus borders are drawn on both sides), and the side being drawn. */
   let openCst: { left: Float32Array[]; right: Float32Array[] } = { left: [], right: [] }, drawing: "left" | "right" | undefined;
+  /** The open case's head frames (frame -> patient RAS), when its tracts carry them (head-frame.ts). */
+  let openFrames: { bs: M4; tal: M4 } | undefined;
+  const LABEL = { red: "Brainstem axial", yellow: "Talairach axial", green: "Talairach coronal" };
+  /** A frame plane's height from a view's offset along its normal: offset = AC·n + h (frameAxial / frameCoronal). */
+  const heightOf = (F: M4, axis: 1 | 2, offset: number) => offset - (F[3] * F[axis] + F[7] * F[4 + axis] + F[11] * F[8 + axis]);
   /** Whether the tract's crossing outlines are drawn on the slices (Ron, 2026-10-06: off while drawing the crus border). */
   let showOutline = true;
   /** The case open, by its diffusion scan's UID (critic 2026-10-06, finding 8: a row number moves when the list does). */
@@ -303,10 +328,13 @@ function registerTractReview(ctx: ModuleContext): void {
   /** Ron's levels, when he moved them: the three views still in the orientations set, and at other positions. */
   function keepLevels(): void {
     if (!openKey || !openTracts || !placed || !hasCase() || !canWrite()) return;
-    if (sliceOrientation("Red") !== "Axial" || sliceOrientation("Yellow") !== "Axial" || sliceOrientation("Green") !== "Coronal") return;
+    const want = openFrames ? [LABEL.red, LABEL.yellow, LABEL.green] : ["Axial", "Axial", "Coronal"];
+    if (sliceOrientation("Red") !== want[0] || sliceOrientation("Yellow") !== want[1] || sliceOrientation("Green") !== want[2]) return;
     const c = sliceOffset("Red"), k = sliceOffset("Yellow"), y = sliceOffset("Green");
     if (c === undefined || k === undefined || y === undefined) return;
-    const now = { crus: +c.toFixed(1), ic: +k.toFixed(1), coronal: +y.toFixed(1) };
+    const F = openFrames;
+    const now: Levels = F ? { crus: +heightOf(F.bs, 2, c).toFixed(1), ic: +heightOf(F.tal, 2, k).toFixed(1), coronal: +heightOf(F.tal, 1, y).toFixed(1), frame: "head-1" }
+      : { crus: +c.toFixed(1), ic: +k.toFixed(1), coronal: +y.toFixed(1) };
     if (now.crus === placed.crus && now.ic === placed.ic && now.coronal === placed.coronal) return;
     placed = now;
     void saveCase(openKey, patchOf({ levels: now }));
@@ -336,7 +364,14 @@ function registerTractReview(ctx: ModuleContext): void {
       const unit = (a: number, b: number, c: number): [number, number, number] => { const l = Math.hypot(a, b, c) || 1; return [a / l, b / l, c / l]; };
       const loops = !showOutline ? [] : crossingOutlines(cs.map((c) => c.p), o, unit(m[0], m[4], m[8]), unit(m[1], m[5], m[9]), OUTLINE_MM);
       // Ron's crus borders, on the view whose level they were drawn at.
-      const borders = Object.values(file.cases[openKey]?.crusBorder ?? {}).filter((b) => b && Math.abs(nrm[2]) > 0.9 && Math.abs(b.z - d * Math.sign(nrm[2])) < 1.5);
+      // A border is drawn on the view whose plane it was drawn on (the head frame's: the same normal and offset; the
+      // scanner's: an axial view at its z).
+      const borders = Object.values(file.cases[openKey]?.crusBorder ?? {}).filter((b) => {
+        if (!b) return false;
+        if (b.plane) { const P = b.plane, pn: [number, number, number] = [P[2], P[6], P[10]], po = P[3] * pn[0] + P[7] * pn[1] + P[11] * pn[2], dot = pn[0] * nrm[0] + pn[1] * nrm[1] + pn[2] * nrm[2];
+          return dot > 0.999 && Math.abs(po - d) < 1.5; }
+        return Math.abs(nrm[2]) > 0.9 && Math.abs(b.z - d * Math.sign(nrm[2])) < 1.5;
+      });
       view.setOverlay(String(n.layoutName ?? n.name), "tract-review", [...loops.map((points) => ({ kind: "polyline" as const, points, color: [...FIBER_RGB, 1], widthPx: 1.5, closed: true })),
         ...borders.map((b) => ({ kind: "polyline" as const, points: b!.points, color: [0.35, 0.85, 1, 1], widthPx: 2 }))]);
     }
@@ -404,6 +439,8 @@ function registerTractReview(ctx: ModuleContext): void {
       const inputs = (t.provenance?.inputs ?? {}) as { t1?: string | null };
       const rules = t.provenance?.rules as Record<string, unknown> | undefined;
       openRules = rules;
+      const hf = t.provenance?.headFrame as { talairach?: M4; brainstem?: M4 } | undefined;
+      openFrames = hf?.talairach && hf.brainstem ? { bs: hf.brainstem, tal: hf.talairach } : undefined;
       const db = await databaseSeries();
       const t1 = inputs.t1 ?? undefined, t1Entry = db?.series.find((s) => s.seriesInstanceUID === t1);
       // THE TUMOR OUTLINE (critic 2026-10-06, finding 6): a SEG of this patient -- the diffusion scan's study, the T1's,
@@ -422,13 +459,16 @@ function registerTractReview(ctx: ModuleContext): void {
       const nodeOf = (uid: string) => [...live.nodes.values()].find((n) => (n.origin as Record<string, unknown> | undefined)?.seriesInstanceUID === uid);
       const t1Node = t1 ? nodeOf(t1) : undefined;
       const segNodes = [...live.nodes.values()].filter((n) => n.type === "segmentation" && segs.includes(String((n.dicom as { seriesInstanceUID?: string } | undefined)?.seriesInstanceUID ?? (n.origin as Record<string, unknown> | undefined)?.seriesInstanceUID)));
-      const mapId = await loadColorFA(c.tracts, `${c.patient} Color FA (made at import)`);
+      const mapId = await loadColorFA(c.tracts, `${c.patient} Color FA${openFrames ? ", head's Talairach frame" : ""} (made at import)`);
+      // THE CRUS IN THE BRAINSTEM'S OWN COLORS (Ron, 2026-10-06): the red view shows the map colored in the brainstem frame.
+      const bsMapId = openFrames ? await loadStored(colorFaBrainstemPath(c.tracts), `${c.patient} Color FA, head's brainstem frame (made at import)`, true) : undefined;
       // The b = 0 image (T2-weighted: the substantia nigra and the red nucleus dark, Ron 2026-10-06), for a view's gear ›
       // Image; tracts made before it was stored have none.
       const b0Id = await loadStored(b0Path(c.tracts), `${c.patient} b=0 (made at import)`, false);
       for (const cmp of [...live.nodes.values()].filter((n) => n.type === "sliceComposite")) {
         if (t1Node) live.write({ op: "patch", id: cmp.id, path: "#/refs/background", value: [t1Node.id] });
-        live.write({ op: "patch", id: cmp.id, path: "#/refs/foreground", value: mapId ? [mapId] : [] });
+        const fg = String(cmp.id).endsWith("Red") && bsMapId ? bsMapId : mapId;
+        live.write({ op: "patch", id: cmp.id, path: "#/refs/foreground", value: fg ? [fg] : [] });
         live.write({ op: "patch", id: cmp.id, path: "#/foregroundOpacity", value: 0.5 });
       }
       const { left, right } = cstOf(t.sets), mid = midlineX(left, right);
@@ -438,17 +478,29 @@ function registerTractReview(ctx: ModuleContext): void {
       const sl = side < 0 ? left : right;
       openSide = side < 0 ? "left" : "right"; openFibers = fibersFingerprint(sl);
       const had = file.cases[key];
-      const pair = levelsFromPair(left, right, side), fan = pair ? undefined : levelsOf(sl);
-      const levels = had?.levels ?? pair ?? fan;
+      // THE LEVELS IN THE HEAD'S FRAMES when the tracts carry them: the crus found on the tracts carried into the brainstem
+      // frame, the internal capsule and the coronal on the tracts in the Talairach frame; levels Ron left are used only
+      // when they were left in the same kind of frame.
+      const F = openFrames;
+      const pair = F ? (() => { const bsInv = inv4(F.bs), talInv = inv4(F.tal);
+        const b = levelsFromPair(intoFrame(left, bsInv), intoFrame(right, bsInv), side), tl = levelsFromPair(intoFrame(left, talInv), intoFrame(right, talInv), side);
+        return b && tl ? { crus: b.crus, ic: tl.ic, coronal: tl.coronal, frame: "head-1" as const } : undefined; })() : levelsFromPair(left, right, side);
+      const fan = pair ? undefined : F ? (() => { const l = levelsOf(intoFrame(sl, inv4(F.tal))); return l ? { ...l, frame: "head-1" as const } : undefined; })() : levelsOf(sl);
+      const hadLevels = had?.levels && (had.levels.frame === "head-1") === !!F ? had.levels : undefined;
+      const levels = hadLevels ?? pair ?? fan;
       const bothThere = left.length >= 5 && right.length >= 5;
-      levelsSaid = had?.levels ? "the levels you left last time" : pair ? "" : fan ? `levels placed from this tract alone (${bothThere ? "the two tracts never got far enough apart to place them" : "the other side's is missing"}): check them` : "the levels could not be found from the tracts: please place them";
+      levelsSaid = hadLevels ? "the levels you left last time" : pair ? "" : fan ? `levels placed from this tract alone (${bothThere ? "the two tracts never got far enough apart to place them" : "the other side's is missing"}): check them` : "the levels could not be found from the tracts: please place them";
       const lv = levels ?? (() => { const zs = sl.flatMap((f) => [...f].filter((_, i) => i % 3 === 2)).sort((a, b) => a - b); const m = zs.length ? zs[zs.length >> 1] : 0; return { crus: Math.round(m - 10), ic: Math.round(m + 5), coronal: 0 }; })();
       // A remake that drew the very same fibers keeps the verdict given on the older tracts (critic 2026-10-06, R2-4).
       const carry = carriedVerdict(had, c.tracts, openFibers);
       if (carry && canWrite()) await saveCase(key, patchOf({ verdict: { verdict: carry.j.verdict!, judgedAt: carry.j.judgedAt ?? new Date().toISOString(), carriedFrom: carry.from }, ...(carry.j.note ? { note: carry.j.note } : {}) }));
       setLayout(LAYOUT.conventionalWidescreen);
-      orientView("Red", "axial"); orientView("Yellow", "axial"); orientView("Green", "coronal");
-      setSliceOffset("Red", lv.crus); setSliceOffset("Yellow", lv.ic); setSliceOffset("Green", lv.coronal);
+      if (F) {
+        setSlicePlane("Red", frameAxial(F.bs, lv.crus), LABEL.red); setSlicePlane("Yellow", frameAxial(F.tal, lv.ic), LABEL.yellow); setSlicePlane("Green", frameCoronal(F.tal, lv.coronal), LABEL.green);
+      } else {
+        orientView("Red", "axial"); orientView("Yellow", "axial"); orientView("Green", "coronal");
+        setSliceOffset("Red", lv.crus); setSliceOffset("Yellow", lv.ic); setSliceOffset("Green", lv.coronal);
+      }
       placed = { crus: +lv.crus.toFixed(1), ic: +lv.ic.toFixed(1), coronal: +lv.coronal.toFixed(1) };
       draw(sl);
       lookFrom3D("A");
@@ -475,8 +527,9 @@ function registerTractReview(ctx: ModuleContext): void {
     const points = ((node?.controlPoints as { position: [number, number, number] }[] | undefined) ?? []).map((c) => c.position);
     if (id) live.write({ op: "del", id });
     if (keep && side && points.length >= 2) {
-      const z = sliceOffset("Red") ?? points[0][2];
-      await saveCase(openKey, patchOf({ crusBorder: { side, points, z: +z.toFixed(1), drawnAt: new Date().toISOString() } }));
+      const off = sliceOffset("Red") ?? points[0][2], F = openFrames;
+      const z = F ? heightOf(F.bs, 2, off) : off;
+      await saveCase(openKey, patchOf({ crusBorder: { side, points, z: +z.toFixed(1), drawnAt: new Date().toISOString(), ...(F ? { plane: frameAxial(F.bs, z) } : {}) } }));
       drawDots();
       say(`The ${side} crus border is saved with the case.`);
     } else if (keep) say("The border needs at least two points; nothing was saved.");
@@ -484,8 +537,13 @@ function registerTractReview(ctx: ModuleContext): void {
   }
   /** How many of a side's crossings at the border's level lie dorsal to it. */
   function borderCount(side: "left" | "right", b: CrusBorder): { dorsal: number; of: number } {
-    const cs = sliceCrossings([openCst[side]], { origin: [0, 0, b.z], normal: [0, 0, 1] }).map((c) => [c.p[0], c.p[1]] as [number, number]);
-    return { dorsal: dorsalTo(b.points.map((p) => [p[0], p[1]] as [number, number]), cs), of: cs.length };
+    // On the plane it was drawn on: the head frame's (in-plane coordinates; its y axis is the head's front) or the
+    // scanner's axial at z.
+    const P = b.plane;
+    const cs = P ? sliceCrossings([openCst[side]], { origin: [P[3], P[7], P[11]], normal: [P[2], P[6], P[10]] }).map((c) => inPlane(P, c.p))
+      : sliceCrossings([openCst[side]], { origin: [0, 0, b.z], normal: [0, 0, 1] }).map((c) => [c.p[0], c.p[1]] as [number, number]);
+    const line = P ? b.points.map((p) => inPlane(P, p)) : b.points.map((p) => [p[0], p[1]] as [number, number]);
+    return { dorsal: dorsalTo(line, cs), of: cs.length };
   }
 
   async function judge(verdict: NonNullable<Judgment["verdict"]>): Promise<void> {
@@ -521,7 +579,7 @@ function registerTractReview(ctx: ModuleContext): void {
     if (c && openPatient && hasCase()) {
       const here = shell.section(root, `2 · This case`, { band: "green", open: true, note: c.patient });
       const p = document.createElement("p"); p.className = "sl-hint";
-      p.textContent = `The ${openSide} corticospinal tract. Red view: axial at the cerebral peduncle; yellow: axial at the internal capsule; green: coronal through the tract; 3D from the front. Move a slider when a level is off: the level you leave is kept for next time.${levelsSaid ? ` (${levelsSaid[0].toUpperCase()}${levelsSaid.slice(1)}.)` : ""}`;
+      p.textContent = `The ${openSide} corticospinal tract. ${openFrames ? "In the head's own frames: red view, the cerebral peduncle on the brainstem's plane (the pontomesencephalic junction's), colored in that frame; yellow, the internal capsule on the Talairach (AC-PC) plane; green, coronal in that frame" : "Red view: axial at the cerebral peduncle; yellow: axial at the internal capsule; green: coronal through the tract"}; 3D from the front. Move a slider when a level is off: the level you leave is kept for next time.${levelsSaid ? ` (${levelsSaid[0].toUpperCase()}${levelsSaid.slice(1)}.)` : ""}`;
       here.append(p);
       const v = shell.section(root, "3 · Verdict", { band: "yellow", open: true });
       if (fileProblem) {
