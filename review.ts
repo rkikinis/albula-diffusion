@@ -17,7 +17,7 @@ import {
   sliceOffset, sliceOrientation, writeDatabaseFile, startPlacing, placingMarkupId, endPlacing, setSlicePlane, type DatabaseSeries, type ModuleContext, type ZarrDesc,
 } from "albula";
 import { isTumorName } from "./face.ts";
-import { b0Path, colorFaBrainstemPath, colorFaPath, dicomToTracts, type TractSetData } from "./tracts-dicom.ts";
+import { b0Path, colorFaBrainstemPath, colorFaPath, colorFaTalairachPath, dicomToTracts, type TractSetData } from "./tracts-dicom.ts";
 import { apply4, inv4, mul4, type M4 } from "./head-frame.ts";
 import { crossingOutlines, sliceCrossings } from "./tract-slice.ts";
 
@@ -151,6 +151,12 @@ export interface Review {
   /** The border between each crus and the substantia nigra as Ron drew it on the peduncle slice (RAS points, the slice's
    *  height), for counting the fibers dorsal to it (2026-10-06: "I could draw a line to separate the crus from sn"). */
   crusBorder?: Partial<Record<"left" | "right", CrusBorder>>;
+  /** Levels and borders in the head's frames (head-frame.ts), kept apart from the scanner's above so neither overwrites
+   *  the other (critic 2026-10-07, findings 1 and 10): Ron's borders of 2026-10-06 were drawn on scanner slices. */
+  frameLevels?: Levels;
+  frameBorder?: Partial<Record<"left" | "right", CrusBorder>>;
+  /** Borders replaced by a redraw, oldest first: a line Ron drew is never thrown away. */
+  borderHistory?: ({ side: "left" | "right" } & CrusBorder)[];
 }
 export interface CrusBorder { points: [number, number, number][]; z: number; drawnAt: string;
   /** The slice the border was drawn on (its sliceToRAS), when it was a head-frame plane; without it, the scanner's axial at z. */
@@ -178,9 +184,17 @@ export function mergeCase(onDisk: ReviewFile, key: string, p: CasePatch): Review
   if (p.fibers) j.fibers = p.fibers;
   if (p.verdict) { j.verdict = p.verdict.verdict; j.judgedAt = p.verdict.judgedAt; if (p.verdict.carriedFrom) j.carriedFrom = p.verdict.carriedFrom; else delete j.carriedFrom; }
   if (p.note !== undefined) { if (p.note) j.note = p.note; else delete j.note; }
-  const levels = p.levels ?? had?.levels;
-  const crusBorder = p.crusBorder ? { ...(had?.crusBorder ?? {}), [p.crusBorder.side]: { points: p.crusBorder.points, z: p.crusBorder.z, drawnAt: p.crusBorder.drawnAt } } : had?.crusBorder;
-  const rec: Review = { patient: p.patient, side: p.side, ...(levels ? { levels } : {}), judgments: { ...(had?.judgments ?? {}), [p.tracts]: j }, ...(crusBorder ? { crusBorder } : {}) };
+  // Levels and borders go to the scanner's or the frames' fields by what they are; a replaced border goes to the history.
+  const inFrame = p.levels?.frame === "head-1";
+  const levels = p.levels && !inFrame ? p.levels : had?.levels, frameLevels = p.levels && inFrame ? p.levels : had?.frameLevels;
+  let crusBorder = had?.crusBorder, frameBorder = had?.frameBorder, borderHistory = had?.borderHistory;
+  if (p.crusBorder) {
+    const { side, ...b } = p.crusBorder, key = b.plane ? "frameBorder" : "crusBorder", before = had?.[key]?.[side];
+    if (before) borderHistory = [...(borderHistory ?? []), { side, ...before }];
+    if (b.plane) frameBorder = { ...(frameBorder ?? {}), [side]: b }; else crusBorder = { ...(crusBorder ?? {}), [side]: b };
+  }
+  const rec: Review = { patient: p.patient, side: p.side, ...(levels ? { levels } : {}), ...(frameLevels ? { frameLevels } : {}), judgments: { ...(had?.judgments ?? {}), [p.tracts]: j },
+    ...(crusBorder ? { crusBorder } : {}), ...(frameBorder ? { frameBorder } : {}), ...(borderHistory ? { borderHistory } : {}) };
   return { version: 2, cases: { ...onDisk.cases, [key]: rec } };
 }
 
@@ -366,7 +380,7 @@ function registerTractReview(ctx: ModuleContext): void {
       // Ron's crus borders, on the view whose level they were drawn at.
       // A border is drawn on the view whose plane it was drawn on (the head frame's: the same normal and offset; the
       // scanner's: an axial view at its z).
-      const borders = Object.values(file.cases[openKey]?.crusBorder ?? {}).filter((b) => {
+      const borders = Object.values((openFrames ? file.cases[openKey]?.frameBorder : file.cases[openKey]?.crusBorder) ?? {}).filter((b) => {
         if (!b) return false;
         if (b.plane) { const P = b.plane, pn: [number, number, number] = [P[2], P[6], P[10]], po = P[3] * pn[0] + P[7] * pn[1] + P[11] * pn[2], dot = pn[0] * nrm[0] + pn[1] * nrm[1] + pn[2] * nrm[2];
           return dot > 0.999 && Math.abs(po - d) < 1.5; }
@@ -383,7 +397,7 @@ function registerTractReview(ctx: ModuleContext): void {
   });
 
   async function loadColorFA(tracts: string, name: string): Promise<string | undefined> {
-    return await loadStored(colorFaPath(tracts), name, true);
+    return await loadStored(openFrames ? colorFaTalairachPath(tracts) : colorFaPath(tracts), name, true);
   }
   /** A volume the import job stored beside the tracts (the Color FA, packed as RGB; the b = 0 image, plain). */
   async function loadStored(path: string, name: string, rgb: boolean): Promise<string | undefined> {
@@ -485,8 +499,12 @@ function registerTractReview(ctx: ModuleContext): void {
       const pair = F ? (() => { const bsInv = inv4(F.bs), talInv = inv4(F.tal);
         const b = levelsFromPair(intoFrame(left, bsInv), intoFrame(right, bsInv), side), tl = levelsFromPair(intoFrame(left, talInv), intoFrame(right, talInv), side);
         return b && tl ? { crus: b.crus, ic: tl.ic, coronal: tl.coronal, frame: "head-1" as const } : undefined; })() : levelsFromPair(left, right, side);
-      const fan = pair ? undefined : F ? (() => { const l = levelsOf(intoFrame(sl, inv4(F.tal))); return l ? { ...l, frame: "head-1" as const } : undefined; })() : levelsOf(sl);
-      const hadLevels = had?.levels && (had.levels.frame === "head-1") === !!F ? had.levels : undefined;
+      // The fallback in each frame on its own (critic 2026-10-07, finding 2: the crus height of the Talairach frame used in
+      // the brainstem frame put the red view 6-46 mm off): each frame's pair rule, else its fan rule.
+      const fan = pair ? undefined : F ? (() => { const bsInv = inv4(F.bs), talInv = inv4(F.tal), slB = intoFrame(sl, bsInv), slT = intoFrame(sl, talInv);
+        const b = levelsFromPair(intoFrame(left, bsInv), intoFrame(right, bsInv), side) ?? levelsOf(slB), tl = levelsFromPair(intoFrame(left, talInv), intoFrame(right, talInv), side) ?? levelsOf(slT);
+        return b && tl ? { crus: b.crus, ic: tl.ic, coronal: tl.coronal, frame: "head-1" as const } : undefined; })() : levelsOf(sl);
+      const hadLevels = F ? had?.frameLevels : had?.levels;
       const levels = hadLevels ?? pair ?? fan;
       const bothThere = left.length >= 5 && right.length >= 5;
       levelsSaid = hadLevels ? "the levels you left last time" : pair ? "" : fan ? `levels placed from this tract alone (${bothThere ? "the two tracts never got far enough apart to place them" : "the other side's is missing"}): check them` : "the levels could not be found from the tracts: please place them";
@@ -617,8 +635,13 @@ function registerTractReview(ctx: ModuleContext): void {
       const hint = document.createElement("p"); hint.className = "sl-hint";
       hint.textContent = "Optional: draw the border between each crus and the substantia nigra on the red view; the fibers of that side dorsal to your line are counted.";
       cb.append(hint);
+      if (openFrames && (r?.crusBorder?.left || r?.crusBorder?.right)) {
+        const old = document.createElement("p"); old.className = "sl-hint";
+        old.textContent = "Your lines drawn on the scanner's slices are kept in the file; these views are in the head's own frame, so they are not shown here.";
+        cb.append(old);
+      }
       for (const sd of ["left", "right"] as const) {
-        const b = r?.crusBorder?.[sd], line = document.createElement("div"); line.style.cssText = "display:flex;gap:6px;align-items:center;margin:4px 0";
+        const b = (openFrames ? r?.frameBorder : r?.crusBorder)?.[sd], line = document.createElement("div"); line.style.cssText = "display:flex;gap:6px;align-items:center;margin:4px 0";
         const btn = document.createElement("button");
         btn.textContent = drawing === sd ? "Done" : b ? `Redraw the ${sd} border` : `Draw the ${sd} border`;
         btn.title = drawing === sd ? "Take the line you placed." : `Place points along the border between the ${sd} crus and the substantia nigra in the red view.`;
@@ -627,7 +650,7 @@ function registerTractReview(ctx: ModuleContext): void {
         line.append(btn);
         if (drawing === sd) { const cancel = document.createElement("button"); cancel.textContent = "Cancel"; cancel.onclick = () => { void finishBorder(false); }; line.append(cancel); }
         const info = document.createElement("span"); info.className = "sl-hint";
-        if (b) { const n = borderCount(sd, b); info.textContent = `${n.dorsal} of ${n.of} crossings dorsal (S ${b.z} mm)`; }
+        if (b) { const n = borderCount(sd, b); info.textContent = `${n.dorsal} of ${n.of} crossings dorsal (${b.plane ? `brainstem plane, ${b.z} mm` : `S ${b.z} mm`})`; }
         line.append(info); cb.append(line);
       }
     }

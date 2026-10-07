@@ -34,8 +34,10 @@ const MODEL = {
 const DETERMINISTIC = { CodeValue: "113211", CodingSchemeDesignator: "DCM", CodeMeaning: "Deterministic" };
 /** Where the direction-colored map stored with a tracts object lives, relative to the database's folder (the import job
  *  writes it, the Tract review reads it; Contents/docs/TRACT-REVIEW.md). */
-/** Colored in the head's Talairach frame when the tracts carry one (head-frame.ts), else the scanner's. */
+/** The scanner's colors (red = the scanner's left-right): its meaning never changes. */
 export const colorFaPath = (tractsSeriesUID: string) => `SlicerAlbula-Cache/colorfa-${tractsSeriesUID}.nrrd`;
+/** The same map colored in the head's Talairach frame (head-frame.ts), when the tracts carry one. */
+export const colorFaTalairachPath = (tractsSeriesUID: string) => `SlicerAlbula-Cache/colorfa-talairach-${tractsSeriesUID}.nrrd`;
 /** The same map colored in the head's brainstem frame (the crus is judged in it). */
 export const colorFaBrainstemPath = (tractsSeriesUID: string) => `SlicerAlbula-Cache/colorfa-brainstem-${tractsSeriesUID}.nrrd`;
 /** The b = 0 image beside them (Ron, 2026-10-06: "substantia nigra should be visible on the B0 images, which are heavily

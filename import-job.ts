@@ -26,7 +26,7 @@ import { SHORT } from "./tractcloud/name-tracts.ts";
 import { tractColor, TRACT_COLORS_VERSION } from "./tractcloud/tract-colors.ts";
 import type { TractCloudModel } from "./tractcloud/tractcloud.ts";
 import type { RapidParcModel } from "./rapidparc/rapidparc.ts";
-import { b0Path, colorFaBrainstemPath, colorFaPath, dicomToTracts, tractsToDicom, UNNAMED, type TractSetData } from "./tracts-dicom.ts";
+import { b0Path, colorFaBrainstemPath, colorFaPath, colorFaTalairachPath, dicomToTracts, tractsToDicom, UNNAMED, type TractSetData } from "./tracts-dicom.ts";
 import { alignTemplate, frames, HEAD_FRAME_RULE, TALAIRACH_RISE_DEG, type M4 } from "./head-frame.ts";
 import type { Grid3 } from "./registration.ts";
 
@@ -200,14 +200,14 @@ export async function planStudy(dbDir: string, rows: IndexSeries[], study: strin
 }
 
 /** The stored tracts objects of a diffusion series, with what made them (from the index as it is NOW: finding 8). */
-export async function storedTracts(dbDir: string, dwiUID: string): Promise<{ seriesUID: string; seriesNumber: number; rules?: Record<string, unknown>; inputs?: Partial<CaseInputs>; made?: string }[]> {
+export async function storedTracts(dbDir: string, dwiUID: string): Promise<{ seriesUID: string; seriesNumber: number; framed?: boolean; rules?: Record<string, unknown>; inputs?: Partial<CaseInputs>; made?: string }[]> {
   const rows = await indexSeries(dbDir), study = rows.find((y) => y.seriesUID === dwiUID)?.studyUID;
-  const out: { seriesUID: string; seriesNumber: number; rules?: Record<string, unknown>; inputs?: Partial<CaseInputs>; made?: string }[] = [];
+  const out: { seriesUID: string; seriesNumber: number; framed?: boolean; rules?: Record<string, unknown>; inputs?: Partial<CaseInputs>; made?: string }[] = [];
   for (const r of rows.filter((x) => x.description === TRACTS_DESCRIPTION && x.studyUID === study)) {
     for (const p of await seriesFilePaths(dbDir, r.seriesUID)) {
       try {
         const t = await dicomToTracts(await Deno.readFile(p));
-        if (t.referencedSeries === dwiUID) out.push({ seriesUID: r.seriesUID, seriesNumber: Number(r.seriesNumber) || 0, rules: t.provenance?.rules as Record<string, unknown> | undefined, inputs: t.provenance?.inputs as Partial<CaseInputs> | undefined, made: String(t.provenance?.made ?? "") });
+        if (t.referencedSeries === dwiUID) out.push({ seriesUID: r.seriesUID, seriesNumber: Number(r.seriesNumber) || 0, framed: !!t.provenance?.headFrame, rules: t.provenance?.rules as Record<string, unknown> | undefined, inputs: t.provenance?.inputs as Partial<CaseInputs> | undefined, made: String(t.provenance?.made ?? "") });
       } catch { /* not a readable tracts object of ours */ }
     }
   }
@@ -335,9 +335,11 @@ export async function makeTracts(dbDir: string, dbId: string, server: string, pl
   // CURRENT = the same code, rules and inputs AND its Color FA beside it (critic 2026-10-06, finding 16: a job stopped
   // between storing the tracts and the map left tracts that counted as current forever, without the map).
   // ... and the b = 0 image beside it (2026-10-06: the substantia nigra for the tract review).
-  const hasMap = async (uid: string) => (await Promise.all([colorFaPath(uid), colorFaBrainstemPath(uid), b0Path(uid)].map((p) => Deno.stat(`${dbDir}/${p}`).then(() => true, () => false)))).every(Boolean);
+  // ... and, when the case was made with the head's frames, the two maps colored in them.
+  const exists = (p: string) => Deno.stat(`${dbDir}/${p}`).then(() => true, () => false);
+  const hasMap = async (uid: string, framed: boolean) => (await Promise.all([colorFaPath(uid), b0Path(uid), ...(framed ? [colorFaTalairachPath(uid), colorFaBrainstemPath(uid)] : [])].map(exists))).every(Boolean);
   let current: (typeof stored)[number] | undefined;
-  for (const s of stored) if (isCurrent(s, rules, inputs) && await hasMap(s.seriesUID)) { current = s; break; }
+  for (const s of stored) if (isCurrent(s, rules, inputs) && await hasMap(s.seriesUID, !!s.framed)) { current = s; break; }
   if (current && !opts.force) return { state: "current", seriesUID: current.seriesUID };
   // QUALITY FIRST: the tracking's brain is SynthStrip's on the T1; without the T1 the case waits for it.
   if (!plan.t1) return { state: "waiting", why: "waiting for an MRI of the anatomy named as a T1 (same study or patient)" };
@@ -365,18 +367,24 @@ export async function makeTracts(dbDir: string, dbId: string, server: string, pl
   // On the T1's axes when aligned: the streamlines are in the T1's space, so the T1's frame of reference.
   const aligned = !!r.alignment && !r.alignment.doubt;
   const forUID = String(((aligned ? plan.t1.header : plan.dwi.header)["00200052"]?.Value?.[0]) ?? "");
-  const seconds = (performance.now() - t0) / 1000;
   // THE HEAD'S OWN FRAME (head-frame.ts; Ron, 2026-10-06: "You must use anatomic orientation, not scanner orientation"):
   // the template aligned to the T1, weighted to the diencephalon and the midbrain; the two frames go into the record, and
   // the direction-colored maps are colored in them.
   let headFrame: { rule: number; templateToPatient: M4; talairach: M4; brainstem: M4; stages: { name: string; cost: number; costAtStart: number }[]; seconds: number } | undefined;
-  if (opts.template) {
+  // Only when the tracts are on the T1's axes (the frame is the T1's), and never at the cost of the case: a frame that
+  // cannot be found leaves the case without one, said (critic 2026-10-07, finding 8).
+  let frameNote = "";
+  if (opts.template && aligned) {
     onProgress?.("finding the head's own frame (the template on the T1, deep structures first)");
-    const h0 = performance.now(), t1g = { dims: t1v.dims as [number, number, number], ijkToRAS: t1v.ijkToRAS, data: t1v.data as ArrayLike<number> };
-    const fit = await alignTemplate(t1g, opts.template.t1, opts.template.brain), fr = frames(fit, TALAIRACH_RISE_DEG);
-    headFrame = { rule: HEAD_FRAME_RULE, templateToPatient: fit.templateToPatient, talairach: fr.talairach.toPatient, brainstem: fr.brainstem.toPatient,
-      stages: fit.stages.map((x) => ({ name: x.name, cost: +x.cost.toFixed(4), costAtStart: +x.costAtStart.toFixed(4) })), seconds: +((performance.now() - h0) / 1000).toFixed(1) };
-  }
+    try {
+      const h0 = performance.now(), t1g = { dims: t1v.dims as [number, number, number], ijkToRAS: t1v.ijkToRAS, data: t1v.data as ArrayLike<number> };
+      const fit = await alignTemplate(t1g, opts.template.t1, opts.template.brain), fr = frames(fit, TALAIRACH_RISE_DEG);
+      headFrame = { rule: HEAD_FRAME_RULE, templateToPatient: fit.templateToPatient, talairach: fr.talairach.toPatient, brainstem: fr.brainstem.toPatient,
+        stages: fit.stages.map((x) => ({ name: x.name, cost: +x.cost.toFixed(4), costAtStart: +x.costAtStart.toFixed(4) })), seconds: +((performance.now() - h0) / 1000).toFixed(1) };
+    } catch (e) { frameNote = `; the head's own frame could not be found (${(e as Error).message})`; }
+  } else if (opts.template) frameNote = "; no head frame (the scan is not on the T1's axes)";
+  // The case's time includes the frame (critic 2026-10-07, finding 9).
+  const seconds = (performance.now() - t0) / 1000;
   const provenance = { rules, inputs, made: new Date().toISOString(), seconds: +seconds.toFixed(1), stages: stageText(stages), ...(headFrame ? { headFrame } : {}),
     streamlines: r.sl.length, onePointLeftOut: r.sl.filter((p) => p.length < 6).length, corrected: r.corrected, alignedToT1: aligned,
     trackingRuleApplied: r.rule.id, motionRuleApplied: r.prep.motionRule, ...(r.prep.directions ? { directions: { rule: r.prep.directions.rule, verdict: r.prep.directions.verdict, used: r.prep.directions.best.label, Q: r.prep.directions.best.Q, recordOverBest: r.prep.directions.recordOverBest } } : {}), ...(r.alignment ? { alignment: r.alignment } : {}), brain: r.fit.seedMaskRule ?? r.fit.maskRule };
@@ -389,7 +397,7 @@ export async function makeTracts(dbDir: string, dbId: string, server: string, pl
       model: "multi", provenance, seriesDescription: TRACTS_DESCRIPTION, seriesNumber });
   // A streamline of one point (a seed that stopped at once) has no line to store; the writer leaves it out, and says so.
   const onePoint = r.sl.length - written.tracks;
-  const said = `${r.sl.length} streamlines (${written.tracks} stored${onePoint ? `, ${onePoint} of a single point left out` : ""}), ${named} named into ${sets.length - (sets.some((s) => s.label === UNNAMED) ? 1 : 0)} tracts, in ${seconds.toFixed(0)} s`;
+  const said = `${r.sl.length} streamlines (${written.tracks} stored${onePoint ? `, ${onePoint} of a single point left out` : ""}), ${named} named into ${sets.length - (sets.some((s) => s.label === UNNAMED) ? 1 : 0)} tracts, in ${seconds.toFixed(0)} s${headFrame ? ` (the head's frame ${headFrame.seconds.toFixed(0)} s of it)` : ""}${frameNote}`;
   const out = { seriesUID: written.seriesInstanceUID, streamlines: r.sl.length, stored: written.tracks, named, seconds, said };
   if (opts.dryRun) return { state: "would be made", ...out };
   const now = new Date(), d2 = (n: number) => String(n).padStart(2, "0");
@@ -403,15 +411,20 @@ export async function makeTracts(dbDir: string, dbId: string, server: string, pl
   // tracts are on, after every correction, so a viewer needs no fit. A display aid, regenerable from the scan: the
   // database's cache folder, named by the tracts' series. Its failure does not undo the tracts.
   try {
-    await writeColorFA(dbDir, written.seriesInstanceUID, r.fit, headFrame?.talairach);
-    await writeColorFA(dbDir, written.seriesInstanceUID, r.fit, headFrame?.brainstem, colorFaBrainstemPath(written.seriesInstanceUID));
+    // THE PLAIN MAP KEEPS ITS MEANING -- the scanner's colors -- and the frames' maps have names of their own (critic
+    // 2026-10-07, finding 4: an older app read the Talairach-colored map as the scanner's under the same name).
+    await writeColorFA(dbDir, written.seriesInstanceUID, r.fit);
+    if (headFrame) {
+      await writeColorFA(dbDir, written.seriesInstanceUID, r.fit, headFrame.talairach, colorFaTalairachPath(written.seriesInstanceUID));
+      await writeColorFA(dbDir, written.seriesInstanceUID, r.fit, headFrame.brainstem, colorFaBrainstemPath(written.seriesInstanceUID));
+    }
     await writeB0(dbDir, written.seriesInstanceUID, r.dwi, r.fit);
   }
   catch (e) { return { state: "made", ...out, said: `${out.said}; the direction-colored map or the b = 0 image was not stored (${(e as Error).message})` }; }
   return { state: "made", ...out };
 }
 
-export { b0Path, colorFaBrainstemPath, colorFaPath };
+export { b0Path, colorFaBrainstemPath, colorFaPath, colorFaTalairachPath };
 
 /** The Color FA of `fit` (tensor.ts colorFA: FA times the principal direction's components), one byte a color packed
  *  into one float sample as the slice views draw it (packRGB24, the Diffusion module's own form), as a gzipped NRRD. */

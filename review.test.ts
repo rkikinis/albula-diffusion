@@ -142,3 +142,19 @@ Deno.test("the head-frame planes: an axial at height h and a coronal at y, and c
   const back = intoFrame([new Float32Array(p)], (await import("./registration.ts")).inv4(F))[0];
   assert(Math.abs(back[0] - 3) < 1e-4 && Math.abs(back[1] - 4) < 1e-4 && Math.abs(back[2] - 7) < 1e-4);
 });
+
+Deno.test("frame borders and levels are kept apart from the scanner's; a redraw keeps the old line in the history (critic 2026-10-07)", () => {
+  const onDisk: ReviewFile = { version: 2, cases: { a: { patient: "A", side: "left", levels: { crus: 1, ic: 2, coronal: 3 }, judgments: {},
+    crusBorder: { left: { points: [[1, 2, 3], [4, 5, 3]], z: 3, drawnAt: "scanner" } } } } };
+  const plane = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, -20, 0, 0, 0, 1];
+  const base = { patient: "A", side: "left" as const, tracts: "t" };
+  const m = mergeCase(onDisk, "a", { ...base, crusBorder: { side: "left", points: [[0, 0, -20], [3, 1, -20]], z: -20, drawnAt: "frame", plane } });
+  assertEquals(m.cases.a.crusBorder!.left!.drawnAt, "scanner", "the scanner line is untouched");
+  assertEquals(m.cases.a.frameBorder!.left!.plane, plane, "the frame line keeps its plane");
+  const m2 = mergeCase(m, "a", { ...base, crusBorder: { side: "left", points: [[1, 1, -20], [4, 2, -20]], z: -20, drawnAt: "frame2", plane } });
+  assertEquals(m2.cases.a.frameBorder!.left!.drawnAt, "frame2");
+  assertEquals(m2.cases.a.borderHistory!.map((b) => b.drawnAt), ["frame"], "the replaced line is kept");
+  const m3 = mergeCase(m2, "a", { ...base, levels: { crus: -18, ic: 9, coronal: 2, frame: "head-1" } });
+  assertEquals(m3.cases.a.levels, { crus: 1, ic: 2, coronal: 3 }, "the scanner levels stay");
+  assertEquals(m3.cases.a.frameLevels!.crus, -18);
+});
