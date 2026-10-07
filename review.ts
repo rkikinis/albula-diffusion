@@ -140,7 +140,10 @@ export function levelsFromPair(left: Float32Array[], right: Float32Array[], judg
 /** One case's verdict on one version of its tracts (Ron's "6": a remake of the tracts keeps the verdicts on the old ones).
  *  `fibers` fingerprints the streamlines judged, so a remake that drew the very same ones carries the verdict over
  *  (`carriedFrom`, the older tracts series; critic 2026-10-06, R2-4). */
-export interface Judgment { verdict?: "acceptable" | "not acceptable"; note?: string; judgedAt?: string; rules?: Record<string, unknown>; fibers?: string; carriedFrom?: string }
+export interface Judgment { verdict?: "acceptable" | "not acceptable"; note?: string; judgedAt?: string; rules?: Record<string, unknown>; fibers?: string; carriedFrom?: string;
+  /** What the tract looked like when judged: how many fibers were drawn of how many, and which filters were on (critic
+   *  2026-10-07, cst-gates finding 4). */
+  shown?: { fibers: number; of: number; withoutBorderDorsal: boolean; automaticGates: boolean } }
 /** One case's record in tract-review.json (version 2): the side, the levels Ron left (kept across remakes of the tracts:
  *  they are anatomy), and a judgment per tracts series. */
 export interface Review {
@@ -161,14 +164,18 @@ export interface Review {
 }
 export interface CrusBorder { points: [number, number, number][]; z: number; drawnAt: string;
   /** The slice the border was drawn on (its sliceToRAS), when it was a head-frame plane; without it, the scanner's axial at z. */
-  plane?: number[] }
+  plane?: number[];
+  /** Which way the plane's x axis points: "left" (radiological, since 2026-10-07 morning) or "right" (the borders Ron drew
+   *  before the fix; set on them in the file). The review reads in-plane coordinates from the plane itself, so either
+   *  works; tools that assume one convention read this (critic 2026-10-07, cst-gates finding 8). */
+  planeX?: "left" | "right" }
 export interface ReviewFile { version: 2; cases: Record<string, Review> }
 
 /** WHAT ONE ACTION CHANGES in a case: a verdict, a note, or the levels -- never the whole record. */
 export interface CasePatch {
   patient: string; side: "left" | "right"; tracts: string;
   levels?: Levels; rules?: Record<string, unknown>; fibers?: string;
-  verdict?: { verdict: NonNullable<Judgment["verdict"]>; judgedAt: string; carriedFrom?: string };
+  verdict?: { verdict: NonNullable<Judgment["verdict"]>; judgedAt: string; carriedFrom?: string; shown?: Judgment["shown"] };
   /** A note; "" removes it; undefined leaves it. */
   note?: string;
   /** A crus border drawn (one side). */
@@ -183,7 +190,7 @@ export function mergeCase(onDisk: ReviewFile, key: string, p: CasePatch): Review
   const j: Judgment = { ...(had?.judgments?.[p.tracts] ?? {}) };
   if (p.rules) j.rules = p.rules;
   if (p.fibers) j.fibers = p.fibers;
-  if (p.verdict) { j.verdict = p.verdict.verdict; j.judgedAt = p.verdict.judgedAt; if (p.verdict.carriedFrom) j.carriedFrom = p.verdict.carriedFrom; else delete j.carriedFrom; }
+  if (p.verdict) { j.verdict = p.verdict.verdict; j.judgedAt = p.verdict.judgedAt; if (p.verdict.carriedFrom) j.carriedFrom = p.verdict.carriedFrom; else delete j.carriedFrom; if (p.verdict.shown) j.shown = p.verdict.shown; else delete j.shown; }
   if (p.note !== undefined) { if (p.note) j.note = p.note; else delete j.note; }
   // Levels and borders go to the scanner's or the frames' fields by what they are; a replaced border goes to the history.
   const inFrame = p.levels?.frame === "head-1";
@@ -304,15 +311,18 @@ function registerTractReview(ctx: ModuleContext): void {
   /** THE AUTOMATIC ANATOMICAL GATES (cst-gates.ts; Ron, 2026-10-07: "Now we need to automate. I am not a scalable
    *  resource"): on in frame cases; the crus gate on the red view's slice, the posterior-limb gate on the yellow's. */
   const loadedMaps = new Map<string, PackedColorMap>();
-  let autoGates = true, gateCache: { key: string; r: GateResult } | undefined;
+  // OFF BY DEFAULT (critic 2026-10-07, cst-gates findings 1-2: a 1-2 mm move of the crus slice can halve or empty the
+  // gated tract, and a crus found too small is applied as found): an option to look at, not yet a result.
+  let autoGates = false, gateCache: { key: string; r: GateResult } | undefined;
   const maps: { bs?: PackedColorMap; tal?: PackedColorMap } = {};
   function gated(sl: Float32Array[]): { sl: Float32Array[]; gate?: GateResult } {
     const F = openFrames;
     if (!autoGates || !F || !maps.bs || !maps.tal) return { sl };
+    if (sliceOrientation("Red") !== LABEL.red || sliceOrientation("Yellow") !== LABEL.yellow) return { sl };   // finding 11
     const r0 = sliceOffset("Red"), y0 = sliceOffset("Yellow");
     if (r0 === undefined || y0 === undefined) return { sl };
     const hr = +heightOf(F.bs, 2, r0).toFixed(1), hy = +heightOf(F.tal, 2, y0).toFixed(1);
-    const key = `${openKey}|${openSide}|${sl.length}|${hr}|${hy}`;
+    const key = `${openKey}|${openSide}|${fibersFingerprint(sl)}|${hr}|${hy}`;   // the set, not its size (finding 10)
     if (gateCache?.key !== key) gateCache = { key, r: gateTract(sl, openSide === "left" ? -1 : 1, frameAxial(F.bs, hr), maps.bs, frameAxial(F.tal, hy), maps.tal) };
     return { sl: gateCache.r.kept, gate: gateCache.r };
   }
@@ -406,6 +416,10 @@ function registerTractReview(ctx: ModuleContext): void {
   const hasCase = () => [...live.nodes.values()].some((n) => n.type === "image");
   const sceneHasData = () => [...live.nodes.values()].some((n) => n.type === "image" || n.type === "segmentation");
 
+  /** What draw() last showed, with its filters' counts: the panel's numbers are these, never a fresh computation that the
+   *  drawing has not caught up with (critic 2026-10-07, cst-gates finding 3). */
+  let lastShown: ReturnType<typeof shownTract> | undefined;
+  const drawShown = () => { lastShown = shownTract(); draw(lastShown.sl); };
   function draw(sl: Float32Array[]): void {
     const view = live.view; if (!view) return;
     const old = field; field = undefined; drawn = sl;
@@ -573,7 +587,7 @@ function registerTractReview(ctx: ModuleContext): void {
       }
       placed = { crus: +lv.crus.toFixed(1), ic: +lv.ic.toFixed(1), coronal: +lv.coronal.toFixed(1) };
       fullTract = sl;
-      draw(shownTract().sl);
+      drawShown();
       lookFrom3D("A");
       const why = tumorX === undefined ? (patientSegs.length ? "no outline named as a tumor was found for this patient, so the left is shown" : "no tumor outline for this patient, so the left is shown") : `the tumor is on the ${side < 0 ? "right" : "left"}`;
       say([`${c.patient}: the ${side < 0 ? "left" : "right"} corticospinal tract (${why}), ${sl.length.toLocaleString()} fibers`, ...(mapId ? [] : ["the direction-colored map was not stored with these tracts"]), ...(b0Id ? [] : ["no b = 0 image was stored with these tracts"]), ...(levelsSaid ? [levelsSaid] : []), ...(r.failures.length ? [`not everything loaded: ${r.failures[0]}`] : [])].join("; ") + ".");
@@ -601,8 +615,8 @@ function registerTractReview(ctx: ModuleContext): void {
       keepLevels();   // the level the border was drawn at is the case's level too (PAT31, 2026-10-07: it was kept only on leaving)
       const off = sliceOffset("Red") ?? points[0][2], F = openFrames;
       const z = F ? heightOf(F.bs, 2, off) : off;
-      await saveCase(openKey, patchOf({ crusBorder: { side, points, z: +z.toFixed(1), drawnAt: new Date().toISOString(), ...(F ? { plane: frameAxial(F.bs, z) } : {}) } }));
-      draw(shownTract().sl);
+      await saveCase(openKey, patchOf({ crusBorder: { side, points, z: +z.toFixed(1), drawnAt: new Date().toISOString(), ...(F ? { plane: frameAxial(F.bs, z), planeX: "left" as const } : {}) } }));
+      drawShown();
       say(`The ${side} crus border is saved with the case.`);
     } else if (keep) say("The border needs at least two points; nothing was saved.");
     render();
@@ -621,7 +635,8 @@ function registerTractReview(ctx: ModuleContext): void {
   async function judge(verdict: NonNullable<Judgment["verdict"]>): Promise<void> {
     if (!openKey || !openTracts || !hasCase() || !canWrite()) return;
     keepLevels();
-    await saveCase(openKey, patchOf({ verdict: { verdict, judgedAt: new Date().toISOString() } }));
+    const sh = lastShown;
+    await saveCase(openKey, patchOf({ verdict: { verdict, judgedAt: new Date().toISOString(), shown: { fibers: sh?.sl.length ?? fullTract.length, of: fullTract.length, withoutBorderDorsal: !!sh?.trim, automaticGates: !!sh?.gate } } }));
     render();
   }
 
@@ -687,18 +702,18 @@ function registerTractReview(ctx: ModuleContext): void {
       show.title = "Show or hide the yellow outline of where the tract crosses the slices; the tract in 3D is not affected.";
       show.append(box, document.createTextNode("Show the tract's outline on the slices")); cb.append(show);
       if (openFrames && maps.bs && maps.tal) {
-        const st = shownTract(), g = st.gate, lab = document.createElement("label"); lab.style.cssText = "display:flex;gap:6px;align-items:center;margin:2px 0 6px";
+        const st = lastShown ?? { sl: fullTract }, g = st.gate, lab = document.createElement("label"); lab.style.cssText = "display:flex;gap:6px;align-items:center;margin:2px 0 6px";
         const gb = document.createElement("input"); gb.type = "checkbox"; gb.checked = autoGates;
-        gb.onchange = () => { autoGates = gb.checked; draw(shownTract().sl); render(); };
+        gb.onchange = () => { autoGates = gb.checked; drawShown(); render(); };
         lab.title = "Leave out of the drawing the fibers that do not pass the crus (on the red view's slice: in the pink, in front of the green band) and the posterior limb (on the yellow view's slice: in the blue). Computed at the levels the views show; the stored tracts are not changed.";
-        lab.append(gb, document.createTextNode("Automatic anatomical gates: crus and posterior limb" + (g ? ` (${g.kept.length} kept; crus -${g.failedCrus}${g.noCrus ? ", crus not found" : ""}, limb -${g.failedLimb}${g.noLimb ? ", limb not found" : ""})` : "")));
+        lab.append(gb, document.createTextNode("Automatic anatomical gates, crus and posterior limb (experimental)" + (g ? `: ${g.kept.length} kept of ${g.kept.length + g.failedCrus + g.failedLimb}${st.trim ? " left after your border" : ""}; ${g.failedCrus} left out at the crus${g.noCrus ? " (crus not found: not applied)" : ""}, ${g.failedLimb} at the posterior limb${g.noLimb ? " (not found: not applied)" : ""}` : "")));
         cb.append(lab);
-        if (g) { const again = document.createElement("button"); again.textContent = "Gates at these levels"; again.title = "Apply the gates again at the levels the red and yellow views show now."; again.onclick = () => { gateCache = undefined; draw(shownTract().sl); render(); }; cb.append(again); }
+        if (g) { const again = document.createElement("button"); again.textContent = "Gates at these levels"; again.title = "Apply the gates again at the levels the red and yellow views show now."; again.onclick = () => { gateCache = undefined; drawShown(); render(); }; cb.append(again); }
       }
       if (borderOfSide()) {
-        const st = shownTract(), trim = document.createElement("label"); trim.style.cssText = "display:flex;gap:6px;align-items:center;margin:2px 0 6px";
+        const st = lastShown ?? { sl: fullTract }, trim = document.createElement("label"); trim.style.cssText = "display:flex;gap:6px;align-items:center;margin:2px 0 6px";
         const tb = document.createElement("input"); tb.type = "checkbox"; tb.checked = trimByBorder;
-        tb.onchange = () => { trimByBorder = tb.checked; draw(shownTract().sl); render(); };
+        tb.onchange = () => { trimByBorder = tb.checked; drawShown(); render(); };
         trim.title = "Leave out of the drawing the fibers that cross the crus slice dorsal to your border on this side; the stored tracts are not changed.";
         trim.append(tb, document.createTextNode(`Without the fibers dorsal to my ${openSide} border` + (st.trim ? ` (${st.trim.kept.length} of ${fullTract.length} kept${st.trim.notCrossing ? `, ${st.trim.notCrossing} not reaching that slice` : ""})` : "")));
         cb.append(trim);
