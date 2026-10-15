@@ -239,9 +239,10 @@ export async function brainOnT1(server: string, t1: ReadSeries, onProgress?: (li
   }
   // A STUCK SERVER, RESTARTED ONCE (Ron, 2026-10-15: "Agree" -- the first catch-up met one: it took the requests and never
   // started them; and, Ron the same day: "If the biggest danger is that you have to repeat an import, then being aggressive
-  // is not a problem"). "Stuck" is our job queued three minutes while the server runs nothing else, or our job running
-  // with no progress for two minutes (brain-mask.ts); a server busy with someone else's job is never restarted from here
-  // (critic 2026-10-06, finding 12: it may be a person's own AI run). Still stuck after that:
+  // is not a problem"). "Stuck" is our job queued three minutes, or running with no progress for two (brain-mask.ts).
+  // Since Ron's "restart but notify, if an ongoing segmentation gets killed" (2026-10-15) that holds when the server is
+  // busy with someone else's job too: the restart names what it stopped, and the top bar says it (core haversack-proxy.ts
+  // busyJobs, render/demos/jobs-line.ts). Still stuck after that:
   // the case waits, said so, and is looked at again at the next start.
   if (!r.ok && r.reason === "stuck") {
     onProgress?.("the segmentation server seemed stuck; restarting it");

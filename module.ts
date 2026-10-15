@@ -1405,7 +1405,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     if (cNow?.brain.reason === "stuck") {
       const rs = document.createElement("button");
       rs.textContent = "Restart the segmentation server";
-      rs.title = "The program that finds the brain on the MRI of the anatomy has stopped making progress. This stops it and starts it again (a minute or two); anything else waiting for it starts again from the beginning. Then press the button above again.";
+      rs.title = "The program that finds the brain on the MRI of the anatomy has stopped making progress. This stops it and starts it again (a minute or two). Anything it was doing or waiting to do stops, and the line at the top of the window names it, to be started again. Then press the button above again.";
       rs.style.cssText = "width:100%;margin:0 0 4px";
       rs.disabled = !!busy;
       rs.onclick = () => { void runAction(rs, async () => { const r = await restartSegmentationServer((l) => say(l)); say(r.ok ? `${r.message[0].toUpperCase()}${r.message.slice(1)}. Press the button above again.` : `The segmentation server could not be restarted: ${r.message}.`); if (r.ok) cNow.brain.reason = undefined; render(); }, { busyLabel: "Restarting…", doneLabel: "Restarted", failedLabel: "Did not restart" }).catch(() => {}); };
