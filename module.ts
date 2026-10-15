@@ -51,6 +51,7 @@ const ADV_MIN_FA = 0.15;
 import { DCM2NIIX_VERSION, secondOpinion, type SecondOpinion } from "./second-opinion.ts";
 import { databaseSeries, openDatabaseId } from "albula";
 import { adPath, b0Path, colorFaPath, dicomToTracts, faPath, mdPath, rdPath, UNNAMED as UNNAMED_SET } from "./tracts-dicom.ts";
+import { howMade } from "./methods.ts";
 import { byName, laterality, measure, openingWay, throughBox, toCsv, voxelsOf, type Maps, type Measures, type Way } from "./selection.ts";
 import { databaseFileUrl, nrrdDecode, nrrdGeometry, nrrdSplitHeader } from "albula";
 import { assetUrl, holdDrawing, seriesDicomFiles, startPlacing, restartSegmentationServer, startSegmentationServer, synthstripBrainMask, type BrainMaskResult } from "albula";
@@ -726,7 +727,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
   // WHICH ONE: the newest the database holds for the scan. Every object records the version that made it; none is
   // "stale" (Ron, 2026-10-14: "for reproducibility scientists would like to run a specific version of a pipeline on
   // data"): choosing among versions is the versioning design still to come.
-  const storedState = new Map<string, { state: "stored" | "none" | "unknown"; made?: string; seriesUID?: string; tracking?: number; inputs?: { partner?: string | null; t1?: string | null } }>();
+  const storedState = new Map<string, { state: "stored" | "none" | "unknown"; made?: string; seriesUID?: string; tracking?: number; rules?: Record<string, unknown>; inputs?: { partner?: string | null; t1?: string | null } }>();
   let jobBusyNow = false;
   // While a loaded scan has no stored tracts: look again every 10 s (the server may be making them right now).
   setInterval(() => {
@@ -768,7 +769,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     }
     const made = typeof t.provenance?.made === "string" ? t.provenance.made : undefined;
     const rules = t.provenance?.rules as { tracking?: number } | undefined;
-    storedState.set(scan.browserId, { state: "stored", seriesUID: at.seriesUID, made, tracking: rules?.tracking, inputs: t.provenance?.inputs as { partner?: string | null; t1?: string | null } | undefined });
+    storedState.set(scan.browserId, { state: "stored", seriesUID: at.seriesUID, made, tracking: rules?.tracking, rules: t.provenance?.rules as Record<string, unknown> | undefined, inputs: t.provenance?.inputs as { partner?: string | null; t1?: string | null } | undefined });
     return { sl, named: { tract: Int32Array.from(tract), side: Int8Array.from(side), draws: 0, seconds: 0 }, made };
   }
   // THE MAPS MADE AT IMPORT (Ron, 2026-10-14: "Why not do all proper registrations as part of the import? That would allow
@@ -900,7 +901,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
         if (stored) {
           times.track = 0; times.name = 0;
           w = { sl: stored.sl, named: stored.named, stored: true, storedInputs: storedState.get(scan.browserId)?.inputs, made: stored.made, c, times, key: "stored" };
-          say(`Using the fiber tracts made when the scan was imported${stored.made ? ` (${new Date(stored.made).toLocaleDateString()})` : ""}: ${stored.sl.length.toLocaleString()} streamlines.`);
+          say(`Using the whole brain's fiber tracts prepared for this scan: ${stored.sl.length.toLocaleString()} streamlines.`);
         } else {
           if (!c) throw new Error("the scan's maps are not made");
           releaseHold = holdJobs();
@@ -926,6 +927,15 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     return await wholeBusy;
   }
 
+  /** The stored whole-brain tracts, read once into `whole` when the scan arrives (nothing made here: no fit, no tracking). */
+  async function prefetchStored(scan: Scan): Promise<void> {
+    if (whole.has(scan.browserId) || !usesDefaults(scan) || storedState.get(scan.browserId)?.state !== "stored") return;
+    const model = await tractCloud();
+    tractCount = model.json.tracts.length;
+    const st = await loadStored(scan, model);
+    if (!st || whole.has(scan.browserId) || !scans().some((x) => x.browserId === scan.browserId)) return;
+    whole.set(scan.browserId, { sl: st.sl, named: st.named, stored: true, storedInputs: storedState.get(scan.browserId)?.inputs, made: st.made, c: computed.get(scan.browserId), times: { track: 0, name: 0 }, key: "stored" });
+  }
   /** TRACTS NEAR A SEGMENT: its voxels as the structure (the near-the-tumor list, and any segment). */
   async function makeNamedTracts(scan: Scan, target: { seg: MrsonNode; labelValue: number; label: string }) {
     const z = await fetchZarrVolumeNative(live.blobBase(), target.seg.zarr as ZarrDesc), lab = z.data;
@@ -1244,6 +1254,9 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     // The stored maps of a scan that left go with it, as the computed ones do.
     for (const [id, m] of storedMaps) if (!ids.has(id)) { for (const n of [m.fa, m.colorfa, m.b0]) if (n && live.nodes.get(n)) removeVolumeFromScene(live, n); storedMaps.delete(id); storedState.delete(id); changed = true; }
     for (const id of [...runs.keys()]) if (!ids.has(id)) runs.delete(id);
+    for (const id of [...whole.keys()]) if (!ids.has(id)) whole.delete(id);         // the whole brain's streamlines go with the scan
+    for (const id of [...mapsKept.keys()]) if (!ids.has(id)) mapsKept.delete(id);
+    for (const id of [...mapOn.keys()]) if (!ids.has(id)) mapOn.delete(id);
     for (let i = groups.length - 1; i >= 0; i--) if (!ids.has(groups[i].scan)) { groups.splice(i, 1); changed = true; }
     for (const id of [...seenScans]) if (!ids.has(id)) seenScans.delete(id);
     if (changed) redraw3d();
@@ -1294,7 +1307,22 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     if (scan) {
       const st = storedState.get(scan.browserId);
       const tl = document.createElement("div"); tl.className = "sl-hint"; tl.style.margin = "2px 0 0 22px";
-      tl.textContent = st?.state === "stored" ? `Fiber tracts: made when the scan was imported${st.made ? ` (${new Date(st.made).toLocaleDateString()})` : ""}${st.tracking ? ` · tracking rule ${st.tracking}` : ""}`
+      // WHAT, NOT WHEN (Ron, 2026-10-15: "They want to know not when things were done but what they are … For more
+      // detail and references see the help section"): the steps, each with its method (methods.ts); the date and the
+      // rule numbers in the tooltip.
+      const steps = st?.state === "stored" ? howMade(st) : [];
+      if (steps.length) {
+        const box = document.createElement("div"); box.className = "sl-hint"; box.style.margin = "4px 0 2px";
+        const head = document.createElement("div"); head.textContent = "How these fiber tracts were made"; head.style.fontWeight = "600"; box.append(head);
+        for (const line of steps) { const d = document.createElement("div"); d.textContent = `· ${line}`; d.style.paddingLeft = "8px"; box.append(d); }
+        const more = document.createElement("a"); more.href = "#"; more.textContent = "Details and references: Help";
+        more.onclick = (e) => { e.preventDefault(); let p: HTMLElement | null = root ?? null; let help: HTMLDetailsElement | null = null; while (p && !help) { help = p.querySelector("details.sl-help"); p = p.parentElement; } if (help) { help.open = true; help.scrollIntoView({ block: "start", behavior: "smooth" }); } };
+        box.append(more);
+        box.title = `Made when the scan came into the database${st?.made ? `, ${new Date(st.made).toLocaleString()}` : ""}. Rules: ${Object.entries(st?.rules ?? {}).filter(([k]) => !["code", "labeler", "synthstrip", "core", "extension"].includes(k)).map(([k, v]) => `${k} ${v}`).join(", ")}. Code: Albula ${String(st?.rules?.core ?? "?")}, diffusion extension ${String(st?.rules?.extension ?? "?")}.`;
+        caseSec.append(box);
+      }
+      tl.textContent = steps.length ? ""
+        : st?.state === "stored" ? "Fiber tracts: made when the scan came into the database"
         : jobBusyNow ? "Fiber tracts: being prepared in the background now"
         : st?.state === "none" ? "Fiber tracts: not made yet; the button below makes them (a minute or more)" : "";
       tl.title = "The whole brain's fiber tracts are found and named once, when the diffusion MRI comes into the database, so the button only has to measure them. Each set records the version of the method that made it.";
@@ -1408,6 +1436,19 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       seg.append(b);
     }
     shell.row(maps, "Show").append(seg);
+    // THE SCAN AS ACQUIRED, ONE VOLUME AT A TIME, with the player in the top bar (hidden for a diffusion scan unless asked
+    // for here). Not corrected and not lined up with the T1: the box says so, and unticking goes back to b0 (corrected).
+    const acq = document.createElement("label");
+    acq.style.cssText = "display:flex;align-items:center;gap:6px";
+    const acb = document.createElement("input"); acb.type = "checkbox"; acb.checked = live.nodes.get(scan.browserId)?.transport === "shown"; acb.disabled = !!busy;
+    acb.onchange = () => {
+      live.write({ op: "patch", id: scan.browserId, path: "#/transport", value: acb.checked ? "shown" : "hidden" });
+      if (acb.checked) { const { frames, selected } = browserFrames(live, scan.browserId); putBackground(frames[selected]?.node ?? scan.frameIds[0], null); render(); }
+      else void showMap(scan, "b0");
+    };
+    acq.append(acb, "Step through the scan as acquired");
+    acq.title = "Shows the diffusion MRI as the scanner wrote it, one volume at a time, with the player in the top bar to step through them. Not corrected and not lined up with the MRI of the anatomy.";
+    shell.row(maps, "Volumes").append(acq);
     // Distortion: corrected by default when the reversed phase-encoding scan is loaded; what was done is said.
     const partner = partnerFor(scan), c0 = computed.get(scan.browserId);
     const dist = document.createElement("label");
@@ -1754,10 +1795,15 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     for (const s of scans()) {
       if (seenScans.has(s.browserId)) continue;
       seenScans.add(s.browserId);
+      // THE PLAYER IN THE TOP BAR stays hidden for a diffusion scan (Ron, 2026-10-15: its volumes are directions, not
+      // moments; "probably hide with the ability to bring it up under advanced"): Advanced › Maps › Volumes brings it back.
+      if (live.nodes.get(s.browserId)?.transport === undefined) live.write({ op: "patch", id: s.browserId, path: "#/transport", value: "hidden" });
       arrivedAt.set(s.browserId, performance.now());
       chosen = s.browserId;
       void showMap(s, "colorfa");
-      void findStored(s).then(() => render()).catch(() => {});
+      // The stored tracts read as the scan arrives (about a second on PAT16): the face then says how they were made, and
+      // every way of choosing tracts starts from them at once.
+      void findStored(s).then(() => { render(); return prefetchStored(s); }).then(() => render()).catch(() => {});
     }
     const now = sig();
     if (now !== lastSig || pruned) { lastSig = now; render(); }

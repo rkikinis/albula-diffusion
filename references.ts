@@ -14,7 +14,10 @@
 // (Liao 2017, Gong 2018, O'Donnell 2017), checked against Crossref.
 // v7 (2026-10-03): RapidParc (Bisten et al. 2026) names the tracts; TractCloud kept for its table.
 // v8 (2026-10-04, critic finding 14): SynthStrip (Hoopes et al. 2022), the brain of tracking rule 3, checked against Crossref.
-export const REFERENCES_VERSION = 8;
+// v9 (2026-10-15): the correction and alignment papers the module now names on its face (methods.ts; Ron: "geometric
+// alignment to the t1 using xxxx"): Andersson and Sotiropoulos 2016, Andersson, Skare and Ashburner 2003, Haber and
+// Modersitzki 2006, checked against Crossref.
+export const REFERENCES_VERSION = 9;
 
 export interface Reference { cite: string; link?: string; usedFor: string; verified: boolean }
 
@@ -34,6 +37,9 @@ export const DIFFUSION_REFERENCES: Reference[] = [
   { cite: "Pajevic S, Pierpaoli C. Color schemes to represent the orientation of anisotropic tissues from diffusion tensor data: application to white matter fiber tract mapping in the human brain. Magnetic Resonance in Medicine 42(3):526-540, 1999.", link: "https://doi.org/10.1002/(SICI)1522-2594(199909)42:3<526::AID-MRM15>3.0.CO;2-J", usedFor: "color FA (tensor.ts)", verified: true },
   { cite: "Basser PJ, Pajevic S, Pierpaoli C, Duda J, Aldroubi A. In vivo fiber tractography using DT-MRI data. Magnetic Resonance in Medicine 44(4):625-632, 2000.", link: "https://doi.org/10.1002/1522-2594(200010)44:4<625::AID-MRM17>3.0.CO;2-O", usedFor: "single-tensor streamline tracking (tracking.ts)", verified: true },
   { cite: "Otsu N. A threshold selection method from gray-level histograms. IEEE Transactions on Systems, Man, and Cybernetics 9(1):62-66, 1979.", link: "https://doi.org/10.1109/TSMC.1979.4310076", usedFor: "the brain mask (tensor.ts brainMask)", verified: true },
+  { cite: "Andersson JLR, Sotiropoulos SN. An integrated approach to correction for off-resonance effects and subject movement in diffusion MR imaging. NeuroImage 125:1063-1078, 2016.", link: "https://doi.org/10.1016/j.neuroimage.2015.10.019", usedFor: "the correction for head movement between the images (motion.ts)", verified: true },
+  { cite: "Andersson JLR, Skare S, Ashburner J. How to correct susceptibility distortions in spin-echo echo-planar images: application to diffusion tensor imaging. NeuroImage 20(2):870-888, 2003.", link: "https://doi.org/10.1016/S1053-8119(03)00336-7", usedFor: "the correction of the scanner's distortion with the scan taken in the opposite direction (distortion.ts)", verified: true },
+  { cite: "Haber E, Modersitzki J. Intensity gradient based registration and fusion of multi-modal images. Medical Image Computing and Computer-Assisted Intervention (MICCAI) 2006, Lecture Notes in Computer Science 4191:726-733.", link: "https://doi.org/10.1007/11866763_89", usedFor: "the alignment of the diffusion scan to the T1 (registration.ts, normalized gradient fields)", verified: true },
   { cite: "Hoopes A, Mora JS, Dalca AV, Fischl B, Hoffmann M. SynthStrip: skull-stripping for any brain image. NeuroImage 260:119474, 2022.", link: "https://doi.org/10.1016/j.neuroimage.2022.119474", usedFor: "the brain the whole-brain tracking starts and stops in (tracking rule 3), found on the MRI of the anatomy by the segmentation server (haversack)", verified: true },
   { cite: "Garyfallidis E, Brett M, Amirbekian B, et al. Dipy, a library for the analysis of diffusion MRI data. Frontiers in Neuroinformatics 8:8, 2014.", link: "https://doi.org/10.3389/fninf.2014.00008", usedFor: "the independent check of the tensor fit (a check tool, not a dependency)", verified: true },
   // Distortion correction.
