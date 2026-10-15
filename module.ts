@@ -1226,23 +1226,49 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     probeIndex = shownNow.length ? { ix: buildTractIndex(shownNow.map(drawn)), shown: shownNow } : undefined;
     const view = live.view;
     if (!view) return;
-    // Colored by tract: each named group its tract's color (tract-colors.ts), unnamed ones gray; otherwise, and for
-    // groups started by hand, by direction.
-    const pal = directionPalette(), count = tractCount;
-    pal[GRAY_ID] = UNNAMED;
+    drawSliceCrossings();
+    // SHOWING OR HIDING IS A COLOR, NOT A REBUILD (render-audit 2026-10-15, finding 5: hiding one tract built a new field
+    // from every shown one -- 36 MB sent to the card, the page held 0.4 s -- and hiding the last or showing the first
+    // rebuilt the 3D shader). Each group in the field has its own palette slot; when every group to be shown is already
+    // in the field, drawn the same way, a hidden one is made fully transparent (no tube, no halo) and a shown one gets its
+    // color back, and the view redraws. The field is rebuilt only for something new, a different look, or direction
+    // coloring (one slot per direction, shared by groups).
+    const look = `${drawAs}|${trimVoxels}|${colorBy}|${tractCount}`;
+    const fast = !!field && fieldSlots && colorBy === "tract" && fieldLook === look
+      && shownNow.every((g) => fieldSlots!.get(g)?.n === g.strands.length);
+    if (fast) {
+      for (const [g, s] of fieldSlots!) field!.setBundleColor(s.id, g.visible && groups.includes(g) ? s.color : [0, 0, 0, 0]);
+      view.redraw();
+      return;
+    }
+    // Colored by tract: each group its own slot -- its tract's color (tract-colors.ts), the left side a shade darker,
+    // unnamed ones gray; otherwise, and when the slots run out, by direction.
+    const pal = directionPalette(), count = tractCount, slots = new Map<TractGroup, { id: number; n: number; color: RGBA }>();
     let slot = TRACT_ID;
-    const strands: Strand[] = groups.filter((g) => g.visible).flatMap((g) => {
+    const strands: Strand[] = shownNow.flatMap((g) => {
       let id = 0;
-      if (colorBy === "tract" && g.tract !== undefined && slot <= 255) { id = slot++; pal[id] = sideShade(tractColor(g.tract, count), g.side); }
-      else if (colorBy === "tract" && g.unnamed) id = GRAY_ID;
+      if (colorBy === "tract" && (g.tract !== undefined || g.unnamed) && slot <= 255) {
+        id = slot++;
+        pal[id] = g.tract !== undefined ? sideShade(tractColor(g.tract, count), g.side) : UNNAMED;
+        slots.set(g, { id, n: g.strands.length, color: pal[id] });
+      }
       return drawn(g).map((p) => id ? { points: p, bundle: id } : { points: p, bundle: directionId(p), pointBundles: pointIds(p) });
     });
-    drawSliceCrossings();
-    const old = field; field = undefined;
-    if (!strands.length) view.removeField(FIELD_KEY);
-    else { field = new FiberField(device, strands, { radius: RADIUS[drawAs], bundleColors: pal }); view.setField(FIELD_KEY, field); }
+    // Every shown group got its own slot: the next show or hide can be a color.
+    fieldSlots = slots.size === shownNow.length ? slots : null;
+    fieldLook = look;
+    // NOTHING SHOWN: when the field could stay (tract colors, same look), the fast path above already made every slot
+    // transparent and kept it, so hiding the last tract or showing the first again rebuilds nothing (finding 5); here the
+    // look changed or the coloring is by direction, and the field goes.
+    if (!strands.length) { const old = field; field = undefined; fieldSlots = null; view.removeField(FIELD_KEY); old?.destroy?.(); return; }
+    const old = field;
+    field = new FiberField(device, strands, { radius: RADIUS[drawAs], bundleColors: pal });
+    view.setField(FIELD_KEY, field);
     old?.destroy?.();
   }
+  /** The groups in the tract field and their palette slots (null: the next change rebuilds it), and the look it was made in. */
+  let fieldSlots: Map<TractGroup, { id: number; n: number; color: RGBA }> | null = null;
+  let fieldLook = "";
 
   /**
    * THE TRACTS ON THE SLICES (Yogesh Rathi via Ron, 2026-10-01: "on the cross sections show the T1 image and
