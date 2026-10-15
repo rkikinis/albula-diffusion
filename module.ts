@@ -52,7 +52,7 @@ import { DCM2NIIX_VERSION, secondOpinion, type SecondOpinion } from "./second-op
 import { databaseSeries, openDatabaseId } from "albula";
 import { adPath, b0Path, colorFaPath, dicomToTracts, faPath, mdPath, rdPath, UNNAMED as UNNAMED_SET } from "./tracts-dicom.ts";
 import { howMade } from "./methods.ts";
-import { byName, laterality, measure, openingWay, throughBox, toCsv, voxelsOf, type ExportRow, type Maps, type Measures, type Way } from "./selection.ts";
+import { byName, laterality, measure, MEASURE_RULE, openingWay, throughBox, toCsv, voxelsOf, type ExportRow, type Maps, type Measures, type Way } from "./selection.ts";
 import { databaseFileUrl, nrrdDecode, nrrdGeometry, nrrdSplitHeader } from "albula";
 import { addRowMenu, fitList, makeNameEditable, saveToDownloads, showInDownloads, sliceOffset, sliceOrientation, startEditing, type RowAction } from "albula";
 import { assetUrl, holdDrawing, seriesDicomFiles, startPlacing, restartSegmentationServer, startSegmentationServer, synthstripBrainMask, type BrainMaskResult } from "albula";
@@ -276,7 +276,8 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
   }
 
   /** Said where the person looks: the visible status bar, and the line under the module's buttons. */
-  const say = (t: string) => { note = t; status(t); };
+  let noteFor = "";
+  const say = (t: string) => { note = t; noteFor = chosen; status(t); };
 
   // ── what is in the scene ────────────────────────────────────────────────────────────────────────────────────────
   const scans = (): Scan[] => sequenceBrowsers(live).flatMap((b) => {
@@ -781,7 +782,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
   }
   // THE MAPS MADE AT IMPORT (Ron, 2026-10-14: "Why not do all proper registrations as part of the import? That would allow
   // to ignore how much time they need"): FA and Color FA, stored by the job beside its tracts, after every correction and
-  // on the T1's grid -- shown as they are, so a case opens without fitting the scan (PAT16: 45 s of fit).
+  // lined up with the T1 at the scan's own spacing -- shown as they are, so a case opens without fitting the scan (PAT16: 45 s of fit).
   const storedMaps = new Map<string, { fa?: string; colorfa?: string; b0?: string }>();   // scan -> image node ids
   async function storedMap(scan: Scan, what: Show): Promise<string | undefined> {
     const have = storedMaps.get(scan.browserId)?.[what];
@@ -814,7 +815,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
   }
   /**
    * THE MAPS A TRACT IS MEASURED ON (v3: FA, MD, AD, RD per tract and side; selection.ts measure): the ones the import job
-   * stored beside the tracts used (after every correction, on the T1's grid), else this module's own fit. Kept per scan
+   * stored beside the tracts used (after every correction, lined up with the T1 at the scan's own spacing), else this module's own fit. Kept per scan
    * and per source, so tracts made here are measured on the fit they were made from.
    */
   const mapsKept = new Map<string, { key: string; maps: Promise<Maps | null> }>();
@@ -875,13 +876,17 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
   // the scan changes).
   interface Whole { sl: Float32Array[]; named: Named; stored: boolean; storedInputs?: { partner?: string | null; t1?: string | null }; made?: string; c?: Computed; times: StageTimes; key: string }
   const whole = new Map<string, Whole>();
-  const settingsKey = () => JSON.stringify([method, correct, adv]);
-  let wholeBusy: Promise<Whole> | undefined;
+  // THE KEY NAMES WHAT A RUN MADE HERE WAS MADE FROM (critic 2026-10-15, finding 7): the settings, and the reversed scan
+  // and the T1 present then -- one arriving later makes the run again.
+  const settingsKey = (scan: Scan) => JSON.stringify([method, correct, adv, correct ? partnerFor(scan)?.id ?? "" : "", anatomyFor(scan)?.id ?? ""]);
+  // ONE RUN IN PROGRESS PER SCAN (finding 6: a run for one scan was handed to another).
+  const wholeBusy = new Map<string, Promise<Whole>>();
   async function ensureWholeBrain(scan: Scan): Promise<Whole> {
     const have = whole.get(scan.browserId);
-    if (have && (have.stored ? usesDefaults(scan) : have.key === settingsKey())) return have;
-    if (wholeBusy) return await wholeBusy;
-    wholeBusy = (async () => {
+    if (have && (have.stored ? usesDefaults(scan) : have.key === settingsKey(scan))) return have;
+    const going = wholeBusy.get(scan.browserId);
+    if (going) return await going;
+    const run = (async () => {
       let releaseHold: (() => void) | undefined;
       try {
         const t0 = performance.now();
@@ -925,13 +930,19 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
           const rp = await rapidParc(), releaseN = holdDrawing("naming tracts");
           const named = await nameTracts(device, model, sl, { rapidParc: rp }).finally(releaseN);
           times.name = named.seconds * 1000;
-          w = { sl, named, stored: false, c, times, key: settingsKey() };
+          w = { sl, named, stored: false, c, times, key: settingsKey(scan) };
         }
         whole.set(scan.browserId, w);
         return w;
-      } finally { releaseHold?.(); wholeBusy = undefined; }
+      } finally {
+        releaseHold?.(); wholeBusy.delete(scan.browserId);
+        // ITS OWN WAITING WORDS GO WITH IT (finding 2: a box on a scan without stored tracts left "Naming tracts…" for good,
+        // every button disabled).
+        if (/^(Waiting for the fiber tracts|Making tracts|Naming tracts|Getting the whole brain)/.test(busy)) busy = "";
+      }
     })();
-    return await wholeBusy;
+    wholeBusy.set(scan.browserId, run);
+    return await run;
   }
 
   /** The stored whole-brain tracts, read once into `whole` when the scan arrives (nothing made here: no fit, no tracking). */
@@ -1013,6 +1024,17 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
         const t = model.json.tracts[g.tract!];
         groups.push({ id: ++groupSeq, name: t ? tractLabel(t.abbr, t.name, os) : tractName(model, g.tract!, os), scan: scan.browserId, strands: pick(e.idx), visible: false, method, tract: g.tract, side: os, distanceMm: e.d, within: e.within, run: true, compare: true });
       }
+      // ONE GROUP PER TRACT AND SIDE (critic 2026-10-15, finding 1: a tract ticked by name and then listed here was drawn
+      // twice and exported twice): the run's group stays, shown if the ticked one was.
+      for (let i = groups.length - 1; i >= 0; i--) {
+        const g = groups[i];
+        if (g.scan !== scan.browserId || g.by !== "name") continue;
+        const k = `${g.tract}:${g.side}`;
+        if (!listedKeys.has(k)) continue;
+        const r = groups.find((x) => x.scan === scan.browserId && x.run && `${x.tract}:${x.side}` === k);
+        if (r && g.visible) r.visible = true;
+        groups.splice(i, 1);
+      }
       // The rest: the unnamed far ones and the far tracts not listed as faint or for comparison (each is its own row).
       const unnamedNear = sorted.unnamedNear, faintSet = new Set(sorted.faint), rest = [...sorted.unnamedFar, ...sorted.outsideFar, ...sorted.far.filter((e) => !faintSet.has(e)).flatMap((e) => e.idx)].filter((i) => !compared.has(i));
       if (sorted.outsideNear.length) groups.push({ id: ++groupSeq, name: `Outside the brain, possibly a cranial nerve, within ${withinMm} mm of ${label}`, scan: scan.browserId, strands: pick(sorted.outsideNear), visible: true, method, unnamed: true, run: true, outside: true });
@@ -1022,8 +1044,10 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       const t2 = performance.now();
       times.draw = t2 - tDraw;
       times.total = before + (t2 - t0);
-      say(`${nearTracts.length} named tracts come within ${withinMm} mm of ${label} (at least ${MIN_NEAR_STREAMLINES} streamlines each)${sorted.faint.length ? `; ${sorted.faint.length} more come that close with fewer, or within ${grayMm} mm (listed in gray, hidden)` : ""}. ` +
-        `${sl.length.toLocaleString()} streamlines through the whole brain. Step by step: ${stageText(times)}.`);
+      // ONE COUNT, AS THE LIST HAS IT (finding 19): tracts, both sides one row; the timing to the log only (finding 22).
+      const nTracts = new Set(nearTracts.map((e) => e.tract)).size;
+      say(`${nTracts} named tract${nTracts === 1 ? "" : "s"} come within ${withinMm} mm of ${label}${sorted.faint.length ? `; ${new Set(sorted.faint.map((e) => e.tract)).size} more are listed in gray, hidden` : ""}.`);
+      status(`Near ${label}: ${nearTracts.length} tract sides of ${sl.length.toLocaleString()} streamlines through the whole brain. Step by step: ${stageText(times)}.`);
     } catch (e) { say(`Tracts could not be made: ${(e as Error).message}`); }
     finally { busy = ""; render(); }
   }
@@ -1194,6 +1218,9 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
   let tractCount = 43;
   /** The tracts shown, indexed for the data probe (tract-index.ts); rebuilt with every redraw. */
   let probeIndex: { ix: TractIndex; shown: TractGroup[] } | undefined;
+  /** LEFT AND RIGHT IN TWO SHADES OF THE TRACT'S COLOR (the v3 mockup, "drawn in two shades of its color"; critic
+   *  2026-10-15, finding 20): the left side a darker shade, so a lopsided tract can be read in the view. */
+  const sideShade = (c: RGBA, side?: number): RGBA => side === -1 ? [c[0] * 0.62, c[1] * 0.62, c[2] * 0.62, c[3]] : c;
   function redraw3d() {
     const shownNow = groups.filter((g) => g.visible);
     probeIndex = shownNow.length ? { ix: buildTractIndex(shownNow.map(drawn)), shown: shownNow } : undefined;
@@ -1206,7 +1233,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     let slot = TRACT_ID;
     const strands: Strand[] = groups.filter((g) => g.visible).flatMap((g) => {
       let id = 0;
-      if (colorBy === "tract" && g.tract !== undefined && slot <= 255) { id = slot++; pal[id] = tractColor(g.tract, count); }
+      if (colorBy === "tract" && g.tract !== undefined && slot <= 255) { id = slot++; pal[id] = sideShade(tractColor(g.tract, count), g.side); }
       else if (colorBy === "tract" && g.unnamed) id = GRAY_ID;
       return drawn(g).map((p) => id ? { points: p, bundle: id } : { points: p, bundle: directionId(p), pointBundles: pointIds(p) });
     });
@@ -1228,7 +1255,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     const view = live.view as { setOverlay?: (cell: string, layer: string, items: unknown[]) => void } | undefined;
     if (!view?.setOverlay) return;
     const color = (g: TractGroup, dir: number[]): number[] => {
-      if (colorBy === "tract" && g.tract !== undefined) { const c = tractColor(g.tract, tractCount); return [c[0], c[1], c[2]]; }
+      if (colorBy === "tract" && g.tract !== undefined) { const c = sideShade(tractColor(g.tract, tractCount), g.side); return [c[0], c[1], c[2]]; }
       if (colorBy === "tract" && g.unnamed) return [UNNAMED[0], UNNAMED[1], UNNAMED[2]];
       return [Math.abs(dir[0]), Math.abs(dir[1]), Math.abs(dir[2])];    // by direction, as in 3D: red left-right ...
     };
@@ -1277,6 +1304,10 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     for (const id of [...whole.keys()]) if (!ids.has(id)) whole.delete(id);         // the whole brain's streamlines go with the scan
     for (const id of [...mapsKept.keys()]) if (!ids.has(id)) mapsKept.delete(id);
     for (const id of [...mapOn.keys()]) if (!ids.has(id)) mapOn.delete(id);
+    for (const id of [...storedState.keys()]) if (!ids.has(id)) storedState.delete(id);
+    for (const [id, b] of [...boxes]) if (!ids.has(id)) { if (live.nodes.get(b)) live.write({ op: "del", id: b }); boxes.delete(id); boxLines.delete(id); }
+    for (const id of [...wayBy.keys()]) if (!ids.has(id)) wayBy.delete(id);
+    for (const id of [...exportedFor.keys()]) if (!ids.has(id)) exportedFor.delete(id);
     for (let i = groups.length - 1; i >= 0; i--) if (!ids.has(groups[i].scan)) { groups.splice(i, 1); changed = true; }
     for (const id of [...seenScans]) if (!ids.has(id)) seenScans.delete(id);
     if (changed) redraw3d();
@@ -1291,29 +1322,37 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
   // one row per tract, Left and Right side by side with lines and FA, the rest in the row's tooltip and the export.
   // Changes from the mockup, said to Ron: Add lines stays a visible button under the list (he did not find it in the
   // tract list's top row); Draw as and Color stay under Advanced (his "yes, keep them in the module").
-  let way: Way = "near", wayFor = "";
+  // PER SCAN (critic 2026-10-15, findings 5, 8, 24): the way it is chosen by, its box, its last export.
+  const wayBy = new Map<string, { way: Way; touched: boolean }>();
   let wantOutline = false;
-  let boxId: string | undefined, boxLine = "", boxQueued = false;
-  let exported = "";
+  const boxes = new Map<string, string>(), boxLines = new Map<string, string>();
+  let boxQueued = false;
+  const exportedFor = new Map<string, string>();
+  /** "Tracts near this one…": the tract that is the structure now, per scan (finding 18). */
+  const nearTract = new Map<string, { strands: Float32Array[]; label: string }>();
   const measured = new WeakMap<TractGroup, { n: number; m: Measures }>();
-  let measuring = false;
+  let measuringP: Promise<void> | undefined;
   const nameOf = (g: TractGroup) => g.label ?? g.name;
   /** A tract's name without its side, as a row shows it. */
   const tractTitle = (tract: number) => { const t = tractCountModel?.json.tracts[tract]; return t ? tractLabel(t.abbr, t.name, 0) : `Tract ${tract}`; };
   let tractCountModel: TractCloudModel | undefined;
 
   /** The numbers of every listed tract of a scan, measured once its maps are there (each voxel once; selection.ts). */
-  async function ensureMeasures(scan: Scan) {
-    if (measuring) return;
+  // ONE MEASURING AT A TIME, AND A CALLER WAITS FOR IT (finding 3: an export pressed while measuring wrote a partial file).
+  async function ensureMeasures(scan: Scan): Promise<boolean> {
+    while (measuringP) await measuringP;
     const todo = groups.filter((g) => g.scan === scan.browserId && (g.tract !== undefined || g.by === "box") && measured.get(g)?.n !== g.strands.length);
-    if (!todo.length) return;
-    measuring = true;
-    try {
+    if (!todo.length) return true;
+    let ok = false;
+    measuringP = (async () => {
       const maps = await mapsFor(scan);
       if (!maps) return;
       for (const g of todo) { measured.set(g, { n: g.strands.length, m: measure(g.strands, maps) }); await new Promise((r) => setTimeout(r, 0)); }
-      render();
-    } finally { measuring = false; }
+      ok = true;
+    })().finally(() => { measuringP = undefined; });
+    await measuringP;
+    render();
+    return ok;
   }
 
   /** BY NAME: ticking a tract shows both its sides from the whole brain's run; unticking hides them (Ron's v3: "Tick a
@@ -1351,15 +1390,21 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       if (d === undefined) continue;
       if (o === "Sagittal") c[0] = d; else if (o === "Coronal") c[1] = d; else if (o === "Axial") c[2] = d;
     }
-    boxId = `diffusion-box-${scan.browserId}`;
+    const boxId = `diffusion-box-${scan.browserId}`;
+    boxes.set(scan.browserId, boxId);
     live.write({ op: "put", id: boxId, node: { type: "markup", id: boxId, name: "Tracts through this box", markupType: "roi", frame: "RAS", center: c, size: [20, 20, 20], visible: true, locked: false, points: [], source: { mrmlClass: "vtkMRMLMarkupsROINode" }, origin: { local: true } } as unknown as MrsonNode });
     void boxMoved(scan);
   }
   async function boxMoved(scan: Scan) {
+    const boxId = boxes.get(scan.browserId);
     const n = boxId ? live.nodes.get(boxId) : undefined;
-    if (!n || !n.center || !n.size) return;
+    // THE BOX DELETED (in Markups): its lines and its words go too (finding 10).
+    if (!n || !n.center || !n.size) {
+      for (let i = groups.length - 1; i >= 0; i--) if (groups[i].scan === scan.browserId && groups[i].by === "box") groups.splice(i, 1);
+      boxes.delete(scan.browserId); boxLines.delete(scan.browserId); redraw3d(); render(); return;
+    }
     const t0 = performance.now();
-    const w = await ensureWholeBrain(scan).catch((e) => { say(`Tracts could not be shown: ${(e as Error).message}`); return undefined; });
+    const w = await ensureWholeBrain(scan).catch((e) => { say(`Tracts could not be shown: ${(e as Error).message}`); return undefined; }).finally(() => render());
     if (!w) return;
     const box = { center: n.center as number[], size: n.size as number[], orientation: n.orientation as number[] | undefined };
     const idx = throughBox(w.sl, box);
@@ -1373,32 +1418,40 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     // The commonest NAMED tract: in the deep white matter most lines through a small box have no name.
     const top = [...count.entries()].filter(([k]) => Number(k.split(":")[0]) !== OTHER).sort((a, b) => b[1] - a[1])[0];
     const topName = top ? tractLabel(model.json.tracts[Number(top[0].split(":")[0])].abbr, model.json.tracts[Number(top[0].split(":")[0])].name, Number(top[0].split(":")[1])) : "";
-    boxLine = idx.length ? `Through the box: ${idx.length.toLocaleString()} lines${topName ? `; the named tract with the most of them: ${topName} (${Math.round(100 * top[1] / idx.length)}%)` : ", none of them named"}` : "No lines pass through the box.";
+    boxLines.set(scan.browserId, idx.length ? `Through the box: ${idx.length.toLocaleString()} lines${topName ? `; the named tract with the most of them: ${topName} (${Math.round(100 * top[1] / idx.length)}%)` : ", none of them named"}` : "No lines pass through the box.");
     console.info(`diffusion box: ${idx.length} lines in ${Math.round(performance.now() - t0)} ms`);
-    redraw3d(); render(); void ensureMeasures(scan);
+    redraw3d(); render();
   }
+  // THE BOX'S OWN SCAN, whichever is chosen (finding 5); a quarter second between updates while it is dragged (finding 12).
   live.subscribe((c) => {
-    if (!boxId || c.id !== boxId || boxQueued) return;
+    const owner = [...boxes].find(([, b]) => b === c.id)?.[0];
+    if (!owner || boxQueued) return;
     boxQueued = true;
-    setTimeout(() => { boxQueued = false; const s = scans().find((x) => x.browserId === chosen); if (s) void boxMoved(s); }, 120);
+    setTimeout(() => { boxQueued = false; const s = scans().find((x) => x.browserId === owner); if (s) void boxMoved(s); }, 250);
   });
 
   /** ONE TABLE FILE at the top of Downloads (Ron's v3 export, CSV): a row per tract and side, and Show in Finder. */
   async function exportNumbers(scan: Scan) {
-    await ensureMeasures(scan);
-    const st = storedState.get(scan.browserId), w = whole.get(scan.browserId);
-    const madeBy = w?.stored ? `made at import; tracking rule ${st?.tracking ?? "?"}; diffusion extension ${String(st?.rules?.extension ?? "?")}` : `made here (${method}); tracking rule ${TRACKING_RULE}`;
+    // EVERY LISTED TRACT MEASURED FIRST (finding 3), and a failure is a failure on the button (finding 11).
+    if (!await ensureMeasures(scan)) throw new Error("the scan's maps are not ready");
+    const st = storedState.get(scan.browserId), w = whole.get(scan.browserId), run = runs.get(scan.browserId), maps = await mapsFor(scan);
+    const gridMm = maps ? [0, 1, 2].map((c) => Math.hypot(maps.ijkToRAS[c], maps.ijkToRAS[4 + c], maps.ijkToRAS[8 + c])) : undefined;
+    // WHAT MADE THE NUMBERS (finding 23): the stored set's record with both commits, or the method and rule the run used.
+    const madeBy = (g: TractGroup) => w?.stored ? `made at import; tracking rule ${st?.tracking ?? "?"}; Albula ${String(st?.rules?.core ?? "?")}; diffusion extension ${String(st?.rules?.extension ?? "?")}`
+      : `made here (${g.method}); tracking rule ${run?.rule ?? "?"}`;
     const rows: ExportRow[] = [];
     for (const g of groups.filter((x) => x.scan === scan.browserId && x.tract !== undefined)) {
       const m = measured.get(g)?.m; if (!m) continue;
       const t = tractCountModel?.json.tracts[g.tract!];
-      rows.push({ scan: scan.name, tract: g.label ?? t?.name ?? g.name, abbreviation: t?.abbr ?? "", side: g.side === -1 ? "left" : g.side === 1 ? "right" : "both", m, madeBy });
+      rows.push({ scan: scan.name, tract: g.label ?? (t ? tractLabel(t.abbr, t.name, 0).replace(/ \([^)]*\)$/, "") : g.name), abbreviation: t?.abbr ?? "", side: g.side === -1 ? "left" : g.side === 1 ? "right" : "both", m, madeBy: madeBy(g), gridMm, rule: MEASURE_RULE });
     }
-    if (!rows.length) { say("There are no tracts with numbers to export yet."); return; }
-    const name = `${(patientOf(scan.name) || "scan").replace(/[^\w.-]+/g, "_")} fiber tract numbers ${new Date().toISOString().slice(0, 10)}.csv`;
+    if (!rows.length) throw new Error("there are no tracts with numbers to export yet");
+    // A FILE PER EXPORT (finding 11: a second export the same day overwrote the first): the time in the name.
+    const now = new Date(), stamp = `${now.toISOString().slice(0, 10)} ${String(now.getHours()).padStart(2, "0")}-${String(now.getMinutes()).padStart(2, "0")}-${String(now.getSeconds()).padStart(2, "0")}`;
+    const name = `${(patientOf(scan.name) || "scan").replace(/[^\w.-]+/g, "_")} fiber tract numbers ${stamp}.csv`;
     const r = await saveToDownloads(name, toCsv(rows));
-    if (!r.ok) { say(`The numbers were not saved: ${r.why ?? "unknown"}`); return; }
-    exported = name;
+    if (!r.ok) throw new Error(r.why ?? "the file could not be written");
+    exportedFor.set(scan.browserId, name);
     say(`Saved ${rows.length} rows to Downloads: ${name}`);
     render();
   }
@@ -1413,7 +1466,12 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     if (outline && (!live.nodes.get(outline.seedsId) || !live.nodes.get(outline.imageId))) outline = undefined;   // finding 9
     const tumors = tumorChoices(scan);
     // THE WAY IT OPENS ON (Ron, 2026-10-14: near a structure the default; "Any other brain opens switched to By name").
-    if (scan && wayFor !== scan.browserId) { wayFor = scan.browserId; way = openingWay(tumors.length > 0); if (tumors.length) near = tumors[0].key; }
+    let wb = scan ? wayBy.get(scan.browserId) : undefined;
+    if (scan && !wb) { wb = { way: openingWay(tumors.length > 0), touched: false }; wayBy.set(scan.browserId, wb); if (tumors.length) near = tumors[0].key; }
+    // A TUMOR OUTLINE THAT LOADS AFTER THE SCAN (finding 8): an untouched face turns to Near, from the tumor.
+    if (scan && wb && !wb.touched && wb.way === "name" && tumors.length) { wb.way = "near"; near = tumors[0].key; }
+    const way: Way = wb?.way ?? "near";
+    const setWay = (w: Way) => { if (wb) { wb.way = w; wb.touched = true; } render(); };
     if (!segs.find((s) => s.key === near)) near = (tumors[0] ?? segs[0])?.key ?? "";
     const anat = anatomyFor(scan);
     root.innerHTML = "";
@@ -1445,7 +1503,9 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
         top.append(box);
       } else {
         const tl = document.createElement("div"); tl.className = "sl-hint";
-        tl.textContent = jobBusyNow ? "Fiber tracts: being prepared in the background now" : st?.state === "none" ? "Fiber tracts: not made yet; the first choice below makes them (a minute or more)" : "";
+        const madeHere = whole.get(scan.browserId);
+        tl.textContent = madeHere && !madeHere.stored ? `Fiber tracts: made here from this scan (${madeHere.c ? `tracking rule ${madeHere.c.rule}` : "this module's settings"})`
+          : jobBusyNow ? "Fiber tracts: being prepared in the background now" : st?.state === "none" ? "Fiber tracts: not made yet; the first choice below makes them (a minute or more)" : "";
         if (tl.textContent) top.append(tl);
       }
     }
@@ -1475,7 +1535,8 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
 
     // ── CHOOSE TRACTS ───────────────────────────────────────────────────────────────────────────────────────────────
     const ch = shell.section(root, "Choose tracts", { band: "yellow", open: true });
-    if (!scan || !anat) {
+    const storedHere = !!scan && storedState.get(scan.browserId)?.state === "stored";
+    if (!scan || (!anat && !storedHere)) {
       const p = document.createElement("p"); p.className = "sl-hint"; p.textContent = !scan ? "Waits for the diffusion MRI." : "Waits for the MRI of the anatomy (T1)."; ch.append(p);
     } else {
       // THE WAY, a pull-down whose triangle is seen at arm's length (Ron, 2026-10-14; PALETTE.md: the full ▼, ~14 px, accent).
@@ -1484,7 +1545,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       for (const [k, label] of [["near", "Near a structure"], ["name", "By name"], ["box", "Through a place"]] as const) ws.append(new Option(label, k, false, k === way));
       ws.style.cssText = "appearance:none;-webkit-appearance:none;padding-right:24px;font-weight:600";
       ws.title = "How to choose the tracts: those that pass near a structure (a tumor, any segment, another tract), by their names, or those through a box you place.";
-      ws.onchange = () => { way = ws.value as Way; render(); };
+      ws.onchange = () => setWay(ws.value as Way);
       const tri = document.createElement("span"); tri.textContent = "▼"; tri.setAttribute("aria-hidden", "true");
       tri.style.cssText = "position:absolute;right:6px;pointer-events:none;font-size:14px;color:var(--sl-accent)";
       wrap.append(ws, tri);
@@ -1494,19 +1555,28 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
         const ns = document.createElement("select");
         if (!segs.length) ns.append(new Option("no segment of this patient", ""));
         for (const s of segs) ns.append(new Option(s.label, s.key, false, s.key === near && !wantOutline));
-        ns.append(new Option("Outline one here…", "__outline__", false, wantOutline));
+        // THE TRACT THAT IS THE STRUCTURE NOW, after "Tracts near this one…" (finding 18).
+        const nt = nearTract.get(scan.browserId);
+        if (nt) ns.append(new Option(nt.label, "__tract__", false, !wantOutline));
+        if (anat) ns.append(new Option("Outline one here…", "__outline__", false, wantOutline));
         ns.title = "The structure the tracts are measured from: a tumor, any segment of this patient, or one you outline here. A tract as the structure: its ⋯ menu, Tracts near this one.";
-        ns.onchange = () => { if (ns.value === "__outline__") { wantOutline = true; } else { wantOutline = false; near = ns.value; } render(); };
+        ns.onchange = () => { if (ns.value === "__tract__") { wantOutline = false; render(); return; } nearTract.delete(scan.browserId); if (ns.value === "__outline__") { wantOutline = true; } else { wantOutline = false; near = ns.value; } render(); };
         shell.row(ch, "Near").append(ns);
         const wm = document.createElement("select");
         for (const v of [2, 4, 6, 8, 10, 15, 20]) wm.append(new Option(`${v} mm`, String(v), false, v === withinMm));
         if (![2, 4, 6, 8, 10, 15, 20].includes(withinMm)) wm.append(new Option(`${withinMm} mm`, String(withinMm), false, true));
         wm.title = `How close a tract must come to the structure to be listed. Tracts within ${GRAY_BAND_MM} mm more are listed in gray, hidden.`;
         // A run already made from this structure is measured again at once: nothing to press (rule 3).
-        wm.onchange = () => { withinMm = Number(wm.value); const r = runs.get(scan.browserId); if (r && !busy && segmentChoices(scan).find((c) => c.key === near)?.label === r.label) void makeTracts(); else render(); };
+        wm.onchange = () => {
+          withinMm = Number(wm.value);
+          const r = runs.get(scan.browserId), nt2 = nearTract.get(scan.browserId);
+          if (r && !busy && nt2 && r.label === nt2.label) void tractsNearTract(scan, nt2.strands, nt2.label);
+          else if (r && !busy && segmentChoices(scan).find((c) => c.key === near)?.label === r.label) void makeTracts();
+          else render();
+        };
         shell.row(ch, "Within").append(wm);
         // OUTLINE ONE HERE: strokes in, strokes around, grow, correct, done (the resident's steps, unchanged).
-        if (wantOutline || outline) {
+        if (anat && (wantOutline || outline)) {
           const stepsBox = document.createElement("div");
           stepsBox.style.cssText = "display:flex;flex-direction:column;gap:4px;margin:6px 0 2px";
           const step = (n: string, label: string, tip: string, on: boolean, disabled: boolean, act: () => void, words: string) => {
@@ -1544,14 +1614,19 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
           ch.append(st);
         }
         // THE ONE YELLOW ACTION, last row, right (PALETTE.md).
-        const target = segs.find((s) => s.key === near);
+        const ntGo = nearTract.get(scan.browserId);
+        const target = ntGo ? undefined : segs.find((s) => s.key === near);
         const isTumor = !!target && tumors.some((t) => t.key === target.key);
         const bar = shell.actions(ch);
         const go = document.createElement("button"); go.className = "sl-primary";
         go.textContent = busy && !adding && !busy.startsWith("Grow") ? busy : isTumor ? "Show the fiber tracts near the tumor" : "Show the tracts near it";
-        go.title = `Shows each named tract with at least ${MIN_NEAR_STREAMLINES} of its lines within ${withinMm} mm of ${target?.label ?? "the structure"} — whole, in its own color, with how close it comes. Tracts that come within ${GRAY_BAND_MM} mm more, or close with fewer lines, are listed after them in gray, hidden.`;
-        go.disabled = !!busy || !target || seeding || !!outline || wantOutline;
-        go.onclick = () => { if (method === "single") method = "ukf"; void makeTracts(); };
+        go.title = `Shows each named tract with at least ${MIN_NEAR_STREAMLINES} of its lines within ${withinMm} mm of ${ntGo?.label ?? target?.label ?? "the structure"} — whole, in its own color, with how close it comes. Tracts that come within ${GRAY_BAND_MM} mm more, or close with fewer lines, are listed after them in gray, hidden.`;
+        go.disabled = !!busy || (!target && !ntGo) || seeding || !!outline || wantOutline;
+        // SINGLE TENSOR NAMES NO TRACTS (finding 9): said, not silently swapped; its own tracts start under For developers.
+        go.onclick = () => {
+          if (method === "single") { method = "ukf"; say("Single tensor names no tracts, so this list uses two-tensor tracking. Single-tensor tracts start under Advanced › For developers."); }
+          if (ntGo) void tractsNearTract(scan, ntGo.strands, ntGo.label); else void makeTracts();
+        };
         bar.append(go);
       } else if (way === "name") {
         // BY NAME: the atlas's tracts in their groups, a search, a tick each.
@@ -1588,8 +1663,8 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
         }
       } else {
         // THROUGH A PLACE: one box.
-        const has = !!(boxId && live.nodes.get(boxId));
-        if (boxLine && has) { const p = document.createElement("p"); p.className = "sl-hint"; p.style.margin = "4px 0"; p.textContent = boxLine; ch.append(p); }
+        const bId = boxes.get(scan.browserId), has = !!(bId && live.nodes.get(bId)), bLine = boxLines.get(scan.browserId);
+        if (bLine && has) { const p = document.createElement("p"); p.className = "sl-hint"; p.style.margin = "4px 0"; p.textContent = bLine; ch.append(p); }
         const bar = shell.actions(ch);
         const pb = document.createElement("button"); pb.className = has ? "" : "sl-primary";
         pb.textContent = has ? "Put the box at the crossing again" : "Put a box";
@@ -1599,7 +1674,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
         bar.append(pb);
       }
     }
-    if (note) { const p = document.createElement("p"); p.className = "sl-hint"; p.style.margin = "4px 0 0"; p.textContent = note; ch.append(p); }
+    if (note && noteFor === chosen) { const p = document.createElement("p"); p.className = "sl-hint"; p.style.margin = "4px 0 0"; p.textContent = note; ch.append(p); }
 
     // ── SHOWN: one row per tract, Left and Right side by side ─────────────────────────────────────────────────────────
     const mineAll = scan ? groups.filter((g) => g.scan === scan.browserId) : [];
@@ -1635,14 +1710,17 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
         const row = document.createElement("div");
         row.style.cssText = `display:grid;grid-template-columns:${cols};gap:4px;align-items:center;padding:1px 0`;
         const all = gs(r), anyOn = all.some((g) => g.visible);
-        const eye = document.createElement("button"); eye.textContent = anyOn ? "👁" : "🚫"; eye.title = anyOn ? "Hide" : "Show";
+        const eye = document.createElement("button"); eye.textContent = anyOn ? "👁" : "🚫";
         eye.style.cssText = "background:none;border:none;padding:0;cursor:pointer;color:inherit;font-size:14px;min-width:0;width:18px;height:18px";   // a glyph button: not the 64 px of a button with words (PALETTE.md)
         eye.onclick = () => { for (const g of all) g.visible = !anyOn; redraw3d(); render(); };
         const c = r.tract !== undefined ? tractColor(r.tract, tractCount) : UNNAMED;
         const sw = document.createElement("span"); sw.style.cssText = `width:10px;height:10px;border:1px solid var(--sl-border);background:rgb(${c.slice(0, 3).map((v) => Math.round(v * 255)).join(",")})`;
         const nm = document.createElement("span"); nm.style.cssText = "min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap";
         const base = r.other ? nameOf(r.other) : (all[0].label ?? tractTitle(r.tract!));
-        nm.textContent = base;
+        eye.title = `${anyOn ? "Hide" : "Show"} ${base}`; eye.setAttribute("aria-label", eye.title);
+        // THE ABBREVIATION FIRST (finding 16: five rows read "Corpus callosum …"); the full name in the tooltip.
+        const tAbbr = r.tract !== undefined && !all[0].label ? tractCountModel?.json.tracts[r.tract]?.abbr : undefined;
+        if (tAbbr) { const b = document.createElement("b"); b.textContent = tAbbr; nm.append(b, ` ${base.replace(/ \([^)]*\)$/, "")}`); } else nm.textContent = base;
         makeNameEditable(nm, { get: () => base, commit: (v) => { for (const g of all) g.label = v; render(); } });
         if (faintRow(r)) { nm.style.opacity = "0.55"; }
         row.append(eye, sw, nm);
@@ -1660,6 +1738,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
           tip.push(`${side ? `${side}: ` : ""}${m.lines.toLocaleString()} lines, FA ${f2(m.fa)}, MD ${mdTxt(m.md)}, AD ${mdTxt(m.ad)}, RD ${mdTxt(m.rd)} (10⁻³ mm²/s), volume ${m.volumeMl.toFixed(1)} mL, median length ${m.lengthMm.toFixed(0)} mm`);
         }
         const ml = r.left ? measured.get(r.left)?.m : undefined, mr = r.right ? measured.get(r.right)?.m : undefined;
+        if ([r.left, r.right, r.mid, r.other].some((g) => g && measured.get(g) && measured.get(g)!.m.md === undefined)) tip.push("MD, AD and RD: not made yet for this scan; Albula adds them in the background.");
         if (ml && mr) {
           const li = (a?: number, b?: number) => { const v = laterality(a, b); return v === undefined ? "–" : `${v > 0 ? "+" : ""}${v.toFixed(2)}`; };
           tip.push(`How lopsided, left against right (above 0: more on the left): FA ${li(ml.fa, mr.fa)}, MD ${li(ml.md, mr.md)}, volume ${li(ml.volumeMl, mr.volumeMl)}. The number of lines depends on the tracking, not the brain, so it is not compared (Jones et al. 2013).`);
@@ -1673,7 +1752,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
             { label: "Rename", run: () => startEditing(nm, base, (v) => { for (const g of all) g.label = v; render(); }) },
             { label: "Remove", run: () => { for (const g of all) groups.splice(groups.indexOf(g), 1); redraw3d(); render(); } },
           ];
-          if (r.tract !== undefined) acts.push({ label: "Tracts near this one…", title: "Lists the tracts that pass near this one, as near a structure.", run: () => { way = "near"; void tractsNearTract(scan, all.flatMap((g) => g.strands), base); } });
+          if (r.tract !== undefined) acts.push({ label: "Tracts near this one…", title: "Lists the tracts that pass near this one, as near a structure.", run: () => { const strands = all.flatMap((g) => g.strands); nearTract.set(scan.browserId, { strands, label: base }); if (wb) { wb.way = "near"; wb.touched = true; } void tractsNearTract(scan, strands, base); } });
           if (all.some((g) => g.run) && r.tract !== undefined) acts.push({ label: "Add lines", title: "Follows many more lines in this tract, on both sides.", run: () => { void addLines(all.filter((g) => g.run)); } });
           if (r.tract !== undefined) { const t = tractCountModel?.json.tracts[r.tract]; if (t) { const ref = readMore(t.abbr); acts.push({ label: "About this tract", title: ref.cite, run: () => { void fetch(`/_open?url=${encodeURIComponent(ref.link)}`).then((x) => { if (!x.ok) throw new Error(); }).catch(() => { globalThis.open?.(ref.link, "_blank"); }); } }); } }
           return acts;
@@ -1694,13 +1773,16 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       const chosenNow = shownNamed.filter((g) => !runs.get(g.scan)!.added.has(`${g.tract}:${g.side ?? 0}`));
       const bar = shell.actions(sh);
       const addL = document.createElement("button"); addL.textContent = adding && busy ? busy.replace("Making tracts", "Adding lines") : "Add lines to the tracts shown";
-      addL.title = chosenNow.length ? `Follows many more lines in the ${chosenNow.length === 1 ? "tract" : `${chosenNow.length} tracts`} shown, on both sides, to see ${chosenNow.length === 1 ? "it" : "them"} better and compare the sides.` : "Works on tracts shown near a structure; lines are already added to every one shown.";
+      // Add lines works on a list made near a structure (it needs the structure's distances); for tracts chosen by name or
+      // through the box it is not offered yet (critic 2026-10-15, finding 20; said in the tooltip).
+      addL.title = chosenNow.length ? `Follows many more lines in the ${chosenNow.length === 1 ? "tract" : `${chosenNow.length} tracts`} shown, on both sides, to see ${chosenNow.length === 1 ? "it" : "them"} better and compare the sides.` : "Adds lines to tracts listed near a structure (not yet to tracts chosen by name or through the box); lines are already added to every one shown, or none is shown.";
       addL.disabled = !!busy || seeding || !chosenNow.length;
       addL.onclick = () => { void addLines(chosenNow); };
       const ex = document.createElement("button"); ex.textContent = "Export the numbers";
       ex.title = "One table file at the top of Downloads, a row per tract and side: lines, FA, MD, AD, RD, volume, length, and the version that made them.";
       ex.onclick = () => { void runAction(ex, () => exportNumbers(scan), { busyLabel: "Exporting…", doneLabel: "Exported ✓", failedLabel: "Not exported" }).catch(() => {}); };
       bar.append(addL, ex);
+      const exported = exportedFor.get(scan.browserId);
       if (exported) {
         const fb = document.createElement("button"); fb.textContent = "Show in Finder"; fb.title = exported;
         fb.onclick = () => showInDownloads(exported); bar.append(fb);
@@ -1794,6 +1876,12 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     num("Step (voxels)", "How finely a tract follows the white matter: smaller is smoother and slower.", () => adv.stepVoxels, (v) => { adv.stepVoxels = v; }, 0.1, 0.1, 2);
     num("Highest b used", "Which images the maps and single-tensor tracts are made from: those up to this b-value. Changing it makes the maps again.", () => adv.maxB, (v) => { adv.maxB = v; const was = shownNow(scan); for (const c of computed.values()) dropMaps(c); computed.clear(); if (was) void showMap(scan, was); }, 100, 500, 5000);
     const bar9 = shell.actions(dev);
+    if (method === "single") {
+      const mk = document.createElement("button"); mk.textContent = busy.startsWith("Making") ? busy : "Make single-tensor tracts";
+      mk.title = "Starts single-tensor tracts in the white matter inside and around the structure chosen under Near (they get no names).";
+      mk.disabled = !!busy || !near || seeding; mk.onclick = () => { void makeTracts(); };
+      bar9.append(mk);
+    }
     const seedBtn = document.createElement("button"); seedBtn.textContent = seeding ? "Click in a view…" : "Seed where I click…";
     seedBtn.title = seeding ? "Waiting for a click in a view. Escape cancels." : "Start tracts at the next point you click in a slice or the 3D view.";
     seedBtn.disabled = !!busy; seedBtn.onclick = () => { if (seeding) { cancelSeeding?.(); say("Seeding cancelled."); } else seedWhereIClick(); };
@@ -1833,7 +1921,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       const g = probeIndex!.shown[h.set];
       const c = g.tract !== undefined ? tractColor(g.tract, tractCount) : g.unnamed ? UNNAMED : undefined;
       return { color: c ? [c[0], c[1], c[2]] as [number, number, number] : undefined,
-        text: `${g.name} · ${h.streamlines} fiber${h.streamlines === 1 ? "" : "s"} within 2 mm${h.closestMm < 0.5 ? "" : `, closest ${h.closestMm.toFixed(1)} mm`}`, source: "fiber tracts (Diffusion)" };
+        text: `${g.label ?? g.name} · ${h.streamlines} fiber${h.streamlines === 1 ? "" : "s"} within 2 mm${h.closestMm < 0.5 ? "" : `, closest ${h.closestMm.toFixed(1)} mm`}`, source: "fiber tracts (Diffusion)" };
     });
   });
 
@@ -1841,8 +1929,8 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     id: "diffusion",
     title: "Diffusion",
     groups: ["Display"],
-    tip: "Which of the brain's fiber tracts run near a tumor, for planning an operation.",
-    help: "<p><b>For preparing a case.</b> The module needs three things, and ticks each off when it is there: the <b>diffusion MRI</b> (the scan that shows the brain's wiring; often named DTI, DWI or diffusion), the <b>MRI of the anatomy</b> (usually the T1 with contrast), and the <b>tumor's outline</b>. <b>Open a patient…</b> opens the DICOM database; <b>Scans on this computer…</b> opens Load / Save, where a folder from a CD, a USB stick or an export is added to the database. Without an outline, draw a few <b>Tumor</b> strokes inside it and a few <b>Not tumor</b> strokes around it, on a few slices, then <b>Grow the outline</b>, check it, correct with more strokes, and press <b>Done</b>. Then <b>Show the fiber tracts near the tumor</b>: each named tract with at least 5 of its fibers within 6 mm of the tumor (the distance can be changed under Advanced) is shown whole, in its own color, with how close it comes; the tracts that come within 2 mm more, or that come close with fewer fibers, are listed after them in gray, hidden; pressing it again replaces the list. Each tract shows how many fibers the same tract has on the other side. Turn on the tracts you care about and press <b>Add lines</b>: it follows many more fibers in the tracts shown that have none added yet, on both sides (the other side stays hidden unless it is on), to see a thin tract better and compare the sides (about as long as the first run). A tract that looks thin or missing on the tumor's side may be destroyed by the tumor, or still there but hidden by swelling (edema). Only an outline named as a tumor (or made here) counts. Everything stays on this computer.</p><p><b>Advanced</b> holds the maps and the settings behind that button:</p><p>Shows what a diffusion MRI scan measures: <b>FA</b>, how strongly water moves along one direction (bright in white matter tracts), and <b>Color FA</b>, that direction as a color (red left-right, green front-back, blue up-down). A diffusion scan shows Color FA when it loads. When the case has an MRI of the anatomy, FA and Color FA are shown over it at half opacity; otherwise they fill the slice views. The gear in each slice view chooses the image, the one over it and how much shows through.</p><p><b>Tracts</b> follow the main direction of water movement from voxel to voxel. Under Advanced, <b>Make tracts</b> with <b>Single tensor</b> starts them in the white matter inside and around the chosen structure; with <b>Two-tensor</b> or <b>Smooth curves</b> it does what the face's button does, from the structure chosen there; <b>Seed where I click…</b> starts them at one point. <b>Smooth curves</b> follows fibers as gently bending lines from a model of every direction in each voxel (CSD and parallel transport tracking): about three minutes, an option. Tracts are drawn in 3D as tubes or lines, and as a dot in the tract's color wherever a shown tract crosses a slice, with the MRI of the anatomy behind it. Each tract is drawn 2 voxels shorter at each end, where fibers fan out (<b>Shorten ends</b>; 0 draws them whole); the tracts themselves stay whole. Each group can be hidden or removed.</p><p><b>Two-tensor</b> (UKF, the default) follows two fiber directions, from a starting point in every voxel of the brain, with the settings of the atlas the tract names come from (as Mike Halle's tractline does), so tracts reach into the swelling around a tumor; it runs on the graphics card and agrees with the original UKFTractography program (on a whole brain, 93% of fibers end within 0.1 mm of the original's from the same starting points). <b>Single tensor</b> follows one direction per voxel; where tracts cross, that direction is an average, and a tract may stop or turn. With <b>Two-tensor</b>, <b>Make tracts</b> follows tracts through the whole brain and names them with RapidParc (Bisten, Schultz et al., University of Bonn), a network trained on an atlas of 800 fiber clusters (Zhang, O'Donnell et al.); each named tract that comes within the distance of the chosen structure is shown whole, in its own color, with its closest distance to the structure. Streamlines no name fits and pass close are shown in gray; the rest of the brain is kept, hidden.</p><p><b>Licenses.</b> Research software: not reviewed or approved by the FDA or any other agency; clinical applications are neither recommended nor advised. The two-tensor tracking is a port of UKFTractography (authors: Yogesh Rathi, Stefan Lienhard, Yinpeng Li, Martin Styner, Ipek Oguz, Yundi Shi, Christian Baumgartner, Ryan Eckbo, Tashrif Billah and Dheshan Mohandass; github.com/pnlbwh/ukftractography). All or portions of this licensed product (such portions are the \"Software\") have been obtained under license from The Brigham and Women's Hospital, Inc. and are subject to the following terms and conditions: <a href=\"./vendor/diffusion/licenses/LICENSE-UKF.txt\" target=\"_blank\">the UKF Tractography Contribution and Software License Agreement</a> (this is a modified version: translated to TypeScript and WGSL). RapidParc's trained network is under <a href=\"./vendor/diffusion/rapidparc/LICENSE.txt\" target=\"_blank\">its BSD license</a> (University of Bonn); TractCloud's table of tract names under <a href=\"./vendor/diffusion/tractcloud/LICENSE.txt\" target=\"_blank\">3D Slicer's license</a>; dcm2niix under <a href=\"./vendor/diffusion/dcm2niix/LICENSE.txt\" target=\"_blank\">its own (BSD)</a>; the rest of this extension under the <a href=\"./vendor/diffusion/licenses/LICENSE\" target=\"_blank\">Apache License 2.0</a> (<a href=\"./vendor/diffusion/licenses/NOTICE\" target=\"_blank\">NOTICE</a>).</p>",
+    tip: "The brain's fiber tracts from a diffusion MRI: those near a tumor or any structure, by name, or through a box; their numbers, left and right.",
+    help: "<p><b>What it shows.</b> The brain's main fiber tracts, found in a diffusion MRI (often named DTI, DWI or diffusion) and lined up with the MRI of the anatomy (the T1). When a diffusion MRI comes into the database, Albula finds and names the whole brain's tracts once, in the background, so choosing them here takes about a second. The top of the module says how they were made, each step with its method; <b>Details and references</b> leads here.</p><p><b>Choose tracts</b> in one of three ways (the ▼ beside Choose). <b>Near a structure</b>: the named tracts that come within a distance (<b>Within</b>) of a tumor, any segment of the patient, or a structure you outline here (<b>Outline one here…</b>: strokes inside, strokes around, Grow, Done); each is shown whole, in its own color, with how close it comes; tracts that come within 2 mm more, or close with fewer lines, are listed in gray, hidden. A case with a tumor opens on this way. <b>By name</b>: tick a tract and both its sides are drawn; untick it and they go. Any other brain opens on this way. <b>Through a place</b>: a box put where the slice views cross; move and resize it with its handles, and the lines through it follow.</p><p><b>Shown</b> lists one row per tract with its left and right side next to each other: near a structure, how close it comes and the lines on each side; otherwise the lines and FA on each side. The row's tooltip gives MD, AD and RD, the volume, the length, and how lopsided the tract is (left against right). The left side is drawn a shade darker than the right. Click a name to rename it; the ⋯ at the end of the row (or a right-click) removes it, lists the tracts near it, adds lines to it, or opens the paper that describes it. <b>Add lines to the tracts shown</b> follows many more lines in the tracts shown near a structure, on both sides. <b>Export the numbers</b> puts one table file (CSV) at the top of Downloads: a row per tract and side with lines, FA, MD, AD, RD, volume and length, and what made them. A tract that looks thin or missing on a tumor's side may be destroyed by the tumor, or still there but hidden by swelling (edema): compare it with the other side. Everything stays on this computer.</p><p><b>Advanced</b> holds the maps (<b>b0 (corrected)</b>, <b>FA</b>: how strongly water moves along one direction, and <b>Color FA</b>: that direction as a color, red left-right, green front-back, blue up-down; shown over the T1), the scan as acquired, the distortion and head-movement corrections, how tracts are drawn (lines or tubes, colored by tract or by direction, ends shortened), and, under For developers, the tracking method and its numbers.</p><p><b>Two-tensor</b> (UKF, the default) follows two fiber directions, from a starting point in every voxel of the brain, with the settings of the atlas the tract names come from (as Mike Halle's tractline does), so tracts reach into the swelling around a tumor; it runs on the graphics card and agrees with the original UKFTractography program (on a whole brain, 93% of fibers end within 0.1 mm of the original's from the same starting points). <b>Single tensor</b> follows one direction per voxel; where tracts cross, that direction is an average, and a tract may stop or turn. With <b>Two-tensor</b>, <b>Make tracts</b> follows tracts through the whole brain and names them with RapidParc (Bisten, Schultz et al., University of Bonn), a network trained on an atlas of 800 fiber clusters (Zhang, O'Donnell et al.); each named tract that comes within the distance of the chosen structure is shown whole, in its own color, with its closest distance to the structure. Streamlines no name fits and pass close are shown in gray; the rest of the brain is kept, hidden.</p><p><b>Licenses.</b> Research software: not reviewed or approved by the FDA or any other agency; clinical applications are neither recommended nor advised. The two-tensor tracking is a port of UKFTractography (authors: Yogesh Rathi, Stefan Lienhard, Yinpeng Li, Martin Styner, Ipek Oguz, Yundi Shi, Christian Baumgartner, Ryan Eckbo, Tashrif Billah and Dheshan Mohandass; github.com/pnlbwh/ukftractography). All or portions of this licensed product (such portions are the \"Software\") have been obtained under license from The Brigham and Women's Hospital, Inc. and are subject to the following terms and conditions: <a href=\"./vendor/diffusion/licenses/LICENSE-UKF.txt\" target=\"_blank\">the UKF Tractography Contribution and Software License Agreement</a> (this is a modified version: translated to TypeScript and WGSL). RapidParc's trained network is under <a href=\"./vendor/diffusion/rapidparc/LICENSE.txt\" target=\"_blank\">its BSD license</a> (University of Bonn); TractCloud's table of tract names under <a href=\"./vendor/diffusion/tractcloud/LICENSE.txt\" target=\"_blank\">3D Slicer's license</a>; dcm2niix under <a href=\"./vendor/diffusion/dcm2niix/LICENSE.txt\" target=\"_blank\">its own (BSD)</a>; the rest of this extension under the <a href=\"./vendor/diffusion/licenses/LICENSE\" target=\"_blank\">Apache License 2.0</a> (<a href=\"./vendor/diffusion/licenses/NOTICE\" target=\"_blank\">NOTICE</a>).</p>",
     acknowledgements: DIFFUSION_REFERENCES.map((r) => `${r.cite}${r.link ? ` ${r.link}` : ""} — ${r.usedFor}${r.verified ? "" : " (citation to be checked)"}`),
     mount(el) { root = el; render(); },
     onShow() { render(); },

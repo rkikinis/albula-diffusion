@@ -25,10 +25,12 @@ Deno.test("the numbers: each voxel once, volume from the grid, median length, me
   const s1 = line([0, 0, 0], [2, 0, 0]), s2 = line([0, 0, 0], [2, 0, 0], [2, 0, 0]);
   const fa = new Float32Array(1000); fa[0] = 0.2; fa[1] = 0.6;
   const md = new Float32Array(1000).fill(0.0008);
-  const m = measure([s1, s2], { ...grid, fa, md });
+  const m = measure([s1, s2], { ...grid, fa, md }, 1);
   assertEquals([m.lines, m.voxels], [2, 2]);
   assertAlmostEquals(m.volumeMl, 0.016, 1e-9);
-  assertAlmostEquals(m.fa!, 0.4, 1e-6);
+  assertAlmostEquals(m.fa!, 0.4, 1e-6);   // rule 1: (0.2 + 0.6) / 2, each voxel once
+  // Rule 2, the default: every point counts -- s1 reads (0,0,0),(1,0,0); s2 (0,0,0),(1,0,0),(1,0,0).
+  assertAlmostEquals(measure([s1, s2], { ...grid, fa, md }).fa!, (2 * 0.2 + 3 * 0.6) / 5, 1e-6);
   assertAlmostEquals(m.md!, 0.0008, 1e-9);
   assertEquals(m.ad, undefined);
   assertAlmostEquals(m.lengthMm, 2, 1e-6);
@@ -46,7 +48,10 @@ Deno.test("the CSV: a header, a row per tract and side, quoted where needed", ()
     m: { lines: 10, voxels: 4, volumeMl: 0.032, lengthMm: 88.25, fa: 0.4567, md: 0.00081 } }]);
   const [head, row] = csv.trim().split("\n");
   assert(head.startsWith("scan,tract,abbreviation,side,lines"));
-  assertEquals(row, '"PAT16 · DTI ""AP""",Arcuate fasciculus,AF,left,10,4,0.03,88.3,0.4567,0.0008100,,,tracking rule 3');
+  assertEquals(row, '"PAT16 · DTI ""AP""",Arcuate fasciculus,AF,left,10,4,0.03,88.3,0.4567,0.0008100,,,tracking rule 3,,');
+  // The grid and the rule the means were taken by travel with the numbers (critic 2026-10-15, finding 23).
+  const r2 = toCsv([{ scan: "s", tract: "t", abbreviation: "T", side: "right", madeBy: "m", gridMm: [2.5, 2.5, 2.5], rule: 2, m: { lines: 1, voxels: 1, volumeMl: 0, lengthMm: 0 } }]).trim().split("\n")[1];
+  assert(r2.includes(",m,2.50 x 2.50 x 2.50,") && r2.endsWith(",2: mean over the streamlines' points (as SlicerDMRI's tractography measurements)"), r2);
 });
 
 Deno.test("the face opens near the tumor when there is one, else by name", () => {

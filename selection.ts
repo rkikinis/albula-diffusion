@@ -4,9 +4,13 @@
 // calls them and holds no copy of the rules.
 //   - by name: the streamlines of chosen tracts and sides;
 //   - through a box: the streamlines with a point inside a box (a Markups Box: center, size, its own axes);
-//   - the numbers of a set of streamlines: lines, and the mean FA / MD / AD / RD over the voxels they pass through
-//     (EACH VOXEL ONCE), its volume and the median length (tractometry's whole-tract numbers; Yeatman et al. 2012 for
-//     the measures, Jones, Knosche and Turner 2013 on why the number of lines is no measure of the brain);
+//   - the numbers of a set of streamlines: lines, the mean FA / MD / AD / RD, the volume (the voxels they pass through,
+//     each once) and the median length. HOW THE MEAN IS TAKEN is a numbered rule (MEASURE_RULES; the export records it):
+//     2, the default since 2026-10-15, the mean over the streamlines' points, each read from the voxel it falls in, as
+//     SlicerDMRI's tractography measurements take it -- a core voxel hundreds of lines pass through counts as often as
+//     they do; 1, the first version, the mean over the voxels passed through, each once, which the critic found about a
+//     third lower (an edge voxel one line grazes weighs as much as the core: qa/2026-10-15-diffusion-v3-face.md, finding
+//     4). Jones, Knosche and Turner 2013 on why the number of lines is no measure of the brain;
 //   - laterality (left - right) / (left + right);
 //   - the export: one CSV row per tract and side.
 
@@ -73,11 +77,28 @@ export function voxelsOf(sl: Float32Array[], grid: { dims: number[]; ijkToRAS: n
 
 const lengthOf = (p: Float32Array) => { let L = 0; for (let k = 3; k < p.length; k += 3) L += Math.hypot(p[k] - p[k - 3], p[k + 1] - p[k - 2], p[k + 2] - p[k - 1]); return L; };
 
-/** The whole-tract numbers of a set of streamlines on the maps (each voxel counted once). */
-export function measure(sl: Float32Array[], maps: Maps): Measures {
+/** How a tract's mean is taken: the numbered rules (Ron, 2026-09-25: "modular … and also versioned"). */
+export const MEASURE_RULES = { 1: "mean over the voxels passed through, each once", 2: "mean over the streamlines' points (as SlicerDMRI's tractography measurements)" } as const;
+export type MeasureRule = keyof typeof MEASURE_RULES;
+export const MEASURE_RULE: MeasureRule = 2;
+
+/** The flat voxel index of every streamline point on the grid, repeats kept (rule 2's samples). */
+function pointVoxels(sl: Float32Array[], grid: { dims: number[]; ijkToRAS: number[] }): number[] {
+  const inv = inverse(grid.ijkToRAS), [nx, ny, nz] = grid.dims, out: number[] = [];
+  for (const p of sl) for (let k = 0; k < p.length; k += 3) {
+    const x = p[k], y = p[k + 1], z = p[k + 2];
+    const i = Math.round(inv[0] * x + inv[1] * y + inv[2] * z + inv[3]), j = Math.round(inv[4] * x + inv[5] * y + inv[6] * z + inv[7]), l = Math.round(inv[8] * x + inv[9] * y + inv[10] * z + inv[11]);
+    if (i >= 0 && j >= 0 && l >= 0 && i < nx && j < ny && l < nz) out.push(i + nx * (j + ny * l));
+  }
+  return out;
+}
+
+/** The whole-tract numbers of a set of streamlines on the maps; the mean taken by `rule` (MEASURE_RULES). */
+export function measure(sl: Float32Array[], maps: Maps, rule: MeasureRule = MEASURE_RULE): Measures {
   const vox = voxelsOf(sl, maps);
   const m = maps.ijkToRAS, voxelMl = Math.abs(m[0] * (m[5] * m[10] - m[6] * m[9]) - m[1] * (m[4] * m[10] - m[6] * m[8]) + m[2] * (m[4] * m[9] - m[5] * m[8])) / 1000;
-  const mean = (a?: ArrayLike<number>) => { if (!a || !vox.size) return undefined; let s = 0; for (const v of vox) s += Number(a[v]); return s / vox.size; };
+  const samples: number[] = rule === 1 ? [...vox] : pointVoxels(sl, maps);
+  const mean = (a?: ArrayLike<number>) => { if (!a || !samples.length) return undefined; let s = 0; for (const v of samples) s += Number(a[v]); return s / samples.length; };
   const lengths = sl.map(lengthOf).sort((a, b) => a - b);
   const median = lengths.length ? (lengths.length % 2 ? lengths[(lengths.length - 1) / 2] : (lengths[lengths.length / 2 - 1] + lengths[lengths.length / 2]) / 2) : 0;
   const out: Measures = { lines: sl.length, voxels: vox.size, volumeMl: vox.size * voxelMl, lengthMm: median };
@@ -93,13 +114,14 @@ export function laterality(left: number | undefined, right: number | undefined):
 }
 
 /** One table row per tract and side, as a CSV a spreadsheet opens (RFC 4180 quoting). */
-export interface ExportRow { scan: string; tract: string; abbreviation: string; side: string; m: Measures; madeBy: string }
+export interface ExportRow { scan: string; tract: string; abbreviation: string; side: string; m: Measures; madeBy: string;
+  /** The maps' voxel size in mm (the volume depends on it), and the rule the means were taken by. */ gridMm?: number[]; rule?: MeasureRule }
 export function toCsv(rows: ExportRow[]): string {
   const q = (s: string) => /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   const n = (x: number | undefined, d: number) => x === undefined ? "" : x.toFixed(d);
-  const head = ["scan", "tract", "abbreviation", "side", "lines", "voxels", "volume_ml", "median_length_mm", "fa", "md_mm2_per_s", "ad_mm2_per_s", "rd_mm2_per_s", "made_by"];
+  const head = ["scan", "tract", "abbreviation", "side", "lines", "voxels", "volume_ml", "median_length_mm", "fa", "md_mm2_per_s", "ad_mm2_per_s", "rd_mm2_per_s", "made_by", "map_grid_mm", "mean_rule"];
   const lines = rows.map((r) => [q(r.scan), q(r.tract), q(r.abbreviation), r.side, String(r.m.lines), String(r.m.voxels), n(r.m.volumeMl, 2), n(r.m.lengthMm, 1),
-    n(r.m.fa, 4), n(r.m.md, 7), n(r.m.ad, 7), n(r.m.rd, 7), q(r.madeBy)].join(","));
+    n(r.m.fa, 4), n(r.m.md, 7), n(r.m.ad, 7), n(r.m.rd, 7), q(r.madeBy), r.gridMm ? r.gridMm.map((x) => x.toFixed(2)).join(" x ") : "", r.rule ? q(`${r.rule}: ${MEASURE_RULES[r.rule]}`) : ""].join(","));
   return [head.join(","), ...lines].join("\n") + "\n";
 }
 
