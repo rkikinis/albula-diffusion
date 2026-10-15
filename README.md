@@ -93,8 +93,11 @@ on any other path into core, and core never imports an extension. `extension.jso
 | entry | what it registers |
 |---|---|
 | `hooks.ts` | what separates one DICOM volume from the next (the b-value and direction: `diffusion-vendors.ts`), and the BIDS `dwi/` kind (`bids-dwi.ts`). Loaded wherever data is read: the app, the copy writer, the command-line tools. |
-| `module.ts` | the Diffusion module: the patient's case and the one button; under Advanced, Maps (signal, FA, Color FA, distortion, dcm2niix's check), Tracts (near a structure or from a clicked point; two-tensor, smooth curves or single tensor), and the tract list (search, groups, Show / Hide all, Add lines), drawn as tubes in 3D and as dots where they cross the slices; data-probe rows for the tracts under the pointer. |
+| `module.ts` | the Diffusion module: the patient's case and the one button; under Advanced, Maps (b0 corrected, FA, Color FA, distortion, dcm2niix's check), Tracts (near a structure or from a clicked point; two-tensor, smooth curves or single tensor), and the tract list (search, groups, Show / Hide all, Add lines), drawn as tubes in 3D and as dots where they cross the slices; data-probe rows for the tracts under the pointer. |
 | assets | `tractcloud/model/` (the trained network, 8.9 MB) and `vendor/dcm2niix/`, copied beside the app's bundle. |
+
+Its modules follow the [Albula Module Design Rules](https://github.com/rkikinis/SlicerAlbula/blob/main/Contents/docs/MODULE-DESIGN-RULES.md),
+as every module in Albula does; a new extension's modules start from them.
 
 ## Building and testing
 
