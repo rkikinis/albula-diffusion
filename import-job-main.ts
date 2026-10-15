@@ -3,7 +3,13 @@
 // run by hand against a running server:
 //
 //   deno run -A --unstable-webgpu --config Contents/src/SlicerLive/deno.jsonc Contents/extensions/diffusion/import-job-main.ts \
-//     --server http://127.0.0.1:<port> --db <database id> [--series <SeriesInstanceUID>] [--dry-run] [--force] [--counts-only] [--assets <dir>]
+//     --server http://127.0.0.1:<port> --db <database id> [--series <SeriesInstanceUID>] [--dry-run] [--force] [--counts-only] [--only-missing] [--assets <dir>]
+//
+// `--only-missing` (how Albula's server runs it since 2026-10-14, desktop/extension-jobs.ts): tracts are made only for a
+// diffusion scan that has none. Tracts an earlier version made are KEPT, never remade or replaced (Ron, 2026-10-14: "for
+// reproducibility scientists would like to run a specific version of a pipeline on data. You need to rethink that concept
+// of stale"): a result is not stale, it is what a version made, and that version is recorded in it. Such a case is
+// reported as state "kept".
 //
 // It prints ONE JSON OBJECT A LINE on standard output -- {"event": "plan" | "case" | "progress" | "done" | "error", ...};
 // what a person reads is in "said". `--counts-only` prints states and counts only: no identifiers, no series names, no
@@ -17,12 +23,12 @@ import { parseNiftiVolumes } from "albula";
 import "./hooks.ts";
 import { loadModel, type ModelJson } from "./tractcloud/tractcloud.ts";
 import { loadRapidParc } from "./rapidparc/rapidparc.ts";
-import { importGraph, makeTracts, planStudy, studiesOf, synthstripVersion } from "./import-job.ts";
+import { importGraph, makeTracts, planStudy, storedTracts, studiesOf, synthstripVersion } from "./import-job.ts";
 
-const args = parseArgs(Deno.args, { string: ["server", "db", "series", "assets"], boolean: ["dry-run", "force", "counts-only"] });
+const args = parseArgs(Deno.args, { string: ["server", "db", "series", "assets"], boolean: ["dry-run", "force", "counts-only", "only-missing"] });
 const quiet = args["counts-only"];
 // In counts-only mode only these fields leave the program.
-const QUIET_KEYS = new Set(["at", "event", "case", "of", "state", "cases", "studies", "streamlines", "stored", "named", "seconds", "wall", "made", "current", "waiting", "cannot", "failed", "wouldBeMade"]);
+const QUIET_KEYS = new Set(["at", "event", "case", "of", "state", "cases", "studies", "streamlines", "stored", "named", "seconds", "wall", "made", "current", "kept", "waiting", "cannot", "failed", "wouldBeMade"]);
 const say = (o: Record<string, unknown>) => {
   const line = { at: new Date().toISOString(), ...o };
   console.log(JSON.stringify(quiet ? Object.fromEntries(Object.entries(line).filter(([k]) => QUIET_KEYS.has(k))) : line));
@@ -81,7 +87,7 @@ try {
   const { rows, studies } = await studiesOf(db.path, args.series);
   if (args.series && !studies.length) { say({ event: "error", said: `series ${args.series} is not an MR series in this database's index` }); exitCode = 2; }
   say({ event: "plan", studies: studies.length, said: `${studies.length} stud${studies.length === 1 ? "y" : "ies"} with MR series to look at`, versions });
-  const n = { made: 0, wouldBeMade: 0, current: 0, waiting: 0, cannot: 0, failed: 0 };
+  const n = { made: 0, wouldBeMade: 0, current: 0, kept: 0, waiting: 0, cannot: 0, failed: 0 };
   let k = 0;
   // A STUDY AT A TIME: its series read, its cases made, then let go (finding 3).
   for (const study of studies) {
@@ -92,6 +98,11 @@ try {
       if (args.series && plan.dwi.facts.uid !== args.series) continue;
       k++;
       const t0 = performance.now();
+      if (args["only-missing"] && (await storedTracts(db.path, plan.dwi.facts.uid).catch(() => [])).length) {
+        n.kept++;
+        say({ event: "case", case: k, series: plan.dwi.facts.uid, state: "kept", said: "fiber tracts are there already (made by an earlier or the same version); kept" });
+        continue;
+      }
       try {
         const out = await makeTracts(db.path, db.id, server, plan, device, model, labeler, versions,
           (line) => say({ event: "progress", case: k, series: plan.dwi.facts.uid, said: line }), { force: args.force, dryRun: args["dry-run"], template });
@@ -106,7 +117,7 @@ try {
       }
     }
   }
-  say({ event: "done", ...n, said: `fiber tracts: ${n.made} made, ${n.wouldBeMade} would be made (dry run), ${n.current} already current, ${n.waiting} waiting, ${n.cannot} cannot be made on this Mac, ${n.failed} failed` });
+  say({ event: "done", ...n, said: `fiber tracts: ${n.made} made, ${n.wouldBeMade} would be made (dry run), ${n.current} already current, ${n.kept} kept as made, ${n.waiting} waiting, ${n.cannot} cannot be made on this Mac, ${n.failed} failed` });
   device.destroy();
 } catch (e) {
   say({ event: "error", said: (e as Error).message });

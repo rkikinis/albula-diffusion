@@ -49,6 +49,8 @@ import { MOTION_RULE, type MotionRuleId } from "./motion.ts";
 /** "Stop below FA"'s default under Advanced (the single-tensor tracker's; the UKF's comes from the tracking rule). */
 const ADV_MIN_FA = 0.15;
 import { DCM2NIIX_VERSION, secondOpinion, type SecondOpinion } from "./second-opinion.ts";
+import { databaseSeries } from "albula";
+import { dicomToTracts, UNNAMED as UNNAMED_SET } from "./tracts-dicom.ts";
 import { assetUrl, holdDrawing, seriesDicomFiles, startPlacing, restartSegmentationServer, startSegmentationServer, synthstripBrainMask, type BrainMaskResult } from "albula";
 import { createSegmentation, growIntoSegmentation, openDicomDatabase, openLoadFromDisk, paintInto, registerProbeRows, registerRayHits, runAction, saveSegmentationToDicom, showHideAllState } from "albula";
 import { buildTractIndex, tractsNear, type TractIndex } from "./tract-index.ts";
@@ -692,6 +694,61 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     finally { busy = ""; render(); }
   }
 
+  // ── THE TRACTS MADE AT IMPORT (DMRI-AT-IMPORT.md in the workspace; Ron, 2026-10-05: "automatic import"; "q3: A" --
+  // the button waits for the background run and says so). Albula's server runs the extension's job after scans are
+  // added to a database (desktop/extension-jobs.ts). Its Tractography Results object, stored under the diffusion series,
+  // holds the whole brain's streamlines already named; the button then only measures them against the structure.
+  // WHICH ONE: the newest the database holds for the scan. Every object records the version that made it; none is
+  // "stale" (Ron, 2026-10-14: "for reproducibility scientists would like to run a specific version of a pipeline on
+  // data"): choosing among versions is the versioning design still to come.
+  const storedState = new Map<string, { state: "stored" | "none" | "unknown"; made?: string; seriesUID?: string }>();
+  let jobBusyNow = false;
+  // While a loaded scan has no stored tracts: look again every 10 s (the server may be making them right now).
+  setInterval(() => {
+    const waiting = scans().filter((x) => storedState.get(x.browserId)?.state !== "stored");
+    if (!waiting.length || !root) return;
+    void (async () => {
+      const was = jobBusyNow, before = waiting.map((x) => storedState.get(x.browserId)?.state).join();
+      jobBusyNow = await jobRunning();
+      for (const x of waiting) await findStored(x).catch(() => {});
+      if (was !== jobBusyNow || before !== waiting.map((x) => storedState.get(x.browserId)?.state).join()) render();
+    })();
+  }, 10_000);
+  const dwiUidOf = (scan: Scan) => (live.nodes.get(scan.frameIds[0])?.origin as Record<string, unknown> | undefined)?.seriesInstanceUID as string | undefined;
+  async function findStored(scan: Scan): Promise<{ seriesUID: string } | null> {
+    const uid = dwiUidOf(scan);
+    if (!uid) { storedState.set(scan.browserId, { state: "none" }); return null; }
+    const db = await databaseSeries({ fresh: true }).catch(() => null);
+    if (!db) { storedState.set(scan.browserId, { state: "unknown" }); return null; }
+    const num = new Map(db.series.map((x) => [x.seriesInstanceUID, x.seriesNumber ?? 0]));
+    const kids = db.edges.filter((e) => e.kind === "tracts" && e.parent === uid && num.has(e.child)).sort((a, b) => (num.get(b.child) ?? 0) - (num.get(a.child) ?? 0));
+    if (!kids.length) { storedState.set(scan.browserId, { state: "none" }); return null; }
+    storedState.set(scan.browserId, { state: "stored", seriesUID: kids[0].child });
+    return { seriesUID: kids[0].child };
+  }
+  /** The stored whole-brain tracts as the module's own run would have made them: the streamlines and their names. */
+  async function loadStored(scan: Scan, model: TractCloudModel): Promise<{ sl: Float32Array[]; named: Named; made?: string } | null> {
+    const at = await findStored(scan);
+    if (!at) return null;
+    const files = await seriesDicomFiles(at.seriesUID);
+    if (!files?.length) return null;
+    const t = await dicomToTracts(new Uint8Array(files[0]));
+    const names = model.json.tracts, OTHER = names.length - 1, index = new Map(names.map((x, i) => [x.name, i]));
+    const sl: Float32Array[] = [], tract: number[] = [], side: number[] = [];
+    for (const set of t.sets) {
+      const ti = set.label === UNNAMED_SET ? OTHER : index.get(set.label) ?? OTHER;
+      for (const p of set.streamlines) { sl.push(p); tract.push(ti); side.push(ti === OTHER ? 0 : set.side); }
+    }
+    const made = typeof t.provenance?.made === "string" ? t.provenance.made : undefined;
+    storedState.set(scan.browserId, { state: "stored", seriesUID: at.seriesUID, made });
+    return { sl, named: { tract: Int32Array.from(tract), side: Int8Array.from(side), draws: 0, seconds: 0 }, made };
+  }
+  /** Is the server preparing this extension's work right now? (GET /_jobs, desktop/extension-jobs.ts) */
+  const jobRunning = async (): Promise<boolean> => {
+    const s = await fetch("/_jobs", { cache: "no-store" }).then((r) => r.ok ? r.json() : null).catch(() => null) as { running?: { extension?: string }; queued?: string[] } | null;
+    return !!s && (s.running?.extension === "diffusion" || !!s.queued?.length);
+  };
+
   /**
    * TRACTS NEAR A STRUCTURE, NAMED (Ron, 2026-09-30: whole brain first, then keep what is near the tumor, whole): UKF
    * through the whole brain, TractCloud names every streamline (tractcloud/), and each named tract that comes within
@@ -704,21 +761,40 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       const c = await ensureFit(scan);
       const times: StageTimes = takeFitTimes(), before = times.total ?? 0;
       const t0 = performance.now();
-      if (method === "ukf") await brainFor(c);
-      const seeds = method === "ukf" ? seedsFor(c.fit, TRACKING_RULES[c.rule]) : wholeBrainSeeds(c.fit);
-      times.seeds = performance.now() - t0;
-      say(`Following tracts through the whole brain from ${seeds.length.toLocaleString()} starting points…`);
-      lastTiming = undefined;
-      const sl = method === "ptt" ? await trackPtt(c, seeds) : await trackUkf(c, seeds);
-      const t1 = performance.now();
-      times.track = t1 - t0 - times.seeds;
-      if (lastTiming) times.trackDetail = lastTiming;
-      busy = "Naming tracts…"; render();
       const model = await tractCloud();
       tractCount = model.json.tracts.length;
-      const rp = await rapidParc(), releaseN = holdDrawing("naming tracts");
-      const named = await nameTracts(device, model, sl, { rapidParc: rp }).finally(releaseN);
-      times.name = named.seconds * 1000;
+      // THE TRACTS MADE AT IMPORT, when the database has them (UKF, the default method, is what the job runs); while the
+      // server is still preparing them, wait for it and say so (Ron's "q3: A": one run, never two).
+      let stored = method === "ukf" ? await loadStored(scan, model).catch(() => null) : null;
+      if (!stored && method === "ukf" && await jobRunning()) {
+        const tw = performance.now();
+        while (await jobRunning() && performance.now() - tw < 15 * 60_000) {
+          busy = `Waiting for the fiber tracts being prepared… ${Math.round((performance.now() - tw) / 1000)} s`; render();
+          await new Promise((r) => setTimeout(r, 3000));
+        }
+        stored = await loadStored(scan, model).catch(() => null);
+        busy = "Making tracts…"; render();
+      }
+      let sl: Float32Array[], named: Named;
+      if (stored) {
+        sl = stored.sl; named = stored.named;
+        times.track = 0; times.name = 0;
+        say(`Using the fiber tracts made when the scan was imported${stored.made ? ` (${stored.made.slice(0, 10)})` : ""}: ${sl.length.toLocaleString()} streamlines.`);
+      } else {
+        if (method === "ukf") await brainFor(c);
+        const seeds = method === "ukf" ? seedsFor(c.fit, TRACKING_RULES[c.rule]) : wholeBrainSeeds(c.fit);
+        times.seeds = performance.now() - t0;
+        say(`Following tracts through the whole brain from ${seeds.length.toLocaleString()} starting points…`);
+        lastTiming = undefined;
+        sl = method === "ptt" ? await trackPtt(c, seeds) : await trackUkf(c, seeds);
+        const t1 = performance.now();
+        times.track = t1 - t0 - times.seeds;
+        if (lastTiming) times.trackDetail = lastTiming;
+        busy = "Naming tracts…"; render();
+        const rp = await rapidParc(), releaseN = holdDrawing("naming tracts");
+        named = await nameTracts(device, model, sl, { rapidParc: rp }).finally(releaseN);
+        times.name = named.seconds * 1000;
+      }
       const tDist = performance.now();
       busy = "Measuring distances…"; render();
       const z = await fetchZarrVolumeNative(live.blobBase(), target.seg.zarr as ZarrDesc), lab = z.data;
@@ -1046,6 +1122,16 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     need(!!scan, "Diffusion MRI", scan ? scan.name.replace(/^.*?·\s*(MR\s+)?/, "") : "not loaded; it is often named DTI, DWI or diffusion", "The scan that shows the brain's wiring.");
     need(!!anat, "MRI of the anatomy", anat ? String(anat.name ?? "").replace(/^.*?·\s*(MR\s+)?/, "") : "not loaded; usually the T1 with contrast the tumor was seen on", "The scan the tumor is outlined on.");
     need(tumors.length > 0, "Tumor outline", tumors.length ? (tumors.length > 1 ? `${tumors.length} to choose from (below)` : tumors[0].label) : anat ? `none yet: make it below${segs.length ? " (the outlines loaded are not named as a tumor)" : ""}` : "none yet", "The tumor's outline, drawn on the anatomical MRI. The fiber tracts are measured from its edge. An outline counts when its name says tumor (or glioma, meningioma, lesion, …), or when it was made here.");
+    // FIBER TRACTS, MADE AT IMPORT OR NOT (DMRI-AT-IMPORT.md, "What the resident sees"): one line, said, not a fourth tick.
+    if (scan) {
+      const st = storedState.get(scan.browserId);
+      const tl = document.createElement("div"); tl.className = "sl-hint"; tl.style.margin = "2px 0 0 22px";
+      tl.textContent = st?.state === "stored" ? `Fiber tracts: made when the scan was imported${st.made ? ` (${st.made.slice(0, 10)})` : ""}`
+        : jobBusyNow ? "Fiber tracts: being prepared in the background now"
+        : st?.state === "none" ? "Fiber tracts: not made yet; the button below makes them (about a minute)" : "";
+      tl.title = "The whole brain's fiber tracts are found and named once, when the diffusion MRI comes into the database, so the button only has to measure them. Each set records the version of the method that made it.";
+      if (tl.textContent) caseSec.append(tl);
+    }
     if (!scan || !anat) {
       const bar0 = shell.actions(caseSec);
       const open = document.createElement("button"); open.className = "sl-primary"; open.textContent = "Open a patient…";
@@ -1478,6 +1564,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       seenScans.add(s.browserId);
       chosen = s.browserId;
       void showMap(s, "colorfa");
+      void findStored(s).then(() => render()).catch(() => {});
     }
     const now = sig();
     if (now !== lastSig || pruned) { lastSig = now; render(); }

@@ -6,8 +6,10 @@
   "about": "Diffusion MRI for brain tumor planning: reading diffusion data from every major scanner, FA and Color FA, distortion correction, UKF two-tensor free-water tractography on the graphics card, tract names from RapidParc, the tracts near a tumor.",
   "entries": {
     "hooks": "hooks.ts",
-    "module": "module.ts"
+    "module": "module.ts",
+    "job": "import-job-main.ts"
   },
+  "jobLabel": "Preparing fiber tracts",
   "assets": {
     "tractcloud": [
       "tractcloud/model/weights.f32",
