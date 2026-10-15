@@ -43,10 +43,13 @@ const MAX_SERIES_FILES = 4000;
  * must still make stored tracts stale), the naming network's weights and table, and SynthStrip's version. Stored tracts
  * are current only when all of it AND the inputs are the same (Ron, 2026-10-05: "remake automatically, versioned").
  */
-export function jobRules(versions: { code: string; labeler: string; synthstrip: string }): Record<string, string | number> {
+export function jobRules(versions: { code: string; labeler: string; synthstrip: string; core?: string; extension?: string }): Record<string, string | number> {
   return { directions: DIRECTION_CHECK_RULE, distortion: DISTORTION_RULE, motion: MOTION_RULE, registration: REGISTRATION_RULE, tracking: TRACKING_RULE,
     outside: OUTSIDE_RULE.on ? OUTSIDE_RULE.id : 0, maxB: PIPELINE_MAX_B, tractColors: TRACT_COLORS_VERSION,
-    headFrame: HEAD_FRAME_RULE, code: versions.code, labeler: versions.labeler, synthstrip: versions.synthstrip };
+    headFrame: HEAD_FRAME_RULE, code: versions.code, labeler: versions.labeler, synthstrip: versions.synthstrip,
+    // THE COMMITS of Albula's core and of this extension that ran ("+changes" when their folders differed), so the record
+    // names the code beyond this extension's own files (critic 2026-10-14, import-time jobs, finding 6).
+    ...(versions.core ? { core: versions.core } : {}), ...(versions.extension ? { extension: versions.extension } : {}) };
 }
 /** The inputs a case was made from: a reversed scan or a T1 that arrives later makes the case stale (finding 11). */
 export interface CaseInputs { diffusion: string; partner: string | null; t1: string | null }
