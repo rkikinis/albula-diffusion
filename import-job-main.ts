@@ -25,7 +25,7 @@ import { parseNiftiVolumes } from "albula";
 import "./hooks.ts";
 import { loadModel, type ModelJson } from "./tractcloud/tractcloud.ts";
 import { loadRapidParc } from "./rapidparc/rapidparc.ts";
-import { b0Path, colorFaPath, faPath, importGraph, makeTracts, planStudy, studiesOf, synthstripVersion } from "./import-job.ts";
+import { importGraph, makeMaps, makeTracts, MAP_PATHS, planStudy, studiesOf, synthstripVersion } from "./import-job.ts";
 import { dicomToTracts } from "./tracts-dicom.ts";
 import { indexSeries, provenanceEdges, provenancePathFor, seriesFilePaths } from "albula/server";
 
@@ -160,21 +160,28 @@ try {
       k++;
       const t0 = performance.now();
       // THERE = the newest set, made from the inputs the database holds now (the reversed scan, the T1), with its maps
-      // (FA, Color FA, b = 0) beside it. Anything less: a new set is made beside the old, which stays.
+      // (MAP_PATHS) beside it. Its maps missing: they alone are added, no tracking (finding 5). Older inputs, or no set:
+      // a new set is made beside the old, which stays.
+      let mapsFor: string | undefined;
       if (args["only-missing"]) {
         const s = await newestStored(db.path, await (rowsOnce ??= indexSeries(db.path)), plan.dwi.facts.uid).catch(() => undefined);
         const sameInputs = !!s?.inputs && (s.inputs.partner ?? null) === (plan.partner?.facts.uid ?? null) && (s.inputs.t1 ?? null) === (plan.t1?.facts.uid ?? null);
-        const maps = !!s && (await Promise.all([colorFaPath, faPath, b0Path].map((p) => Deno.stat(`${db.path}/${p(s.seriesUID)}`).then(() => true, () => false)))).every(Boolean);
-        if (s && sameInputs && maps) {
-          n.kept++;
-          say({ event: "case", case: k, series: plan.dwi.facts.uid, state: "kept", said: "fiber tracts and maps are there, made from the inputs the database holds; kept" });
-          continue;
+        if (s && sameInputs) {
+          const maps = (await Promise.all(MAP_PATHS.map((p) => Deno.stat(`${db.path}/${p(s.seriesUID)}`).then(() => true, () => false)))).every(Boolean);
+          if (maps) {
+            n.kept++;
+            say({ event: "case", case: k, series: plan.dwi.facts.uid, state: "kept", said: "fiber tracts and maps are there, made from the inputs the database holds; kept" });
+            continue;
+          }
+          mapsFor = s.seriesUID;
         }
       }
       try {
         const m = await ready();
-        const out = await makeTracts(db.path, db.id, server, plan, m.device, m.model, m.labeler, m.versions,
-          (line) => say({ event: "progress", case: k, series: plan.dwi.facts.uid, said: line }), { force: args.force, dryRun: args["dry-run"], template: m.template });
+        const progress = (line: string) => say({ event: "progress", case: k, series: plan.dwi.facts.uid, said: line });
+        const out = mapsFor && !args["dry-run"]
+          ? await makeMaps(db.path, server, plan, mapsFor, m.device, m.model, m.labeler, progress)
+          : await makeTracts(db.path, db.id, server, plan, m.device, m.model, m.labeler, m.versions, progress, { force: args.force, dryRun: args["dry-run"], template: m.template });
         if (out.state === "made") n.made++; else if (out.state === "would be made") n.wouldBeMade++; else if (out.state === "current") n.current++; else n[out.state]++;
         if (out.state === "failed") exitCode = 1;
         say({ event: "case", case: k, series: plan.dwi.facts.uid, study, t1: plan.t1?.facts.uid ?? null, partner: plan.partner?.facts.uid ?? null, ...out,

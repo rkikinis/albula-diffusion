@@ -26,7 +26,7 @@ import { SHORT } from "./tractcloud/name-tracts.ts";
 import { tractColor, TRACT_COLORS_VERSION } from "./tractcloud/tract-colors.ts";
 import type { TractCloudModel } from "./tractcloud/tractcloud.ts";
 import type { RapidParcModel } from "./rapidparc/rapidparc.ts";
-import { b0Path, colorFaBrainstemPath, colorFaPath, colorFaTalairachPath, dicomToTracts, faPath, tractsToDicom, UNNAMED, type TractSetData } from "./tracts-dicom.ts";
+import { adPath, b0Path, colorFaBrainstemPath, colorFaPath, colorFaTalairachPath, dicomToTracts, faPath, mdPath, rdPath, tractsToDicom, UNNAMED, type TractSetData } from "./tracts-dicom.ts";
 import { alignTemplate, frames, HEAD_FRAME_RULE, TALAIRACH_RISE_DEG, type M4 } from "./head-frame.ts";
 import type { Grid3 } from "./registration.ts";
 
@@ -340,7 +340,7 @@ export async function makeTracts(dbDir: string, dbId: string, server: string, pl
   // ... and the b = 0 image beside it (2026-10-06: the substantia nigra for the tract review).
   // ... and, when the case was made with the head's frames, the two maps colored in them.
   const exists = (p: string) => Deno.stat(`${dbDir}/${p}`).then(() => true, () => false);
-  const hasMap = async (uid: string, framed: boolean) => (await Promise.all([colorFaPath(uid), faPath(uid), b0Path(uid), ...(framed ? [colorFaTalairachPath(uid), colorFaBrainstemPath(uid)] : [])].map(exists))).every(Boolean);
+  const hasMap = async (uid: string, framed: boolean) => (await Promise.all([...MAP_PATHS.map((p) => p(uid)), ...(framed ? [colorFaTalairachPath(uid), colorFaBrainstemPath(uid)] : [])].map(exists))).every(Boolean);
   let current: (typeof stored)[number] | undefined;
   for (const s of stored) if (isCurrent(s, rules, inputs) && await hasMap(s.seriesUID, !!s.framed)) { current = s; break; }
   if (current && !opts.force) return { state: "current", seriesUID: current.seriesUID };
@@ -423,12 +423,47 @@ export async function makeTracts(dbDir: string, dbId: string, server: string, pl
     }
     await writeB0(dbDir, written.seriesInstanceUID, r.dwi, r.fit);
     await writeFA(dbDir, written.seriesInstanceUID, r.fit);
+    await writeDiffusivities(dbDir, written.seriesInstanceUID, r.fit);
   }
   catch (e) { return { state: "made", ...out, said: `${out.said}; the direction-colored map or the b = 0 image was not stored (${(e as Error).message})` }; }
   return { state: "made", ...out };
 }
 
-export { b0Path, colorFaBrainstemPath, colorFaPath, colorFaTalairachPath, faPath };
+/**
+ * THE MAPS ALONE for a set whose tracts are kept (critic 2026-10-14, import-time jobs, finding 5: a new map must not mean
+ * tracking again): the case corrected, aligned and fitted as its tracts were (the same pipeline, `fitOnly`), and the
+ * missing maps written beside the existing set. The tracts and their record stay as they are.
+ */
+export async function makeMaps(dbDir: string, server: string, plan: { dwi: ReadSeries; partner?: ReadSeries; t1?: ReadSeries }, tractsUID: string, device: GPUDevice, model: TractCloudModel,
+  labeler: RapidParcModel, onProgress?: (line: string) => void): Promise<CaseOutcome> {
+  const exists = (p: string) => Deno.stat(`${dbDir}/${p}`).then(() => true, () => false);
+  const missing = (await Promise.all(MAP_PATHS.map(async (p) => (await exists(p(tractsUID))) ? undefined : p))).filter((p): p is (typeof MAP_PATHS)[number] => !!p);
+  if (!missing.length) return { state: "current", seriesUID: tractsUID };
+  if (!plan.t1) return { state: "waiting", why: "waiting for an MRI of the anatomy named as a T1 (same study or patient)" };
+  const t0 = performance.now();
+  onProgress?.("finding the brain on the MRI of the anatomy (for the maps)");
+  const brain = await brainOnT1(server, plan.t1, onProgress);
+  if (!brain.mask) return { state: brain.kind ?? "waiting", why: `the brain on the MRI of the anatomy: ${brain.why}` };
+  const dwi = fromDicomVolumes(plan.dwi.frames, plan.dwi.facts.description);
+  const t1v = plan.t1.frames[0];
+  onProgress?.("correcting, aligning and fitting the scan (no tracking)");
+  const r = await wholeBrainTracts({ dwi,
+    ...(plan.partner ? { partner: { b0s: plan.partner.frames.filter((v) => Number(diffusionOf(v)?.bValue ?? 0) < 50).map((v) => v.data as ArrayLike<number>), grid: { dims: plan.partner.frames[0].dims, ijkToRAS: plan.partner.frames[0].ijkToRAS }, name: plan.partner.facts.description } } : {}),
+    phaseEncoding: { scan: plan.dwi.facts.phaseEncoding, partner: plan.partner?.facts.phaseEncoding },
+    t1: { dims: t1v.dims as [number, number, number], ijkToRAS: t1v.ijkToRAS, data: t1v.data as ArrayLike<number> },
+    brainT1: brain.mask }, device, model, { labeler, fitOnly: true });
+  const has = (p: (u: string) => string) => missing.includes(p as (typeof MAP_PATHS)[number]);
+  if (has(colorFaPath)) await writeColorFA(dbDir, tractsUID, r.fit);
+  if (has(faPath)) await writeFA(dbDir, tractsUID, r.fit);
+  if (has(b0Path)) await writeB0(dbDir, tractsUID, r.dwi, r.fit);
+  if (has(mdPath) || has(adPath) || has(rdPath)) await writeDiffusivities(dbDir, tractsUID, r.fit);
+  const seconds = (performance.now() - t0) / 1000;
+  return { state: "made", seriesUID: tractsUID, streamlines: 0, stored: 0, named: 0, seconds, said: `${missing.length} map${missing.length === 1 ? "" : "s"} added beside the kept tracts, in ${seconds.toFixed(0)} s` };
+}
+
+export { adPath, b0Path, colorFaBrainstemPath, colorFaPath, colorFaTalairachPath, faPath, mdPath, rdPath };
+/** The maps every set needs beside it (the module shows and measures them): a set without all of them gets them added. */
+export const MAP_PATHS = [colorFaPath, faPath, b0Path, mdPath, adPath, rdPath];
 
 /** The Color FA of `fit` (tensor.ts colorFA: FA times the principal direction's components), one byte a color packed
  *  into one float sample as the slice views draw it (packRGB24, the Diffusion module's own form), as a gzipped NRRD. */
@@ -453,6 +488,15 @@ export function measuredB0(dwi: DiffusionSeries, fit: TensorFit): Float32Array {
   const out = new Float32Array(n);
   for (const i of zeros) { const d = dwi.volumes[i].data as ArrayLike<number>; for (let v = 0; v < n; v++) out[v] += d[v] / zeros.length; }
   return out;
+}
+/** MD, AD and RD on the tracts' grid, from the fit's eigenvalues (mm²/s), each a plain float NRRD. */
+export async function writeDiffusivities(dbDir: string, tractsSeriesUID: string, fit: TensorFit): Promise<void> {
+  const n = fit.fa.length, md = new Float32Array(n), ad = new Float32Array(n), rd = new Float32Array(n), e = fit.evals;
+  for (let v = 0; v < n; v++) { const a = e[3 * v], b = e[3 * v + 1], c = e[3 * v + 2]; md[v] = (a + b + c) / 3; ad[v] = a; rd[v] = (b + c) / 2; }
+  for (const [path, data] of [[mdPath, md], [adPath, ad], [rdPath, rd]] as const) {
+    const bytes = await writeNrrd({ dims: fit.dims, ijkToRAS: fit.ijkToRAS, data, dtype: "<f4" } as Volume, { encoding: "gzip" });
+    await writeCacheFile(dbDir, path(tractsSeriesUID), bytes);
+  }
 }
 /** FA on the tracts' grid (tensor.ts), plain floats, gzipped NRRD: the module's FA map without a fit. */
 export async function writeFA(dbDir: string, tractsSeriesUID: string, fit: TensorFit): Promise<void> {

@@ -43,6 +43,11 @@ export const colorFaBrainstemPath = (tractsSeriesUID: string) => `SlicerAlbula-C
 /** FA beside them (Ron, 2026-10-14: "Why not do all proper registrations as part of the import?"), on the same grid, after
  *  every correction: the Diffusion module shows the stored maps instead of fitting the scan again when a case opens. */
 export const faPath = (tractsSeriesUID: string) => `SlicerAlbula-Cache/fa-${tractsSeriesUID}.nrrd`;
+/** Mean, axial and radial diffusivity beside them (mm²/s; the tensor's eigenvalues: (λ1+λ2+λ3)/3, λ1, (λ2+λ3)/2), on the
+ *  same grid: the numbers the Diffusion module gives for a tract (Ron, 2026-10-15: v3's shown list and its export). */
+export const mdPath = (tractsSeriesUID: string) => `SlicerAlbula-Cache/md-${tractsSeriesUID}.nrrd`;
+export const adPath = (tractsSeriesUID: string) => `SlicerAlbula-Cache/ad-${tractsSeriesUID}.nrrd`;
+export const rdPath = (tractsSeriesUID: string) => `SlicerAlbula-Cache/rd-${tractsSeriesUID}.nrrd`;
 /** The b = 0 image beside them (Ron, 2026-10-06: "substantia nigra should be visible on the B0 images, which are heavily
  *  T2 weighted"), on the same grid -- the fit's S0, after every correction. */
 export const b0Path = (tractsSeriesUID: string) => `SlicerAlbula-Cache/b0-${tractsSeriesUID}.nrrd`;

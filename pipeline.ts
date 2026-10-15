@@ -52,6 +52,9 @@ export interface PipelineOptions {
   /** The card tracker's options (checking variants); the naming draw's seed. */
   ukf?: Record<string, unknown>; nameSeed?: number;
   pttWorkerUrl?: URL; csdWorkerUrl?: URL;
+  /** Stop after the tensor fit: the corrected, aligned scan and its fit, no tracking or naming (`sl` empty) -- the maps
+   *  of a case whose tracts are kept, made without tracking it again (critic 2026-10-14, import-time jobs, finding 5). */
+  fitOnly?: boolean;
 }
 
 export interface PipelineResult {
@@ -99,6 +102,10 @@ export async function wholeBrainTracts(input: PipelineInput, device: GPUDevice, 
   else if (rule.brain === "t1-synthstrip") rule = TRACKING_RULES[2];
   const t1 = performance.now();
   stages.fit = t1 - tFit;
+  if (opts.fitOnly) {
+    const none: Named = { tract: new Int32Array(0), side: new Int8Array(0), draws: 0, seconds: 0 };
+    return { dwi, fit, sl: [], named: none, outside: new Uint8Array(0), corrected, ...(alignment ? { alignment } : {}), prep, rule, ...(outsideGridMl !== undefined ? { outsideGridMl } : {}), csdSeconds: 0 };
+  }
   const detail: TrackTiming = { prepare: 0, gpu: 0, assemble: 0, between: 0 };
   let shell: number | undefined, sl: Float32Array[], csdSeconds = 0;
   if (method === "ptt") {
