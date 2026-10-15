@@ -25,12 +25,11 @@ import { parseNiftiVolumes } from "albula";
 import "./hooks.ts";
 import { loadModel, type ModelJson } from "./tractcloud/tractcloud.ts";
 import { loadRapidParc } from "./rapidparc/rapidparc.ts";
-import { DatabaseSync } from "node:sqlite";
 import { b0Path, colorFaPath, faPath, importGraph, makeTracts, planStudy, studiesOf, synthstripVersion } from "./import-job.ts";
 import { dicomToTracts } from "./tracts-dicom.ts";
-import { seriesFilePaths } from "albula/server";
+import { indexSeries, provenanceEdges, provenancePathFor, seriesFilePaths } from "albula/server";
 
-const args = parseArgs(Deno.args, { string: ["server", "db", "series", "assets", "parent"], boolean: ["dry-run", "force", "counts-only", "only-missing"] });
+const args = parseArgs(Deno.args, { string: ["server", "db", "series", "assets", "parent", "core-version"], boolean: ["dry-run", "force", "counts-only", "only-missing"] });
 const quiet = args["counts-only"];
 // In counts-only mode only these fields leave the program.
 const QUIET_KEYS = new Set(["at", "event", "case", "of", "state", "cases", "studies", "streamlines", "stored", "named", "seconds", "wall", "made", "current", "kept", "waiting", "cannot", "failed", "wouldBeMade", "stopped"]);
@@ -53,7 +52,8 @@ async function codeFingerprint(): Promise<string> {
 }
 const hash = async (b: Uint8Array) => [...new Uint8Array(await crypto.subtle.digest("SHA-256", b as Uint8Array<ArrayBuffer>))].slice(0, 6).map((x) => x.toString(16).padStart(2, "0")).join("");
 
-/** The commit and the "changed since" of a git folder, for the record (finding 6: the version left out the core). */
+/** The commit and the "changes since" of this extension's folder, for the record (finding 6); the core's version comes
+ *  from the server (`--core-version`): an extension does not reach into core's folders. */
 async function gitState(dir: string): Promise<string> {
   const g = async (...a: string[]) => { try { const o = await new Deno.Command("git", { args: ["-C", dir, ...a], stdout: "piped", stderr: "null" }).output(); return o.success ? new TextDecoder().decode(o.stdout).trim() : undefined; } catch { return undefined; } };
   const head = await g("rev-parse", "--short=12", "HEAD");
@@ -63,22 +63,18 @@ async function gitState(dir: string): Promise<string> {
 
 /** THE NEWEST STORED SET of a diffusion scan, cheaply (finding 15: every 28 MB object was read to learn whether one
  *  exists, 38.7 s on the test cases): the provenance store's "tracts" edges, the children this database's index holds,
- *  the highest series number -- the same rule the Diffusion module uses -- and only that one object read, for its inputs. */
-async function newestStored(dbPath: string, dwiUID: string): Promise<{ seriesUID: string; inputs?: { partner?: string | null; t1?: string | null } } | undefined> {
-  const provPath = `${dbPath.replace(/\/+$/, "").replace(/\/[^/]+$/, "")}/provenance.sqlite`;
-  let kids: string[] = [];
-  try { const p = new DatabaseSync(provPath, { readOnly: true }); kids = (p.prepare("SELECT child_series_uid AS c FROM ProvenanceEdges WHERE kind = 'tracts' AND parent_series_uid = ?").all(dwiUID) as { c: string }[]).map((r) => r.c); p.close(); }
-  catch { return undefined; }
-  if (!kids.length) return undefined;
-  const ix = new DatabaseSync(`${dbPath}/ctkDICOM.sql`, { readOnly: true });
-  const rows = ix.prepare(`SELECT SeriesInstanceUID AS u, SeriesNumber AS n FROM Series WHERE SeriesInstanceUID IN (${kids.map(() => "?").join(",")})`).all(...kids) as { u: string; n: number }[];
-  ix.close();
-  const top = rows.sort((a, b) => (Number(b.n) || 0) - (Number(a.n) || 0))[0];
+ *  the highest series number -- the same rule the Diffusion module uses -- and only that one object read, for its inputs.
+ *  The edges are read once per run. */
+let edgesOnce: Promise<{ child: string; parent: string; kind: string }[]> | undefined;
+async function newestStored(dbPath: string, rows: { seriesUID: string; seriesNumber: string }[], dwiUID: string): Promise<{ seriesUID: string; inputs?: { partner?: string | null; t1?: string | null } } | undefined> {
+  edgesOnce ??= provenanceEdges(provenancePathFor(dbPath)).catch(() => []);
+  const kids = new Set((await edgesOnce).filter((e) => e.kind === "tracts" && e.parent === dwiUID).map((e) => e.child));
+  const top = rows.filter((r) => kids.has(r.seriesUID)).sort((a, b) => (Number(b.seriesNumber) || 0) - (Number(a.seriesNumber) || 0))[0];
   if (!top) return undefined;
-  const file = (await seriesFilePaths(dbPath, top.u))[0];
+  const file = (await seriesFilePaths(dbPath, top.seriesUID))[0];
   let inputs: { partner?: string | null; t1?: string | null } | undefined;
   try { const t = await dicomToTracts(await Deno.readFile(file)); inputs = (t.provenance?.inputs as typeof inputs) ?? undefined; } catch { /* unreadable: counts as missing inputs */ }
-  return { seriesUID: top.u, inputs };
+  return { seriesUID: top.seriesUID, inputs };
 }
 
 // THE PARENT (finding 10): when Albula's server goes, so does this run -- its result could not be stored anyway.
@@ -135,7 +131,7 @@ try {
     // the extension, with "+changes" when their folders differ from them (finding 6).
     const here = new URL("./", import.meta.url).pathname;
     const versions = { code: await codeFingerprint(), labeler: `rapidparc ${await hash(rpBytes)}, table ${await hash(modelJson)}, tractcloud ${await hash(Deno.readFileSync(at("tractcloud", "weights.f32")))}`, synthstrip,
-      core: await gitState(new URL("../../src/SlicerLive/", import.meta.url).pathname), extension: await gitState(here) };
+      core: args["core-version"] ?? "unknown", extension: await gitState(here) };
     const labeler = loadRapidParc(rpBytes.buffer);
     // The template brain for the head's own frame (head-frame.ts), from the extension's template/ folder.
     const tp = (f: string) => assets ? `${assets}/template/${f}` : new URL(`./template/${f}`, import.meta.url);
@@ -152,6 +148,7 @@ try {
   };
 
   const n = { made: 0, wouldBeMade: 0, current: 0, kept: 0, waiting: 0, cannot: 0, failed: 0 };
+  let rowsOnce: Promise<{ seriesUID: string; seriesNumber: string }[]> | undefined;
   let k = 0;
   // A STUDY AT A TIME: its series read, its cases made, then let go (finding 3).
   studies: for (const study of studies) {
@@ -165,7 +162,7 @@ try {
       // THERE = the newest set, made from the inputs the database holds now (the reversed scan, the T1), with its maps
       // (FA, Color FA, b = 0) beside it. Anything less: a new set is made beside the old, which stays.
       if (args["only-missing"]) {
-        const s = await newestStored(db.path, plan.dwi.facts.uid).catch(() => undefined);
+        const s = await newestStored(db.path, await (rowsOnce ??= indexSeries(db.path)), plan.dwi.facts.uid).catch(() => undefined);
         const sameInputs = !!s?.inputs && (s.inputs.partner ?? null) === (plan.partner?.facts.uid ?? null) && (s.inputs.t1 ?? null) === (plan.t1?.facts.uid ?? null);
         const maps = !!s && (await Promise.all([colorFaPath, faPath, b0Path].map((p) => Deno.stat(`${db.path}/${p(s.seriesUID)}`).then(() => true, () => false)))).every(Boolean);
         if (s && sameInputs && maps) {
