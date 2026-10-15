@@ -10,7 +10,7 @@
 // is the library; import-job-main.ts is the program. The critic's round of 2026-10-05 (qa/2026-10-05-dmri-import-job.md)
 // shaped it: a study at a time (finding 3), the module's rules for the T1 and the partner, tested (6, 7, 14), stored
 // tracts current only for the same code, rules and inputs (1, 11), states that say what will and will not change (13).
-import { packRGB24, parseInstances, synthstripBrainMask, startSegmentationServer, volumesOfSeries, type BrainMask, type Volume } from "albula";
+import { packRGB24, parseInstances, restartSegmentationServer, synthstripBrainMask, startSegmentationServer, volumesOfSeries, type BrainMask, type Volume } from "albula";
 import { indexSeries, seriesFilePaths, writeNrrd, type IndexSeries } from "albula/server";
 import { fromDicomVolumes, type DiffusionSeries } from "./dwi.ts";
 import { DIRECTION_CHECK_RULE } from "./gradient-check.ts";
@@ -237,8 +237,15 @@ export async function brainOnT1(server: string, t1: ReadSeries, onProgress?: (li
     const s = await startSegmentationServer(onProgress, toRoot);
     if (s.ok) r = await synthstripBrainMask(stub, key, onProgress, { transport, upload });
   }
-  // A STUCK SERVER IS NOT RESTARTED FROM HERE (critic 2026-10-06, finding 12): a restart re-queues whatever else the server
-  // holds and loses its progress -- a person's decision, from the Diffusion panel's button. The case waits, said so.
+  // A STUCK SERVER, RESTARTED ONCE (Ron, 2026-10-15: "Agree" -- the first catch-up met one: it took the requests and never
+  // started them). "Stuck" is said only when the server runs nothing else (brain-mask.ts nothingRunning), so a restart
+  // loses nothing; a busy server is never restarted from here (critic 2026-10-06, finding 12). Still stuck after that:
+  // the case waits, said so, and is looked at again at the next start.
+  if (!r.ok && r.reason === "stuck") {
+    onProgress?.("the segmentation server was stuck with nothing running; restarting it");
+    const s = await restartSegmentationServer(onProgress, toRoot);
+    if (s.ok) r = await synthstripBrainMask(stub, key, onProgress, { transport, upload });
+  }
   if (r.ok) return { mask: r.mask };
   return { why: r.message, kind: r.reason === "no-synthstrip" ? "cannot" : r.reason === "failed" ? "failed" : "waiting" };
 }
