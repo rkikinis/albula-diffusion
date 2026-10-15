@@ -52,8 +52,9 @@ import { DCM2NIIX_VERSION, secondOpinion, type SecondOpinion } from "./second-op
 import { databaseSeries, openDatabaseId } from "albula";
 import { adPath, b0Path, colorFaPath, dicomToTracts, faPath, mdPath, rdPath, UNNAMED as UNNAMED_SET } from "./tracts-dicom.ts";
 import { howMade } from "./methods.ts";
-import { byName, laterality, measure, openingWay, throughBox, toCsv, voxelsOf, type Maps, type Measures, type Way } from "./selection.ts";
+import { byName, laterality, measure, openingWay, throughBox, toCsv, voxelsOf, type ExportRow, type Maps, type Measures, type Way } from "./selection.ts";
 import { databaseFileUrl, nrrdDecode, nrrdGeometry, nrrdSplitHeader } from "albula";
+import { addRowMenu, fitList, makeNameEditable, saveToDownloads, showInDownloads, sliceOffset, sliceOrientation, startEditing, type RowAction } from "albula";
 import { assetUrl, holdDrawing, seriesDicomFiles, startPlacing, restartSegmentationServer, startSegmentationServer, synthstripBrainMask, type BrainMaskResult } from "albula";
 import { createSegmentation, growIntoSegmentation, openDicomDatabase, openLoadFromDisk, paintInto, registerProbeRows, registerRayHits, runAction, saveSegmentationToDicom, showHideAllState } from "albula";
 import { buildTractIndex, tractsNear, type TractIndex } from "./tract-index.ts";
@@ -101,6 +102,12 @@ interface TractGroup {
   otherSide?: number;
   /** Streamlines "Add lines" added to this group. */
   more?: number;
+  /** v3: how it was chosen -- by name (ticked) or through the box -- when not by a near-a-structure run. */
+  by?: "name" | "box";
+  /** A name the person gave the row (one click on it; the module template's rename). */
+  label?: string;
+  /** The other side of a listed tract, there to compare (hidden; it does not make the row near or faint). */
+  compare?: boolean;
 }
 /** The last whole-brain run for a scan, kept so "Add lines" can name new streamlines in its context and measure them
  *  against the same structure. */
@@ -993,8 +1000,21 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
         groups.push({ id: ++groupSeq, name: t ? tractLabel(t.abbr, t.name, e.side) : tractName(model, e.tract, e.side), scan: scan.browserId, strands: pick(e.idx), visible: !faint, method,
           tract: e.tract, side: e.side, distanceMm: e.d, within: e.within, run: true, faint, otherSide: e.side ? sorted.total(e.tract, otherSide(e.side)) : undefined });
       }
-      // The rest: the unnamed far ones and the far tracts not listed as faint (a faint tract is its own row).
-      const unnamedNear = sorted.unnamedNear, faintSet = new Set(sorted.faint), rest = [...sorted.unnamedFar, ...sorted.outsideFar, ...sorted.far.filter((e) => !faintSet.has(e)).flatMap((e) => e.idx)];
+      // THE OTHER SIDE OF EACH LISTED TRACT, hidden, so the row has Left and Right to compare (v3; Ron, 2026-10-01 and
+      // O'Donnell et al. 2017: the tumor's side against the healthy side), measured like the rest.
+      const listedKeys = new Set(groups.filter((g) => g.scan === scan.browserId && g.run && g.tract !== undefined).map((g) => `${g.tract}:${g.side}`));
+      const compared = new Set<number>(), every = [...sorted.near, ...sorted.far];
+      for (const g of groups.filter((x) => x.scan === scan.browserId && x.run && x.tract !== undefined && x.side)) {
+        const os = otherSide(g.side!), k = `${g.tract}:${os}`;
+        if (listedKeys.has(k)) continue;
+        const e = every.find((x) => x.tract === g.tract && x.side === os);
+        if (!e?.idx.length) continue;
+        listedKeys.add(k); for (const i of e.idx) compared.add(i);
+        const t = model.json.tracts[g.tract!];
+        groups.push({ id: ++groupSeq, name: t ? tractLabel(t.abbr, t.name, os) : tractName(model, g.tract!, os), scan: scan.browserId, strands: pick(e.idx), visible: false, method, tract: g.tract, side: os, distanceMm: e.d, within: e.within, run: true, compare: true });
+      }
+      // The rest: the unnamed far ones and the far tracts not listed as faint or for comparison (each is its own row).
+      const unnamedNear = sorted.unnamedNear, faintSet = new Set(sorted.faint), rest = [...sorted.unnamedFar, ...sorted.outsideFar, ...sorted.far.filter((e) => !faintSet.has(e)).flatMap((e) => e.idx)].filter((i) => !compared.has(i));
       if (sorted.outsideNear.length) groups.push({ id: ++groupSeq, name: `Outside the brain, possibly a cranial nerve, within ${withinMm} mm of ${label}`, scan: scan.browserId, strands: pick(sorted.outsideNear), visible: true, method, unnamed: true, run: true, outside: true });
       if (unnamedNear.length) groups.push({ id: ++groupSeq, name: `Not named, within ${withinMm} mm of ${label}`, scan: scan.browserId, strands: pick(unnamedNear), visible: true, method, unnamed: true, run: true });
       if (rest.length) groups.push({ id: ++groupSeq, name: "Rest of the brain", scan: scan.browserId, strands: pick(rest), visible: false, method, unnamed: true, run: true });
@@ -1264,182 +1284,445 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
   }
 
   // ── the panel ─────────────────────────────────────────────────────────────────────────────────────────────────
+  // ── THE v3 FACE (Ron, 2026-10-15: "v3: 1: yes, 2: yes"; the workspace's Contents/docs/DMRI-WORKFLOW-RETHINK.md and
+  // mockups/diffusion-generic-v3-2026-10-14.html, checked against MODULE-DESIGN-RULES.md there). One face for a patient
+  // with a tumor and for a normal-appearing brain: "The scans" only when something is missing; CHOOSE TRACTS -- near a
+  // structure (the default; a tumor case opens on it), by name (any other brain opens on it), or through a box; SHOWN --
+  // one row per tract, Left and Right side by side with lines and FA, the rest in the row's tooltip and the export.
+  // Changes from the mockup, said to Ron: Add lines stays a visible button under the list (he did not find it in the
+  // tract list's top row); Draw as and Color stay under Advanced (his "yes, keep them in the module").
+  let way: Way = "near", wayFor = "";
+  let wantOutline = false;
+  let boxId: string | undefined, boxLine = "", boxQueued = false;
+  let exported = "";
+  const measured = new WeakMap<TractGroup, { n: number; m: Measures }>();
+  let measuring = false;
+  const nameOf = (g: TractGroup) => g.label ?? g.name;
+  /** A tract's name without its side, as a row shows it. */
+  const tractTitle = (tract: number) => { const t = tractCountModel?.json.tracts[tract]; return t ? tractLabel(t.abbr, t.name, 0) : `Tract ${tract}`; };
+  let tractCountModel: TractCloudModel | undefined;
+
+  /** The numbers of every listed tract of a scan, measured once its maps are there (each voxel once; selection.ts). */
+  async function ensureMeasures(scan: Scan) {
+    if (measuring) return;
+    const todo = groups.filter((g) => g.scan === scan.browserId && (g.tract !== undefined || g.by === "box") && measured.get(g)?.n !== g.strands.length);
+    if (!todo.length) return;
+    measuring = true;
+    try {
+      const maps = await mapsFor(scan);
+      if (!maps) return;
+      for (const g of todo) { measured.set(g, { n: g.strands.length, m: measure(g.strands, maps) }); await new Promise((r) => setTimeout(r, 0)); }
+      render();
+    } finally { measuring = false; }
+  }
+
+  /** BY NAME: ticking a tract shows both its sides from the whole brain's run; unticking hides them (Ron's v3: "Tick a
+   *  tract and it is drawn; untick it and it goes. Nothing to press."). */
+  async function showByName(scan: Scan, tract: number, on: boolean) {
+    const mine = groups.filter((g) => g.scan === scan.browserId && g.tract === tract);
+    if (!on) {
+      for (let i = groups.length - 1; i >= 0; i--) if (groups[i].scan === scan.browserId && groups[i].tract === tract) { if (groups[i].by === "name") groups.splice(i, 1); else groups[i].visible = false; }
+      redraw3d(); render(); return;
+    }
+    if (mine.length) { for (const g of mine) g.visible = true; redraw3d(); render(); return; }
+    try {
+      if (!whole.get(scan.browserId)) { busy = "Getting the whole brain's tracts…"; render(); }
+      const w = await ensureWholeBrain(scan);
+      const idx = byName(w.named, [{ tract, side: -1 }, { tract, side: 0 }, { tract, side: 1 }]);
+      const model = await tractCloud(); tractCountModel = model;
+      const t = model.json.tracts[tract];
+      for (const side of [-1, 0, 1]) {
+        const ids = idx.get(`${tract}:${side}`) ?? [];
+        if (!ids.length) continue;
+        groups.push({ id: ++groupSeq, name: t ? tractLabel(t.abbr, t.name, side) : tractName(model, tract, side), scan: scan.browserId, strands: ids.map((i) => w.sl[i]), visible: true, method, tract, side, by: "name" });
+      }
+      if (!groups.some((g) => g.scan === scan.browserId && g.tract === tract)) say(`No streamlines of ${t?.name ?? "this tract"} were found in this brain.`);
+      redraw3d();
+    } catch (e) { say(`Tracts could not be shown: ${(e as Error).message}`); }
+    finally { busy = ""; render(); void ensureMeasures(scan); }
+  }
+
+  /** THROUGH A PLACE: one box (a Markups box), put at the slice views' crossing; the streamlines through it follow it as
+   *  it moves, with nothing to press (Ron's v3 "2: yes"). */
+  function putBox(scan: Scan) {
+    const c = [0, 0, 0];
+    for (const cell of ["Red", "Yellow", "Green"]) {
+      const o = sliceOrientation(cell), d = sliceOffset(cell);
+      if (d === undefined) continue;
+      if (o === "Sagittal") c[0] = d; else if (o === "Coronal") c[1] = d; else if (o === "Axial") c[2] = d;
+    }
+    boxId = `diffusion-box-${scan.browserId}`;
+    live.write({ op: "put", id: boxId, node: { type: "markup", id: boxId, name: "Tracts through this box", markupType: "roi", frame: "RAS", center: c, size: [20, 20, 20], visible: true, locked: false, points: [], source: { mrmlClass: "vtkMRMLMarkupsROINode" }, origin: { local: true } } as unknown as MrsonNode });
+    void boxMoved(scan);
+  }
+  async function boxMoved(scan: Scan) {
+    const n = boxId ? live.nodes.get(boxId) : undefined;
+    if (!n || !n.center || !n.size) return;
+    const t0 = performance.now();
+    const w = await ensureWholeBrain(scan).catch((e) => { say(`Tracts could not be shown: ${(e as Error).message}`); return undefined; });
+    if (!w) return;
+    const box = { center: n.center as number[], size: n.size as number[], orientation: n.orientation as number[] | undefined };
+    const idx = throughBox(w.sl, box);
+    for (let i = groups.length - 1; i >= 0; i--) if (groups[i].scan === scan.browserId && groups[i].by === "box") groups.splice(i, 1);
+    if (idx.length) groups.push({ id: ++groupSeq, name: "Through the box", scan: scan.browserId, strands: idx.map((i) => w.sl[i]), visible: true, method, unnamed: true, by: "box" });
+    // Which tract most of them belong to, said in the line under the box.
+    const count = new Map<string, number>();
+    for (const i of idx) { const k = `${w.named.tract[i]}:${w.named.side[i]}`; count.set(k, (count.get(k) ?? 0) + 1); }
+    const model = await tractCloud(); tractCountModel = model;
+    const OTHER = model.json.tracts.length - 1;
+    // The commonest NAMED tract: in the deep white matter most lines through a small box have no name.
+    const top = [...count.entries()].filter(([k]) => Number(k.split(":")[0]) !== OTHER).sort((a, b) => b[1] - a[1])[0];
+    const topName = top ? tractLabel(model.json.tracts[Number(top[0].split(":")[0])].abbr, model.json.tracts[Number(top[0].split(":")[0])].name, Number(top[0].split(":")[1])) : "";
+    boxLine = idx.length ? `Through the box: ${idx.length.toLocaleString()} lines${topName ? `; the named tract with the most of them: ${topName} (${Math.round(100 * top[1] / idx.length)}%)` : ", none of them named"}` : "No lines pass through the box.";
+    console.info(`diffusion box: ${idx.length} lines in ${Math.round(performance.now() - t0)} ms`);
+    redraw3d(); render(); void ensureMeasures(scan);
+  }
+  live.subscribe((c) => {
+    if (!boxId || c.id !== boxId || boxQueued) return;
+    boxQueued = true;
+    setTimeout(() => { boxQueued = false; const s = scans().find((x) => x.browserId === chosen); if (s) void boxMoved(s); }, 120);
+  });
+
+  /** ONE TABLE FILE at the top of Downloads (Ron's v3 export, CSV): a row per tract and side, and Show in Finder. */
+  async function exportNumbers(scan: Scan) {
+    await ensureMeasures(scan);
+    const st = storedState.get(scan.browserId), w = whole.get(scan.browserId);
+    const madeBy = w?.stored ? `made at import; tracking rule ${st?.tracking ?? "?"}; diffusion extension ${String(st?.rules?.extension ?? "?")}` : `made here (${method}); tracking rule ${TRACKING_RULE}`;
+    const rows: ExportRow[] = [];
+    for (const g of groups.filter((x) => x.scan === scan.browserId && x.tract !== undefined)) {
+      const m = measured.get(g)?.m; if (!m) continue;
+      const t = tractCountModel?.json.tracts[g.tract!];
+      rows.push({ scan: scan.name, tract: g.label ?? t?.name ?? g.name, abbreviation: t?.abbr ?? "", side: g.side === -1 ? "left" : g.side === 1 ? "right" : "both", m, madeBy });
+    }
+    if (!rows.length) { say("There are no tracts with numbers to export yet."); return; }
+    const name = `${(patientOf(scan.name) || "scan").replace(/[^\w.-]+/g, "_")} fiber tract numbers ${new Date().toISOString().slice(0, 10)}.csv`;
+    const r = await saveToDownloads(name, toCsv(rows));
+    if (!r.ok) { say(`The numbers were not saved: ${r.why ?? "unknown"}`); return; }
+    exported = name;
+    say(`Saved ${rows.length} rows to Downloads: ${name}`);
+    render();
+  }
+
   function render() {
     if (!root) return;
+    if (!tractCountModel) void tractCloud().then((m) => { if (!tractCountModel) { tractCountModel = m; render(); } }).catch(() => {});
     const list = scans();
     if (!list.find((s) => s.browserId === chosen)) chosen = list[0]?.browserId ?? "";
     const scan = list.find((s) => s.browserId === chosen);
     const segs = segmentChoices(scan);
-    if (!segs.find((s) => s.key === near)) near = segs[0]?.key ?? "";
     if (outline && (!live.nodes.get(outline.seedsId) || !live.nodes.get(outline.imageId))) outline = undefined;   // finding 9
     const tumors = tumorChoices(scan);
-    // The face measures from a tumor only; Advanced may still measure from any structure (its own "Near").
-    const faceNear = nearOnFace(tumors.map((t) => t.key), near);   // face.ts
-    root.innerHTML = "";
-    // THE FACE (mockup diffusion-workflow-v4; Ron, 2026-10-01: the user is a neurosurgery resident who knows neither the
-    // lingo nor the concepts -- "One button as initial, everything else under advanced", tooltips "with lay person
-    // level"). 1 · what the case needs, each ticked when it is there; 2 · the one button and its answer; then Advanced.
+    // THE WAY IT OPENS ON (Ron, 2026-10-14: near a structure the default; "Any other brain opens switched to By name").
+    if (scan && wayFor !== scan.browserId) { wayFor = scan.browserId; way = openingWay(tumors.length > 0); if (tumors.length) near = tumors[0].key; }
+    if (!segs.find((s) => s.key === near)) near = (tumors[0] ?? segs[0])?.key ?? "";
     const anat = anatomyFor(scan);
-    const caseSec = shell.section(root, "1 · The patient's case", { band: "yellow", open: true, note: scan && anat && tumors.length ? "✓" : `${[scan, anat, tumors.length].filter(Boolean).length} of 3` });
-    // WHICH PATIENT (critic, finding 10): named on the face; with several, chosen on the face.
+    root.innerHTML = "";
+
+    // ── THE PATIENT, AND HOW THE TRACTS WERE MADE: quiet lines, no section ───────────────────────────────────────────
+    const top = document.createElement("div"); top.style.cssText = "margin:2px 0 6px";
     if (list.length > 1) {
       const pp = document.createElement("select");
       for (const s0 of list) pp.append(new Option(`${patientOf(s0.name) || "Patient"} — ${s0.name.replace(/^.*?·\s*(MR\s+)?/, "")}`, s0.browserId, false, s0.browserId === chosen));
-      pp.title = "More than one patient's diffusion MRI is loaded: the one the steps below are about.";
+      pp.title = "More than one diffusion MRI is loaded: the one this module is about.";
       pp.onchange = () => { chosen = pp.value; render(); };
-      shell.row(caseSec, "Patient").append(pp);
-    } else if (scan && patientOf(scan.name)) {
-      const pl = document.createElement("div"); pl.className = "sl-hint"; pl.textContent = `Patient: ${patientOf(scan.name)}`; caseSec.append(pl);
+      shell.row(top, "Scan").append(pp);
+    } else if (scan) {
+      const pl = document.createElement("div"); pl.className = "sl-hint"; pl.textContent = `${patientOf(scan.name) || "Scan"} · ${scan.name.replace(/^.*?·\s*(MR\s+)?/, "")}`; top.append(pl);
     }
-    const need = (ok: boolean, what: string, detail: string, tip: string) => {
-      const r = document.createElement("div");
-      r.style.cssText = "display:grid;grid-template-columns:16px 1fr;gap:6px;margin:3px 0";
-      r.title = tip;
-      const m = document.createElement("span"); m.textContent = ok ? "✓" : "○"; m.style.color = ok ? "var(--sl-ok)" : "var(--sl-warn)";
-      const t = document.createElement("span"); t.innerHTML = `<b>${what}</b>`;
-      const d = document.createElement("span"); d.className = "sl-hint"; d.textContent = ` — ${detail}`; t.append(d);
-      r.append(m, t); caseSec.append(r);
-    };
-    need(!!scan, "Diffusion MRI", scan ? scan.name.replace(/^.*?·\s*(MR\s+)?/, "") : "not loaded; it is often named DTI, DWI or diffusion", "The scan that shows the brain's wiring.");
-    need(!!anat, "MRI of the anatomy", anat ? String(anat.name ?? "").replace(/^.*?·\s*(MR\s+)?/, "") : "not loaded; usually the T1 with contrast the tumor was seen on", "The scan the tumor is outlined on.");
-    need(tumors.length > 0, "Tumor outline", tumors.length ? (tumors.length > 1 ? `${tumors.length} to choose from (below)` : tumors[0].label) : anat ? `none yet: make it below${segs.length ? " (the outlines loaded are not named as a tumor)" : ""}` : "none yet", "The tumor's outline, drawn on the anatomical MRI. The fiber tracts are measured from its edge. An outline counts when its name says tumor (or glioma, meningioma, lesion, …), or when it was made here.");
-    // FIBER TRACTS, MADE AT IMPORT OR NOT (DMRI-AT-IMPORT.md, "What the resident sees"): one line, said, not a fourth tick.
     if (scan) {
       const st = storedState.get(scan.browserId);
-      const tl = document.createElement("div"); tl.className = "sl-hint"; tl.style.margin = "2px 0 0 22px";
-      // WHAT, NOT WHEN (Ron, 2026-10-15: "They want to know not when things were done but what they are … For more
-      // detail and references see the help section"): the steps, each with its method (methods.ts); the date and the
-      // rule numbers in the tooltip.
+      // WHAT, NOT WHEN (Ron, 2026-10-15): the steps, each with its method (methods.ts); the date and rule numbers in the tooltip.
       const steps = st?.state === "stored" ? howMade(st) : [];
       if (steps.length) {
-        const box = document.createElement("div"); box.className = "sl-hint"; box.style.margin = "4px 0 2px";
-        const head = document.createElement("div"); head.textContent = "How these fiber tracts were made"; head.style.fontWeight = "600"; box.append(head);
+        const box = document.createElement("details"); box.className = "sl-hint"; box.style.margin = "2px 0";
+        const sum = document.createElement("summary"); sum.textContent = "How these fiber tracts were made"; sum.style.cursor = "pointer"; box.append(sum);
         for (const line of steps) { const d = document.createElement("div"); d.textContent = `· ${line}`; d.style.paddingLeft = "8px"; box.append(d); }
         const more = document.createElement("a"); more.href = "#"; more.textContent = "Details and references: Help";
         more.onclick = (e) => { e.preventDefault(); let p: HTMLElement | null = root ?? null; let help: HTMLDetailsElement | null = null; while (p && !help) { help = p.querySelector("details.sl-help"); p = p.parentElement; } if (help) { help.open = true; help.scrollIntoView({ block: "start", behavior: "smooth" }); } };
         box.append(more);
+        box.open = howOpen; box.addEventListener("toggle", () => { howOpen = box.open; });
         box.title = `Made when the scan came into the database${st?.made ? `, ${new Date(st.made).toLocaleString()}` : ""}. Rules: ${Object.entries(st?.rules ?? {}).filter(([k]) => !["code", "labeler", "synthstrip", "core", "extension"].includes(k)).map(([k, v]) => `${k} ${v}`).join(", ")}. Code: Albula ${String(st?.rules?.core ?? "?")}, diffusion extension ${String(st?.rules?.extension ?? "?")}.`;
-        caseSec.append(box);
+        top.append(box);
+      } else {
+        const tl = document.createElement("div"); tl.className = "sl-hint";
+        tl.textContent = jobBusyNow ? "Fiber tracts: being prepared in the background now" : st?.state === "none" ? "Fiber tracts: not made yet; the first choice below makes them (a minute or more)" : "";
+        if (tl.textContent) top.append(tl);
       }
-      tl.textContent = steps.length ? ""
-        : st?.state === "stored" ? "Fiber tracts: made when the scan came into the database"
-        : jobBusyNow ? "Fiber tracts: being prepared in the background now"
-        : st?.state === "none" ? "Fiber tracts: not made yet; the button below makes them (a minute or more)" : "";
-      tl.title = "The whole brain's fiber tracts are found and named once, when the diffusion MRI comes into the database, so the button only has to measure them. Each set records the version of the method that made it.";
-      if (tl.textContent) caseSec.append(tl);
     }
+    root.append(top);
+
+    // ── THE SCANS, only when something is missing (Ron's v3) ─────────────────────────────────────────────────────────
     if (!scan || !anat) {
-      const bar0 = shell.actions(caseSec);
-      const open = document.createElement("button"); open.className = "sl-primary"; open.textContent = "Open a patient…";
-      open.title = "Opens the DICOM database Albula uses by default. Choose the patient, tick the diffusion MRI, the anatomical MRI and the tumor outline if there is one, and load them.";
-      open.onclick = () => { if (!openDicomDatabase()) say("The DICOM database cannot be opened from here; use Load / Save."); };
-      const disk = document.createElement("button"); disk.textContent = "Scans on this computer…";
-      disk.title = "The scans are in a folder (copied from the scanner, a CD or a USB stick): opens Load / Save at “From disk”, where a folder is chosen and added to the database.";
-      disk.onclick = () => { if (!openLoadFromDisk()) say("Load / Save cannot be opened from here."); };
-      bar0.append(disk, open);
-      const p = document.createElement("p"); p.className = "sl-hint"; p.style.margin = "4px 0 0"; p.textContent = "Everything stays on this computer: nothing is sent anywhere.";
-      caseSec.append(p);
-    } else if (!tumors.length || outline) {
-      // OUTLINE THE TUMOR: strokes in, strokes around, grow, correct, done.
-      const steps = document.createElement("div");
-      steps.style.cssText = "display:flex;flex-direction:column;gap:4px;margin:6px 0 2px";
-      const step = (n: string, label: string, tip: string, on: boolean, disabled: boolean, act: () => void, words: string) => {
-        const r = document.createElement("div"); r.style.cssText = "display:flex;align-items:center;gap:6px";
-        const k = document.createElement("span"); k.className = "sl-hint"; k.textContent = n; k.style.flex = "0 0 1em";
-        const b = document.createElement("button"); b.textContent = label; b.title = tip; b.disabled = disabled || !!busy;
-        if (on) b.className = "sl-primary";
-        b.onclick = act;
-        const w = document.createElement("span"); w.className = "sl-hint"; w.textContent = words;
-        r.append(k, b, w); steps.append(r);
+      const sc = shell.section(root, "The scans", { band: "yellow", open: true, note: `${[scan, anat].filter((x) => !x).length} missing` });
+      const need = (ok: boolean, what: string, detail: string, tip: string) => {
+        const r = document.createElement("div"); r.style.cssText = "display:grid;grid-template-columns:16px 1fr;gap:6px;margin:3px 0"; r.title = tip;
+        const m = document.createElement("span"); m.textContent = ok ? "✓" : "○"; m.style.color = ok ? "var(--sl-ok)" : "var(--sl-warn)";
+        const t = document.createElement("span"); t.innerHTML = `<b>${what}</b>`;
+        const d = document.createElement("span"); d.className = "sl-hint"; d.textContent = ` — ${detail}`; t.append(d);
+        r.append(m, t); sc.append(r);
       };
-      step("1", "Tumor", "Draw a stroke inside the tumor on several slices, from the slice where it starts to the slice where it ends (the brush paints where you drag in a slice view; a stroke along it in the sagittal or coronal view does the same). Click again to stop drawing.", outline?.tool === 1, false, () => void strokes(anat, 1), "strokes inside the tumor");
-      step("2", "Not tumor", "Draw strokes in the brain around the tumor, on several slices and also just above and below it, so the outline knows where to stop.", outline?.tool === 2, false, () => void strokes(anat, 2), "strokes around it");
-      step("3", busy === "Growing…" ? "Growing…" : "Grow the outline", "Albula fills the tumor out from your strokes up to where the image changes. Check every slice it touches; add strokes where it is wrong and grow again.", false, !outline, () => void growOutline(), outline?.mm3 ? `${(outline.mm3 / 1000).toFixed(1)} mL` : "");
-      step("4", "Done", "Keeps the outline and removes the strokes.", false, !outline?.resultId, () => outlineDone(), "");
-      if (outline) step("", "Cancel", "Removes the strokes and the outline grown from them; nothing is kept.", false, false, () => outlineCancel(), "");
-      caseSec.append(steps);
+      need(!!scan, "Diffusion MRI", scan ? scan.name.replace(/^.*?·\s*(MR\s+)?/, "") : "not loaded; it is often named DTI, DWI or diffusion", "The scan that shows the brain's wiring.");
+      need(!!anat, "MRI of the anatomy (T1)", anat ? String(anat.name ?? "").replace(/^.*?·\s*(MR\s+)?/, "") : "not loaded", "The scan the tracts are lined up with, and a tumor is outlined on.");
+      const bar0 = shell.actions(sc);
+      const disk = document.createElement("button"); disk.textContent = "Scans on this computer…";
+      disk.title = "Scans in a folder (from the scanner, a CD or a USB stick): opens Load / Save, where a folder is added to the database.";
+      disk.onclick = () => { if (!openLoadFromDisk()) say("Load / Save cannot be opened from here."); };
+      const open = document.createElement("button"); open.className = "sl-primary"; open.textContent = "Open from the database…";
+      open.title = "Opens the DICOM database. Tick the diffusion MRI and the MRI of the anatomy (and a tumor outline, if there is one), and load them.";
+      open.onclick = () => { if (!openDicomDatabase()) say("The DICOM database cannot be opened from here; use Load / Save."); };
+      bar0.append(disk, open);
     }
-    // THE OUTLINE MADE HERE, NOT SAVED YET: the yellow Save to DICOM, as AI Segmentations' Result section has it.
-    if (kept && kept.savable && live.nodes.get(kept.segId) && !outline) {
-      const bar1 = shell.actions(caseSec);
-      const sv = document.createElement("button");
-      sv.className = kept.saved ? "" : "sl-primary";
-      sv.textContent = kept.saved ? "Saved ✓" : "Save to DICOM";
-      sv.disabled = kept.saved;
-      sv.title = "Write the tumor outline into the DICOM database, under the MRI it was drawn on, so it is there next time.";
-      sv.onclick = () => { void runAction(sv, () => saveKept(), { busyLabel: "Saving…", doneLabel: "Saved ✓", failedLabel: "Not saved" }).catch(() => {}); };
-      bar1.append(sv);
+
+    // ── CHOOSE TRACTS ───────────────────────────────────────────────────────────────────────────────────────────────
+    const ch = shell.section(root, "Choose tracts", { band: "yellow", open: true });
+    if (!scan || !anat) {
+      const p = document.createElement("p"); p.className = "sl-hint"; p.textContent = !scan ? "Waits for the diffusion MRI." : "Waits for the MRI of the anatomy (T1)."; ch.append(p);
+    } else {
+      // THE WAY, a pull-down whose triangle is seen at arm's length (Ron, 2026-10-14; PALETTE.md: the full ▼, ~14 px, accent).
+      const wrap = document.createElement("span"); wrap.style.cssText = "position:relative;display:inline-flex;align-items:center";
+      const ws = document.createElement("select");
+      for (const [k, label] of [["near", "Near a structure"], ["name", "By name"], ["box", "Through a place"]] as const) ws.append(new Option(label, k, false, k === way));
+      ws.style.cssText = "appearance:none;-webkit-appearance:none;padding-right:24px;font-weight:600";
+      ws.title = "How to choose the tracts: those that pass near a structure (a tumor, any segment, another tract), by their names, or those through a box you place.";
+      ws.onchange = () => { way = ws.value as Way; render(); };
+      const tri = document.createElement("span"); tri.textContent = "▼"; tri.setAttribute("aria-hidden", "true");
+      tri.style.cssText = "position:absolute;right:6px;pointer-events:none;font-size:14px;color:var(--sl-accent)";
+      wrap.append(ws, tri);
+      shell.row(ch, "Choose").append(wrap);
+
+      if (way === "near") {
+        const ns = document.createElement("select");
+        if (!segs.length) ns.append(new Option("no segment of this patient", ""));
+        for (const s of segs) ns.append(new Option(s.label, s.key, false, s.key === near && !wantOutline));
+        ns.append(new Option("Outline one here…", "__outline__", false, wantOutline));
+        ns.title = "The structure the tracts are measured from: a tumor, any segment of this patient, or one you outline here. A tract as the structure: its ⋯ menu, Tracts near this one.";
+        ns.onchange = () => { if (ns.value === "__outline__") { wantOutline = true; } else { wantOutline = false; near = ns.value; } render(); };
+        shell.row(ch, "Near").append(ns);
+        const wm = document.createElement("select");
+        for (const v of [2, 4, 6, 8, 10, 15, 20]) wm.append(new Option(`${v} mm`, String(v), false, v === withinMm));
+        if (![2, 4, 6, 8, 10, 15, 20].includes(withinMm)) wm.append(new Option(`${withinMm} mm`, String(withinMm), false, true));
+        wm.title = `How close a tract must come to the structure to be listed. Tracts within ${GRAY_BAND_MM} mm more are listed in gray, hidden.`;
+        // A run already made from this structure is measured again at once: nothing to press (rule 3).
+        wm.onchange = () => { withinMm = Number(wm.value); const r = runs.get(scan.browserId); if (r && !busy && segmentChoices(scan).find((c) => c.key === near)?.label === r.label) void makeTracts(); else render(); };
+        shell.row(ch, "Within").append(wm);
+        // OUTLINE ONE HERE: strokes in, strokes around, grow, correct, done (the resident's steps, unchanged).
+        if (wantOutline || outline) {
+          const stepsBox = document.createElement("div");
+          stepsBox.style.cssText = "display:flex;flex-direction:column;gap:4px;margin:6px 0 2px";
+          const step = (n: string, label: string, tip: string, on: boolean, disabled: boolean, act: () => void, words: string) => {
+            const r = document.createElement("div"); r.style.cssText = "display:flex;align-items:center;gap:6px";
+            const k = document.createElement("span"); k.className = "sl-hint"; k.textContent = n; k.style.flex = "0 0 1em";
+            const b = document.createElement("button"); b.textContent = label; b.title = tip; b.disabled = disabled || !!busy;
+            if (on) b.className = "sl-primary";
+            b.onclick = act;
+            const w = document.createElement("span"); w.className = "sl-hint"; w.textContent = words;
+            r.append(k, b, w); stepsBox.append(r);
+          };
+          step("1", "Inside", "Draw a stroke inside the structure on several slices, from where it starts to where it ends. Click again to stop drawing.", outline?.tool === 1, false, () => void strokes(anat, 1), "strokes inside it");
+          step("2", "Around", "Draw strokes around it, on several slices and just above and below it, so the outline knows where to stop.", outline?.tool === 2, false, () => void strokes(anat, 2), "strokes around it");
+          step("3", busy === "Growing…" ? "Growing…" : "Grow the outline", "Albula fills the structure out from your strokes up to where the image changes. Check every slice it touches; add strokes where it is wrong and grow again.", false, !outline, () => void growOutline(), outline?.mm3 ? `${(outline.mm3 / 1000).toFixed(1)} mL` : "");
+          step("4", "Done", "Keeps the outline and removes the strokes.", false, !outline?.resultId, () => { outlineDone(); wantOutline = false; }, "");
+          step("", "Cancel", "Removes the strokes and the outline grown from them; nothing is kept.", false, false, () => { if (outline) outlineCancel(); wantOutline = false; render(); }, "");
+          ch.append(stepsBox);
+        }
+        if (kept && kept.savable && live.nodes.get(kept.segId) && !outline) {
+          const bar1 = shell.actions(ch);
+          const sv = document.createElement("button"); sv.className = kept.saved ? "" : "sl-primary";
+          sv.textContent = kept.saved ? "Saved ✓" : "Save to DICOM"; sv.disabled = kept.saved;
+          sv.title = "Write the outline into the DICOM database, under the MRI it was drawn on, so it is there next time.";
+          sv.onclick = () => { void runAction(sv, () => saveKept(), { busyLabel: "Saving…", doneLabel: "Saved ✓", failedLabel: "Not saved" }).catch(() => {}); };
+          bar1.append(sv);
+        }
+        // THE SERVER, WHERE THE PERSON IS: start it, or restart a stuck one (brain-mask.ts).
+        const cNow = computed.get(scan.browserId);
+        if (cNow?.brain.reason === "no-server" || cNow?.brain.reason === "stuck") {
+          const stuck = cNow.brain.reason === "stuck";
+          const st = document.createElement("button"); st.style.cssText = "width:100%;margin:4px 0"; st.disabled = !!busy;
+          st.textContent = stuck ? "Restart the segmentation server" : "Start the segmentation server";
+          st.title = stuck ? "The program that finds the brain on the MRI of the anatomy has stopped making progress. This stops it and starts it again (a minute or two). Anything it was doing stops, and the line at the top of the window names it." : "Starts the program that finds the brain on the MRI of the anatomy (the first start takes a minute or two).";
+          st.onclick = () => { void runAction(st, async () => { const r = await (stuck ? restartSegmentationServer : startSegmentationServer)((l) => say(l)); say(r.ok ? `${r.message[0].toUpperCase()}${r.message.slice(1)}. Press the button below again.` : `The segmentation server did not ${stuck ? "restart" : "start"}: ${r.message}.`); if (r.ok) cNow.brain.reason = undefined; render(); }, { busyLabel: stuck ? "Restarting…" : "Starting…", doneLabel: stuck ? "Restarted" : "Started", failedLabel: "Did not work" }).catch(() => {}); };
+          ch.append(st);
+        }
+        // THE ONE YELLOW ACTION, last row, right (PALETTE.md).
+        const target = segs.find((s) => s.key === near);
+        const isTumor = !!target && tumors.some((t) => t.key === target.key);
+        const bar = shell.actions(ch);
+        const go = document.createElement("button"); go.className = "sl-primary";
+        go.textContent = busy && !adding && !busy.startsWith("Grow") ? busy : isTumor ? "Show the fiber tracts near the tumor" : "Show the tracts near it";
+        go.title = `Shows each named tract with at least ${MIN_NEAR_STREAMLINES} of its lines within ${withinMm} mm of ${target?.label ?? "the structure"} — whole, in its own color, with how close it comes. Tracts that come within ${GRAY_BAND_MM} mm more, or close with fewer lines, are listed after them in gray, hidden.`;
+        go.disabled = !!busy || !target || seeding || !!outline || wantOutline;
+        go.onclick = () => { if (method === "single") method = "ukf"; void makeTracts(); };
+        bar.append(go);
+      } else if (way === "name") {
+        // BY NAME: the atlas's tracts in their groups, a search, a tick each.
+        const model = tractCountModel;
+        if (!model) { const p = document.createElement("p"); p.className = "sl-hint"; p.textContent = "Reading the list of tracts…"; ch.append(p); void tractCloud().then((m) => { tractCountModel = m; render(); }).catch(() => {}); }
+        else {
+          const find = document.createElement("input"); find.type = "search"; find.placeholder = "Find a tract, e.g. \"uncinate\" or \"UF\""; find.value = tractSearch; find.className = "sl-tract-find"; find.style.cssText = "width:100%;margin:2px 0 4px";
+          find.title = "Shows only the tracts whose name, abbreviation or anatomical term contains this.";
+          find.oninput = () => { tractSearch = find.value; const at = find.selectionStart; render(); const f2 = root?.querySelector<HTMLInputElement>(".sl-tract-find"); f2?.focus(); if (at !== null) f2?.setSelectionRange(at, at); };
+          ch.append(find);
+          const OTHER = model.json.tracts.length - 1;
+          const shownT = new Set(groups.filter((g) => g.scan === scan.browserId && g.visible && g.tract !== undefined).map((g) => g.tract!));
+          const box = document.createElement("div"); box.style.cssText = "border:1px solid var(--sl-border);border-radius:var(--sl-radius);padding:2px 6px";
+          // The mockup's order: association, projection, commissural, then the rest.
+          const order = ["association", "projection", "cc", "cerebellar", "superficial"];
+          for (const grp of [...TRACT_GROUPS].filter((g) => g.key !== "unnamed").sort((a, b) => order.indexOf(a.key) - order.indexOf(b.key))) {
+            const members = model.json.tracts.map((t, i) => ({ t, i })).filter(({ t, i }) => i !== OTHER && tractGroupKey(tractInfo(t.abbr)?.category, false) === grp.key && matchesSearch(tractSearch, tractLabel(t.abbr, t.name, 0), tractInfo(t.abbr)?.tna?.latin));
+            if (!members.length) continue;
+            const h = document.createElement("div"); h.textContent = grp.label; h.className = "sl-hint"; h.style.cssText = "font-weight:600;margin:4px 0 1px"; box.append(h);
+            for (const { t, i } of members) {
+              const lab = document.createElement("label"); lab.style.cssText = "display:flex;align-items:center;gap:6px;padding:1px 0 1px 8px";
+              const cb = document.createElement("input"); cb.type = "checkbox"; cb.checked = shownT.has(i); cb.disabled = !!busy;
+              cb.onchange = () => { void showByName(scan, i, cb.checked); };
+              const c = tractColor(i, tractCount);
+              const sw = document.createElement("span"); sw.style.cssText = `flex:0 0 10px;width:10px;height:10px;border:1px solid var(--sl-border);background:rgb(${c.slice(0, 3).map((v) => Math.round(v * 255)).join(",")})`;
+              const nm = document.createElement("span"); nm.textContent = tractLabel(t.abbr, t.name, 0);
+              const tna = tnaLine(t.abbr); lab.title = `${tractLabel(t.abbr, t.name, 0)}${tna ? `\n${tna}` : ""}`;
+              lab.append(cb, sw, nm); box.append(lab);
+            }
+          }
+          fitList(box, "diffusion-tract-names");
+          ch.append(box);
+          if (busy) { const p = document.createElement("p"); p.className = "sl-hint"; p.textContent = busy; ch.append(p); }
+        }
+      } else {
+        // THROUGH A PLACE: one box.
+        const has = !!(boxId && live.nodes.get(boxId));
+        if (boxLine && has) { const p = document.createElement("p"); p.className = "sl-hint"; p.style.margin = "4px 0"; p.textContent = boxLine; ch.append(p); }
+        const bar = shell.actions(ch);
+        const pb = document.createElement("button"); pb.className = has ? "" : "sl-primary";
+        pb.textContent = has ? "Put the box at the crossing again" : "Put a box";
+        pb.title = "A box at the point where the slice views cross; move and resize it with its handles in any view. The lines through it are shown as it moves.";
+        pb.disabled = !!busy;
+        pb.onclick = () => putBox(scan);
+        bar.append(pb);
+      }
     }
-    if (tumors.length > 1) {
-      const nearSel0 = document.createElement("select");
-      for (const s0 of tumors) nearSel0.append(new Option(s0.label, s0.key, false, s0.key === faceNear));
-      nearSel0.title = "Which outline the fiber tracts are measured from.";
-      nearSel0.onchange = () => { near = nearSel0.value; render(); };
-      shell.row(caseSec, "Tumor").append(nearSel0);
+    if (note) { const p = document.createElement("p"); p.className = "sl-hint"; p.style.margin = "4px 0 0"; p.textContent = note; ch.append(p); }
+
+    // ── SHOWN: one row per tract, Left and Right side by side ─────────────────────────────────────────────────────────
+    const mineAll = scan ? groups.filter((g) => g.scan === scan.browserId) : [];
+    if (scan && mineAll.length) {
+      const run = runs.get(scan.browserId);
+      type Row = { key: string; tract?: number; left?: TractGroup; right?: TractGroup; mid?: TractGroup; other?: TractGroup };
+      const rows: Row[] = [], byKey = new Map<string, Row>();
+      for (const g of mineAll) {
+        const key = g.tract !== undefined ? `t${g.tract}` : `g${g.id}`;
+        let r = byKey.get(key); if (!r) { r = { key, tract: g.tract }; byKey.set(key, r); rows.push(r); }
+        if (g.tract === undefined) r.other = g; else if (g.side === -1) r.left = g; else if (g.side === 1) r.right = g; else r.mid = g;
+      }
+      const gs = (r: Row) => [r.left, r.right, r.mid, r.other].filter((x): x is TractGroup => !!x);
+      const near0 = (r: Row) => Math.min(...gs(r).filter((g) => !g.compare).map((g) => g.distanceMm ?? Infinity));
+      const faintRow = (r: Row) => { const own = gs(r).filter((g) => !g.compare); return own.length > 0 && own.every((g) => g.faint); };
+      rows.sort((a, b) => Number(faintRow(a)) - Number(faintRow(b)) || (a.other ? 1 : 0) - (b.other ? 1 : 0) || near0(a) - near0(b));
+      const listed = rows.filter((r) => !faintRow(r) && !r.other).length;
+      const sh = shell.section(root, "Shown", { band: "green", open: true, note: run ? `near ${run.label}: ${listed}` : `${listed} tract${listed === 1 ? "" : "s"}` });
+      const hasDist = mineAll.some((g) => g.distanceMm !== undefined);
+      // AS THE MOCKUP HAS IT: near a structure, closest and the lines per side (FA in the tooltip); otherwise lines and FA
+      // per side. Five number columns did not leave the name room in the module column.
+      const cols = hasDist ? "18px 10px minmax(0,1fr) 50px 44px 44px 22px" : "18px 10px minmax(0,1fr) 44px 34px 44px 34px 22px";
+      const head = document.createElement("div"); head.className = "sl-hint";
+      head.style.cssText = `display:grid;grid-template-columns:${cols};gap:4px;align-items:end;font-size:11px;margin:2px 0`;
+      head.innerHTML = hasDist
+        ? `<span></span><span></span><span></span><span style="text-align:right">closest</span><span style="text-align:right">Left</span><span style="text-align:right">Right</span><span></span>`
+        : `<span></span><span></span><span></span><span style="grid-column:span 2;text-align:center">Left: lines · FA</span><span style="grid-column:span 2;text-align:center">Right: lines · FA</span><span></span>`;
+      sh.append(head);
+      const box = document.createElement("div");
+      const f2 = (x?: number) => x === undefined ? "–" : x.toFixed(2);
+      const mdTxt = (x?: number) => x === undefined ? "–" : (x * 1000).toFixed(2);
+      for (const r of rows) {
+        const row = document.createElement("div");
+        row.style.cssText = `display:grid;grid-template-columns:${cols};gap:4px;align-items:center;padding:1px 0`;
+        const all = gs(r), anyOn = all.some((g) => g.visible);
+        const eye = document.createElement("button"); eye.textContent = anyOn ? "👁" : "🚫"; eye.title = anyOn ? "Hide" : "Show";
+        eye.style.cssText = "background:none;border:none;padding:0;cursor:pointer;color:inherit;font-size:14px;min-width:0;width:18px;height:18px";   // a glyph button: not the 64 px of a button with words (PALETTE.md)
+        eye.onclick = () => { for (const g of all) g.visible = !anyOn; redraw3d(); render(); };
+        const c = r.tract !== undefined ? tractColor(r.tract, tractCount) : UNNAMED;
+        const sw = document.createElement("span"); sw.style.cssText = `width:10px;height:10px;border:1px solid var(--sl-border);background:rgb(${c.slice(0, 3).map((v) => Math.round(v * 255)).join(",")})`;
+        const nm = document.createElement("span"); nm.style.cssText = "min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap";
+        const base = r.other ? nameOf(r.other) : (all[0].label ?? tractTitle(r.tract!));
+        nm.textContent = base;
+        makeNameEditable(nm, { get: () => base, commit: (v) => { for (const g of all) g.label = v; render(); } });
+        if (faintRow(r)) { nm.style.opacity = "0.55"; }
+        row.append(eye, sw, nm);
+        if (hasDist) {
+          const d = near0(r), ds = document.createElement("span"); ds.style.cssText = "font-size:12px;opacity:0.85;text-align:right";
+          ds.textContent = !Number.isFinite(d) ? "" : d < 0.05 ? "touches" : `${d.toFixed(1)} mm`; row.append(ds);
+        }
+        const cell = (g?: TractGroup) => { const a = document.createElement("span"), b = document.createElement("span"); a.style.cssText = b.style.cssText = "font-size:12px;text-align:right;font-variant-numeric:tabular-nums"; a.textContent = g ? g.strands.length.toLocaleString() : "–"; b.textContent = g ? f2(measured.get(g)?.m.fa) : "–"; if (g && !g.visible) { a.style.opacity = b.style.opacity = "0.55"; } return hasDist ? [a] : [a, b]; };
+        if (r.left || r.right) row.append(...cell(r.left), ...cell(r.right));
+        else { const one = r.mid ?? r.other!; const s = document.createElement("span"); s.style.cssText = `grid-column:span ${hasDist ? 2 : 4};font-size:12px;text-align:center;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis`; s.textContent = `${one.strands.length.toLocaleString()} lines${measured.get(one)?.m.fa !== undefined ? ` · FA ${f2(measured.get(one)!.m.fa)}` : ""}${r.mid ? " (across the midline)" : ""}`; row.append(s); }
+        // THE REST IN THE TOOLTIP (Ron's v3): per side MD, AD, RD, volume, length; how lopsided (left vs right).
+        const tip: string[] = [base];
+        for (const [side, g] of [["Left", r.left], ["Right", r.right], ["", r.mid ?? r.other]] as const) {
+          const m = g ? measured.get(g)?.m : undefined; if (!g || !m) continue;
+          tip.push(`${side ? `${side}: ` : ""}${m.lines.toLocaleString()} lines, FA ${f2(m.fa)}, MD ${mdTxt(m.md)}, AD ${mdTxt(m.ad)}, RD ${mdTxt(m.rd)} (10⁻³ mm²/s), volume ${m.volumeMl.toFixed(1)} mL, median length ${m.lengthMm.toFixed(0)} mm`);
+        }
+        const ml = r.left ? measured.get(r.left)?.m : undefined, mr = r.right ? measured.get(r.right)?.m : undefined;
+        if (ml && mr) {
+          const li = (a?: number, b?: number) => { const v = laterality(a, b); return v === undefined ? "–" : `${v > 0 ? "+" : ""}${v.toFixed(2)}`; };
+          tip.push(`How lopsided, left against right (above 0: more on the left): FA ${li(ml.fa, mr.fa)}, MD ${li(ml.md, mr.md)}, volume ${li(ml.volumeMl, mr.volumeMl)}. The number of lines depends on the tracking, not the brain, so it is not compared (Jones et al. 2013).`);
+        }
+        if (r.tract !== undefined) { const t = tractCountModel?.json.tracts[r.tract]; const tna = t ? tnaLine(t.abbr) : ""; if (tna) tip.push(tna); }
+        if (faintRow(r)) tip.push("Listed in gray and hidden: it comes that close with fewer lines, or only within the gray band. Show it to see how it passes.");
+        row.title = tip.join("\n");
+        // ⋯: Rename, Remove, Tracts near this one…, Add lines, About this tract.
+        addRowMenu(row, () => {
+          const acts: RowAction[] = [
+            { label: "Rename", run: () => startEditing(nm, base, (v) => { for (const g of all) g.label = v; render(); }) },
+            { label: "Remove", run: () => { for (const g of all) groups.splice(groups.indexOf(g), 1); redraw3d(); render(); } },
+          ];
+          if (r.tract !== undefined) acts.push({ label: "Tracts near this one…", title: "Lists the tracts that pass near this one, as near a structure.", run: () => { way = "near"; void tractsNearTract(scan, all.flatMap((g) => g.strands), base); } });
+          if (all.some((g) => g.run) && r.tract !== undefined) acts.push({ label: "Add lines", title: "Follows many more lines in this tract, on both sides.", run: () => { void addLines(all.filter((g) => g.run)); } });
+          if (r.tract !== undefined) { const t = tractCountModel?.json.tracts[r.tract]; if (t) { const ref = readMore(t.abbr); acts.push({ label: "About this tract", title: ref.cite, run: () => { void fetch(`/_open?url=${encodeURIComponent(ref.link)}`).then((x) => { if (!x.ok) throw new Error(); }).catch(() => { globalThis.open?.(ref.link, "_blank"); }); } }); } }
+          return acts;
+        }, base);
+        box.append(row);
+      }
+      fitList(box, "diffusion-shown", { min: 150 });   // about six rows at least
+      sh.append(box);
+      // THE CAVEAT (Ron, 2026-10-01; O'Donnell et al. 2017), under a list measured near a tumor.
+      if (run && tumors.some((t) => t.label === run.label)) {
+        const cav = document.createElement("p"); cav.className = "sl-hint";
+        cav.textContent = "A tract that looks thin or missing on the tumor's side may be destroyed by the tumor, or still there but hidden by swelling (edema). Compare it with the other side, and add lines for a closer look.";
+        sh.append(cav);
+      }
+      if (run?.brain) { const bl = document.createElement("p"); bl.className = "sl-hint"; bl.textContent = `${run.brain[0].toUpperCase()}${run.brain.slice(1)}.`; sh.append(bl); }
+      // ADD LINES (visible, as Ron looked for it) and EXPORT, the section's last row.
+      const shownNamed = mineAll.filter((g) => g.visible && g.run && g.tract !== undefined && runs.has(g.scan));
+      const chosenNow = shownNamed.filter((g) => !runs.get(g.scan)!.added.has(`${g.tract}:${g.side ?? 0}`));
+      const bar = shell.actions(sh);
+      const addL = document.createElement("button"); addL.textContent = adding && busy ? busy.replace("Making tracts", "Adding lines") : "Add lines to the tracts shown";
+      addL.title = chosenNow.length ? `Follows many more lines in the ${chosenNow.length === 1 ? "tract" : `${chosenNow.length} tracts`} shown, on both sides, to see ${chosenNow.length === 1 ? "it" : "them"} better and compare the sides.` : "Works on tracts shown near a structure; lines are already added to every one shown.";
+      addL.disabled = !!busy || seeding || !chosenNow.length;
+      addL.onclick = () => { void addLines(chosenNow); };
+      const ex = document.createElement("button"); ex.textContent = "Export the numbers";
+      ex.title = "One table file at the top of Downloads, a row per tract and side: lines, FA, MD, AD, RD, volume, length, and the version that made them.";
+      ex.onclick = () => { void runAction(ex, () => exportNumbers(scan), { busyLabel: "Exporting…", doneLabel: "Exported ✓", failedLabel: "Not exported" }).catch(() => {}); };
+      bar.append(addL, ex);
+      if (exported) {
+        const fb = document.createElement("button"); fb.textContent = "Show in Finder"; fb.title = exported;
+        fb.onclick = () => showInDownloads(exported); bar.append(fb);
+      }
+      void ensureMeasures(scan);
     }
-    const face = shell.section(root, "2 · Fiber tracts near the tumor", { band: "yellow", open: true, note: groups.some((g) => g.tract !== undefined && g.run && !g.faint && (g.within ?? 0) >= MIN_NEAR_STREAMLINES) ? `${groups.filter((g) => g.tract !== undefined && g.run && !g.faint && (g.within ?? 0) >= MIN_NEAR_STREAMLINES).length} found` : "" });
-    const go = document.createElement("button");
-    go.className = "sl-primary";
-    go.style.cssText = "width:100%;margin:4px 0";
-    go.textContent = busy && !adding && !busy.startsWith("Grow") && !busy.startsWith("Comput") ? busy : "Show the fiber tracts near the tumor";
-    // Says the cut (critic, finding 4: "every" was not true): a named tract is listed when at least 5 of its fibers come
-    // that close.
-    go.title = `Finds the brain's main nerve fiber tracts, names them, and shows each named tract with at least ${MIN_NEAR_STREAMLINES} of its fibers within ${withinMm} mm of the tumor — whole, in its own color, with how close it comes. ${method === "ptt" ? "About three minutes (Smooth curves, chosen under Advanced)." : method === "single" ? "Uses Two-tensor: Single tensor (chosen under Advanced) does not name tracts. About half a minute." : "About half a minute."} Tracts that come within 2 mm more, or close with fewer fibers, are listed after them in gray, hidden.`;
-    go.disabled = !!busy || !scan || !faceNear || seeding || !!outline;
-    go.onclick = () => { if (method === "single") method = "ukf"; near = faceNear; void makeTracts(); };   // the face names tracts, from a tumor
-    face.append(go);
-    // THE SERVER, WHERE THE PERSON IS (critic, 2026-10-04, finding 9): when the last tracking took the brain from the
-    // diffusion scan because the segmentation server was not running, the button that starts it is here.
-    const cNow = scan ? computed.get(scan.browserId) : undefined;
-    if (cNow?.brain.reason === "no-server") {
-      const st = document.createElement("button");
-      st.textContent = "Start the segmentation server";
-      st.title = "Starts the program that finds the brain on the MRI of the anatomy, so the next run follows tracts through all of it (the first start takes a minute or two).";
-      st.style.cssText = "width:100%;margin:0 0 4px";
-      st.disabled = !!busy;
-      st.onclick = () => { void runAction(st, async () => { const r = await startSegmentationServer((l) => say(l)); say(r.ok ? `${r.message[0].toUpperCase()}${r.message.slice(1)}. Press the button above again.` : `The segmentation server did not start: ${r.message}.`); if (r.ok) cNow.brain.reason = undefined; render(); }, { busyLabel: "Starting…", doneLabel: "Started", failedLabel: "Did not start" }).catch(() => {}); };
-      face.append(st);
-    }
-    // A STUCK SERVER (Ron's demo, 2026-10-06: idle, it never started the job; or a job that stopped moving): the wait ends
-    // after two or three minutes (brain-mask.ts) and this restarts it -- one button, then the main button again.
-    if (cNow?.brain.reason === "stuck") {
-      const rs = document.createElement("button");
-      rs.textContent = "Restart the segmentation server";
-      rs.title = "The program that finds the brain on the MRI of the anatomy has stopped making progress. This stops it and starts it again (a minute or two). Anything it was doing or waiting to do stops, and the line at the top of the window names it, to be started again. Then press the button above again.";
-      rs.style.cssText = "width:100%;margin:0 0 4px";
-      rs.disabled = !!busy;
-      rs.onclick = () => { void runAction(rs, async () => { const r = await restartSegmentationServer((l) => say(l)); say(r.ok ? `${r.message[0].toUpperCase()}${r.message.slice(1)}. Press the button above again.` : `The segmentation server could not be restarted: ${r.message}.`); if (r.ok) cNow.brain.reason = undefined; render(); }, { busyLabel: "Restarting…", doneLabel: "Restarted", failedLabel: "Did not restart" }).catch(() => {}); };
-      face.append(rs);
-    }
-    if (!scan || !faceNear) { const p = document.createElement("p"); p.className = "sl-hint"; p.textContent = "Waits until the case has all three."; face.append(p); }
-    if (note) { const p = document.createElement("p"); p.className = "sl-hint"; p.style.margin = "4px 0 0"; p.textContent = note; face.append(p); }
-    const listBox = document.createElement("div");
-    face.append(listBox);
     if (!scan) return;
+
+    // ── ADVANCED ─────────────────────────────────────────────────────────────────────────────────────────────────────
     const more = shell.section(root, "Advanced", { band: "none", open: moreOpen });
     (more.closest("details") as HTMLDetailsElement | null)?.addEventListener("toggle", (e) => { moreOpen = (e.target as HTMLDetailsElement).open; });
     const showing = shownNow(scan);
-    // MAPS
     const maps = shell.section(more, "Maps", { band: "3d", open: true, note: `${scan.frameIds.length} volumes · b ${[...new Set(scan.bValues.map((b) => Math.round(b)))].sort((a, b) => a - b).join("/")}` });
-    const pick = document.createElement("select");
-    for (const s of list) pick.append(new Option(s.name, s.browserId, false, s.browserId === chosen));
-    pick.title = "The diffusion scan these maps and tracts come from.";
-    pick.onchange = () => { chosen = pick.value; const s = scans().find((x) => x.browserId === chosen); if (s) void showMap(s, "colorfa"); };
-    shell.row(maps, "Scan").append(pick);
-    const seg = document.createElement("div");
-    seg.style.cssText = "display:flex;gap:3px";
+    const seg = document.createElement("div"); seg.style.cssText = "display:flex;gap:3px";
     for (const [k, label, tip] of [["b0", "b0 (corrected)", "The diffusion MRI's image without diffusion weighting, corrected and lined up with the MRI of the anatomy: the image the maps and the tracts are made from."], ["fa", "FA", "Fractional anisotropy: bright where water moves along one direction, as in white matter tracts."], ["colorfa", "Color FA", "FA colored by direction: red left-right, green front-back, blue up-down."]] as const) {
-      const b = document.createElement("button");
-      b.textContent = label; b.title = tip; b.disabled = !!busy;
+      const b = document.createElement("button"); b.textContent = label; b.title = tip; b.disabled = !!busy;
       b.className = "sl-sh-look-b" + (showing === k ? " sl-on" : ""); b.setAttribute("aria-pressed", String(showing === k));
       b.onclick = () => { void showMap(scan, k); };
       seg.append(b);
     }
     shell.row(maps, "Show").append(seg);
-    // THE SCAN AS ACQUIRED, ONE VOLUME AT A TIME, with the player in the top bar (hidden for a diffusion scan unless asked
-    // for here). Not corrected and not lined up with the T1: the box says so, and unticking goes back to b0 (corrected).
-    const acq = document.createElement("label");
-    acq.style.cssText = "display:flex;align-items:center;gap:6px";
+    const acq = document.createElement("label"); acq.style.cssText = "display:flex;align-items:center;gap:6px";
     const acb = document.createElement("input"); acb.type = "checkbox"; acb.checked = live.nodes.get(scan.browserId)?.transport === "shown"; acb.disabled = !!busy;
     acb.onchange = () => {
       live.write({ op: "patch", id: scan.browserId, path: "#/transport", value: acb.checked ? "shown" : "hidden" });
@@ -1449,256 +1732,74 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     acq.append(acb, "Step through the scan as acquired");
     acq.title = "Shows the diffusion MRI as the scanner wrote it, one volume at a time, with the player in the top bar to step through them. Not corrected and not lined up with the MRI of the anatomy.";
     shell.row(maps, "Volumes").append(acq);
-    // Distortion: corrected by default when the reversed phase-encoding scan is loaded; what was done is said.
     const partner = partnerFor(scan), c0 = computed.get(scan.browserId);
-    const dist = document.createElement("label");
-    dist.style.cssText = "display:flex;align-items:center;gap:6px";
+    const dist = document.createElement("label"); dist.style.cssText = "display:flex;align-items:center;gap:6px";
     const dcb = document.createElement("input"); dcb.type = "checkbox"; dcb.checked = correct && !!partner; dcb.disabled = !partner || !!busy;
-    dcb.onchange = () => {
-      correct = dcb.checked;
-      const was = shownNow(scan);
-      const c = computed.get(scan.browserId); if (c) { dropMaps(c); computed.delete(scan.browserId); }
-      if (was === "fa" || was === "colorfa") void showMap(scan, was); else render();
-    };
-    // The series' own description: the patient is the scan's, and is already named above.
+    dcb.onchange = () => { correct = dcb.checked; const was = shownNow(scan); const c = computed.get(scan.browserId); if (c) { dropMaps(c); computed.delete(scan.browserId); } if (was) void showMap(scan, was); else render(); };
     const short = (n: string) => n.replace(/^.*?·\s*(MR\s+)?/, "");
     dist.append(dcb, partner ? `Correct with ${short(partner.name)}` : "Not corrected: no reversed phase-encoding scan loaded");
     dist.title = c0 ? `This scan's maps and tracts: distortion ${c0.corrected}.` : "Corrects the scan's stretching along its phase-encoding direction, using the scan taken with the opposite direction.";
     shell.row(maps, "Distortion").append(dist);
-    // Head movement (motion.ts): corrected unless the scan was corrected before -- a preprocessed dataset (Lauren
-    // O'Donnell, 2026-10-05: BIDS datasets are often shared preprocessed). Shown once the correction is on by default.
     if (MOTION_RULE !== 0) {
-      const mv = document.createElement("label");
-      mv.style.cssText = "display:flex;align-items:center;gap:6px";
+      const mv = document.createElement("label"); mv.style.cssText = "display:flex;align-items:center;gap:6px";
       const mcb = document.createElement("input"); mcb.type = "checkbox"; mcb.checked = preCorrected.has(scan.browserId); mcb.disabled = !!busy;
-      mcb.onchange = () => {
-        if (mcb.checked) preCorrected.add(scan.browserId); else preCorrected.delete(scan.browserId);
-        const was = shownNow(scan);
-        const c = computed.get(scan.browserId); if (c) { dropMaps(c); computed.delete(scan.browserId); }
-        if (was === "fa" || was === "colorfa") void showMap(scan, was); else render();
-      };
+      mcb.onchange = () => { if (mcb.checked) preCorrected.add(scan.browserId); else preCorrected.delete(scan.browserId); const was = shownNow(scan); const c = computed.get(scan.browserId); if (c) { dropMaps(c); computed.delete(scan.browserId); } if (was) void showMap(scan, was); else render(); };
       mv.append(mcb, "Already corrected (a preprocessed scan)");
-      // What was done to THIS scan (the rule actually applied), or what the tick is for. A preprocessed scan is often
-      // corrected for distortion too: the Distortion row above switches that off.
-      mv.title = c0?.movement ? `This scan: ${c0.movement}.` : "Tick when this scan was corrected for head movement before it was loaded, so it is not corrected twice. A preprocessed scan is often corrected for distortion too: switch that off in the Distortion row.";
+      mv.title = c0?.movement ? `This scan: ${c0.movement}.` : "Tick when this scan was corrected for head movement before it was loaded, so it is not corrected twice.";
       shell.row(maps, "Head movement").append(mv);
     }
-    // dcm2niix's reading of the same files, compared (second-opinion.ts).
-    const ck = checks.get(scan.browserId), cRow = document.createElement("span");
-    cRow.style.cssText = "font-size:12px";
-    if (!ck) cRow.textContent = "not yet (runs when the maps are first made)";
-    else if ("running" in ck) cRow.textContent = "dcm2niix is reading the same files…";
-    else if ("error" in ck) cRow.textContent = `not checked: ${ck.error}`;
-    else {
-      cRow.textContent = ck.result.agree ? `✓ ${ck.result.said}` : `⚠ ${ck.result.said}`;
-      if (!ck.result.agree) cRow.style.color = "var(--sl-warn)";
-    }
-    cRow.title = `Albula reads the scan's diffusion values with its own reader; dcm2niix ${DCM2NIIX_VERSION}, maintained by Chris Rorden and first to learn new scanners, reads the same files, and the two are compared.`;
+    const ck = checks.get(scan.browserId), cRow = document.createElement("span"); cRow.style.cssText = "font-size:12px";
+    if (!ck) cRow.textContent = "not yet (runs when the maps are first made)"; else if ("running" in ck) cRow.textContent = "dcm2niix is reading the same files…"; else if ("error" in ck) cRow.textContent = `not checked: ${ck.error}`; else { cRow.textContent = ck.result.agree ? `✓ ${ck.result.said}` : `⚠ ${ck.result.said}`; if (!ck.result.agree) cRow.style.color = "var(--sl-warn)"; }
+    cRow.title = `Albula reads the scan's diffusion values with its own reader; dcm2niix ${DCM2NIIX_VERSION} reads the same files, and the two are compared.`;
     shell.row(maps, "Checked").append(cRow);
-    // TRACTS
-    const tr = shell.section(more, "Tracts", { band: "yellow", open: true });
-    const nearSel = document.createElement("select");
-    if (!segs.length) nearSel.append(new Option("no segmentation of this patient", ""));
-    for (const s of segs) nearSel.append(new Option(s.label, s.key, false, s.key === near));
-    nearSel.title = method === "ukf" ? "The structure tracts are measured against, such as a tumor: the named tracts that pass close to it are shown, whole." : "Tracts start in the white matter inside and around this structure.";
-    nearSel.onchange = () => { near = nearSel.value; };
-    shell.row(tr, "Near").append(nearSel);
-    const mm = document.createElement("input");
-    mm.type = "number"; mm.min = "0"; mm.max = "60"; mm.step = "1"; mm.value = String(withinMm);
-    mm.style.cssText = "flex:0 0 4.5em;width:4.5em;min-width:0";
-    mm.title = method === "ukf" ? `How close a tract must come to the structure to be shown, in millimeters (0: only tracts reaching into it). Tracts within ${GRAY_BAND_MM} mm more are listed in gray, hidden.` : "How far around the structure tracts may start, in millimeters (0: only inside it).";
-    mm.onchange = () => { withinMm = Math.max(0, Math.min(60, Number(mm.value) || 0)); mm.value = String(withinMm); };
-    const mmWrap = document.createElement("span"); mmWrap.style.cssText = "display:inline-flex;align-items:center;gap:6px"; mmWrap.append(mm, "mm");
-    shell.row(tr, "Within").append(mmWrap);
-    const meth = document.createElement("div");
-    meth.style.cssText = "display:flex;gap:3px";
-    for (const [k, label, tip] of [["ukf", "Two-tensor", "Follows two crossing fiber directions, as the atlas the tract names come from was made: the method used for tumor planning. The default: under a minute."], ["ptt", "Smooth curves", "Follows fiber directions as smooth curves, from a model of all the directions in each voxel (CSD and parallel transport tracking). About three minutes; on the development cases no better near meningiomas than two-tensor."], ["single", "Single tensor", "One direction per voxel: fast, but stops or turns where fibers cross."]] as const) {
+    // DRAWING (Ron, 2026-10-15: "yes, keep them in the module under Advanced too").
+    const draw = shell.section(more, "Drawing", { band: "3d", open: false });
+    const as = document.createElement("div"); as.style.cssText = "display:flex;gap:3px";
+    for (const [k, label, tip] of [["lines", "Lines", "Thin lines: many tracts stay readable."], ["tubes", "Tubes", "Round, lit tubes: depth is easier to see."]] as const) {
+      const b = document.createElement("button"); b.textContent = label; b.title = tip; b.className = "sl-sh-look-b" + (drawAs === k ? " sl-on" : ""); b.setAttribute("aria-pressed", String(drawAs === k));
+      b.onclick = () => { drawAs = k; redraw3d(); render(); }; as.append(b);
+    }
+    shell.row(draw, "Draw as").append(as);
+    const cb2 = document.createElement("div"); cb2.style.cssText = "display:flex;gap:3px";
+    for (const [k, label, tip] of [["tract", "Tract", "Each named tract in its own color; lines without a name in gray."], ["direction", "Direction", "Every piece by its direction: red left-right, green front-back, blue up-down."]] as const) {
+      const b = document.createElement("button"); b.textContent = label; b.title = tip; b.className = "sl-sh-look-b" + (colorBy === k ? " sl-on" : ""); b.setAttribute("aria-pressed", String(colorBy === k));
+      b.onclick = () => { colorBy = k; redraw3d(); render(); }; cb2.append(b);
+    }
+    shell.row(draw, "Color").append(cb2);
+    const tw = document.createElement("span"); tw.style.cssText = "display:flex;gap:6px;align-items:center";
+    const ti = document.createElement("input"); ti.type = "number"; ti.min = "0"; ti.max = "6"; ti.step = "0.5"; ti.value = String(trimVoxels); ti.style.width = "4em";
+    const vmm = voxelMm(scan.browserId);
+    const tl2 = document.createElement("span"); tl2.style.opacity = "0.7"; tl2.textContent = `voxels at each end (≈ ${(trimVoxels * vmm).toFixed(1)} mm on this ${vmm.toFixed(1)} mm grid)`;
+    ti.title = "Draws every tract a little shorter at both ends, where the fibers fan out. The tracts themselves stay whole.";
+    ti.onchange = () => { const v = Number(ti.value); trimVoxels = Number.isFinite(v) ? Math.max(0, Math.min(6, v)) : trimVoxels; redraw3d(); render(); };
+    tw.append(ti, tl2);
+    shell.row(draw, "Shorten ends").append(tw);
+    // FOR DEVELOPERS (the tracking's numbers, the method, a seed by click): folded, out of the way (rule 4).
+    const dev = shell.section(more, "For developers", { band: "none", open: advOpen });
+    (dev.closest("details") as HTMLDetailsElement | null)?.addEventListener("toggle", (e) => { advOpen = (e.target as HTMLDetailsElement).open; });
+    const meth = document.createElement("div"); meth.style.cssText = "display:flex;gap:3px";
+    for (const [k, label, tip] of [["ukf", "Two-tensor", "Follows two crossing fiber directions, as the atlas the tract names come from was made. The default."], ["ptt", "Smooth curves", "Follows fiber directions as smooth curves (CSD and parallel transport tracking). About three minutes."], ["single", "Single tensor", "One direction per voxel: fast, but stops or turns where fibers cross. Names no tracts."]] as const) {
       const b = document.createElement("button"); b.textContent = label; b.title = tip; b.disabled = !!busy;
       b.className = "sl-sh-look-b" + (method === k ? " sl-on" : ""); b.setAttribute("aria-pressed", String(method === k));
-      b.onclick = () => { method = k; render(); };
-      meth.append(b);
+      b.onclick = () => { method = k; render(); }; meth.append(b);
     }
-    shell.row(tr, "Method").append(meth);
-    // Advanced, folded; stays open across redraws
-    const ad = shell.section(tr, "Advanced", { band: "none", open: advOpen });
-    (ad.closest("details") as HTMLDetailsElement | null)?.addEventListener("toggle", (e) => { advOpen = (e.target as HTMLDetailsElement).open; });
+    shell.row(dev, "Method").append(meth);
     const num = (label: string, tip: string, get: () => number, set: (v: number) => void, step: number, lo: number, hi: number) => {
-      const i = document.createElement("input"); i.type = "number"; i.step = String(step); i.min = String(lo); i.max = String(hi); i.value = String(get()); i.title = tip;
-      i.style.cssText = "flex:0 0 5em;width:5em;min-width:0";
-      // Out of range is refused and said, not taken (critic, finding 15: a step of 0 was accepted).
+      const i = document.createElement("input"); i.type = "number"; i.step = String(step); i.min = String(lo); i.max = String(hi); i.value = String(get()); i.title = tip; i.style.cssText = "flex:0 0 5em;width:5em;min-width:0";
       i.onchange = () => { const v = Number(i.value); if (Number.isFinite(v) && v >= lo && v <= hi) set(v); else { say(`${label}: between ${lo} and ${hi}.`); i.value = String(get()); } };
-      shell.row(ad, label).append(i);
+      shell.row(dev, label).append(i);
     };
-    num("Stop below FA", "A tract ends where the white matter becomes this faint (for the tracker chosen above).", () => (method === "ukf" ? adv.ukfStopFA : adv.minFA), (v) => { if (method === "ukf") adv.ukfStopFA = v; else adv.minFA = v; }, 0.01, 0.01, 0.9);
+    num("Stop below FA", "A tract ends where the white matter becomes this faint.", () => (method === "ukf" ? adv.ukfStopFA : adv.minFA), (v) => { if (method === "ukf") adv.ukfStopFA = v; else adv.minFA = v; }, 0.01, 0.01, 0.9);
     num("Largest turn (°)", "A tract ends where it would bend more sharply than this.", () => adv.maxAngleDeg, (v) => { adv.maxAngleDeg = v; }, 5, 5, 90);
     num("Step (voxels)", "How finely a tract follows the white matter: smaller is smoother and slower.", () => adv.stepVoxels, (v) => { adv.stepVoxels = v; }, 0.1, 0.1, 2);
-    num("Highest b used", "Which images the maps (FA, Color FA) and the single-tensor tracts are made from: those up to this b-value. Two-tensor tracts use the scan's images nearest b = 3000, as the atlas behind the tract names was made. Changing it makes the maps again.", () => adv.maxB, (v) => {
-      adv.maxB = v;
-      const s = scans().find((x) => x.browserId === chosen), was = shownNow(s);
-      for (const c of computed.values()) dropMaps(c);
-      computed.clear();
-      if (s && (was === "fa" || was === "colorfa")) void showMap(s, was);
-    }, 100, 500, 5000);
-    // The buttons: the second one, then the one yellow action at the bottom right.
-    const bar = shell.actions(tr);
-    const seedBtn = document.createElement("button");
-    seedBtn.textContent = seeding ? "Click in a view…" : "Seed where I click…";
+    num("Highest b used", "Which images the maps and single-tensor tracts are made from: those up to this b-value. Changing it makes the maps again.", () => adv.maxB, (v) => { adv.maxB = v; const was = shownNow(scan); for (const c of computed.values()) dropMaps(c); computed.clear(); if (was) void showMap(scan, was); }, 100, 500, 5000);
+    const bar9 = shell.actions(dev);
+    const seedBtn = document.createElement("button"); seedBtn.textContent = seeding ? "Click in a view…" : "Seed where I click…";
     seedBtn.title = seeding ? "Waiting for a click in a view. Escape cancels." : "Start tracts at the next point you click in a slice or the 3D view.";
-    seedBtn.disabled = !!busy;
-    seedBtn.onclick = () => { if (seeding) { cancelSeeding?.(); say("Seeding cancelled."); } else seedWhereIClick(); };
-    const make = document.createElement("button");
-    make.className = "sl-primary";
-    make.textContent = busy.startsWith("Making") ? busy : "Make tracts";
-    make.title = method === "ukf" ? "Follow tracts through the whole brain, name them, and show every named tract that comes within the distance of the structure chosen above, whole." : "Make tracts starting inside and around the structure chosen above.";
-    make.disabled = !!busy || !near || seeding;
-    make.onclick = () => { void makeTracts(); };
-    bar.append(seedBtn, make);
-    // THE TRACTS, under the face's button (what was made, whatever made it): a search, Show / Hide all, and the tracts in
-    // groups -- the corpus callosum together -- each group with its eye and its fold (Ron, 2026-10-01: "we need a select
-    // all/none button like in segmentations. we need to group the tract. All corpus callosum together"; "and a search").
-    if (groups.length) {
-      const abbrOf = (g: TractGroup) => /\(([^)]+)\)$/.exec(g.name)?.[1];
-      const shownGroups = groups.filter((g) => { const a = abbrOf(g); return matchesSearch(tractSearch, g.name, a ? tractInfo(a)?.tna?.latin : undefined); });
-      const tools = document.createElement("div");
-      tools.style.cssText = "display:flex;gap:6px;align-items:center;margin:4px 0";
-      const find = document.createElement("input");
-      find.type = "search"; find.placeholder = "Find a tract…"; find.value = tractSearch; find.className = "sl-tract-find";
-      find.title = "Shows only the tracts whose name, abbreviation or anatomical term contains this.";
-      find.style.cssText = "flex:1;min-width:0";
-      find.oninput = () => { tractSearch = find.value; const at = find.selectionStart; render(); const f2 = root?.querySelector<HTMLInputElement>(".sl-tract-find"); f2?.focus(); if (at !== null) f2?.setSelectionRange(at, at); };
-      const st = showHideAllState(shownGroups.map((g) => ({ labelValue: g.id, visible: g.visible })), !!tractSearch.trim());
-      const all = document.createElement("button"); all.textContent = st.label; all.title = st.show ? "Show every tract in the list below" : "Hide every tract in the list below"; all.disabled = !shownGroups.length;
-      all.onclick = () => { for (const g of shownGroups) g.visible = st.show; redraw3d(); render(); };
-      // ADD LINES to the tracts shown (Ron, 2026-10-01).
-      const shownNamed = groups.filter((g) => g.visible && g.run && g.tract !== undefined && runs.has(g.scan));
-      const chosenNow = shownNamed.filter((g) => !runs.get(g.scan)!.added.has(`${g.tract}:${g.side ?? 0}`));
-      // While it runs it says which step it is on (Ron, 2026-10-01: "add progress when the add lines button is clicked").
-      const addL = document.createElement("button"); addL.textContent = adding && busy ? busy.replace("Making tracts", "Adding lines") : "Add lines"; addL.className = "sl-tract-add";
-      addL.title = chosenNow.length ? `Follow many more lines in the ${chosenNow.length === 1 ? "tract" : `${chosenNow.length} tracts`} shown that ${chosenNow.length === 1 ? "has" : "have"} none added yet, on both sides, to see ${chosenNow.length === 1 ? "it" : "them"} better and compare the sides. About as long as the first run. The more tracts shown, the thinner the extra lines are spread: for the most lines in a thin tract, show it alone.`
-        : shownNamed.length ? "Lines are already added to every tract shown. Turn on another tract to add lines to it." : "Show the tracts you want to see better, then press this.";
-      addL.disabled = !!busy || seeding || !chosenNow.length;
-      addL.onclick = () => { void addLines(chosenNow); };
-      tools.append(find, all, addL);
-      listBox.append(tools);
-      const searching = !!tractSearch.trim();
-      for (const grp of TRACT_GROUPS) {
-        const members = shownGroups.filter((g) => tractGroupKey(g.tract !== undefined ? tractInfo(abbrOf(g) ?? "")?.category : undefined, g.tract === undefined) === grp.key);
-        if (!members.length) continue;
-        const folded = foldedGroups.has(grp.key) && !searching;     // a search opens every group, as in Segmentations
-        const head = document.createElement("div");
-        head.style.cssText = "display:flex;align-items:center;gap:6px;margin:4px 0 1px;font-weight:600;cursor:pointer";
-        const caret = document.createElement("span"); caret.textContent = folded ? "▸" : "▾"; caret.style.cssText = "flex:0 0 10px;opacity:0.7";
-        const hl = document.createElement("span"); hl.textContent = `${grp.label} (${members.length})`; hl.style.cssText = "flex:1;min-width:0";
-        const anyOn = members.some((g) => g.visible);
-        const geye = document.createElement("button");
-        geye.style.cssText = "background:none;border:none;padding:0 2px;cursor:pointer;color:inherit;font-size:13px;flex:0 0 auto";
-        geye.textContent = anyOn ? "👁" : "🚫"; geye.title = anyOn ? `Hide every tract in ${grp.label}` : `Show every tract in ${grp.label}`;
-        geye.onclick = (e) => { e.stopPropagation(); for (const g of members) g.visible = !anyOn; redraw3d(); render(); };
-        head.onclick = () => { if (foldedGroups.has(grp.key)) foldedGroups.delete(grp.key); else foldedGroups.add(grp.key); render(); };
-        head.title = folded ? "Show the tracts in this group" : "Fold this group";
-        head.append(caret, hl, geye);
-        listBox.append(head);
-        if (folded) continue;
-        for (const g of members) {
-        const row = document.createElement("div");
-        row.style.cssText = "display:flex;align-items:center;gap:8px;min-width:0;padding:1px 0";
-        const name = document.createElement("span"); name.textContent = g.name; name.title = g.outside ? `${g.name}\nFibers that leave the brain, run through the fluid around it and come back. They are not one of the brain's tracts, so they get no tract's name; at the skull base they are often a cranial nerve, such as the trigeminal nerve.` : g.name;
-        // READ MORE (Ron, 2026-10-01): the paper that describes the tract, opened in the browser from the name.
-        const abbr = /\(([^)]+)\)$/.exec(g.name)?.[1];
-        if (g.tract !== undefined && abbr) {
-          const ref = readMore(abbr);
-          const tna = tnaLine(abbr);
-          const note = tractNote(abbr);
-          name.title = `${g.name}${tna ? `\n${tna}` : ""}${note ? `\n${note}` : ""}\nRead more (click): ${ref.cite}`;
-          name.onclick = () => { void fetch(`/_open?url=${encodeURIComponent(ref.link)}`).then((r) => { if (!r.ok) throw new Error(); }).catch(() => { globalThis.open?.(ref.link, "_blank"); }); };
-        }
-        name.style.cssText = `flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap${name.onclick ? ";cursor:pointer;text-decoration:underline dotted" : ""}`;
-        const n = document.createElement("span"); n.style.opacity = "0.7";
-        n.textContent = g.within !== undefined ? `${g.within.toLocaleString()}/${g.strands.length.toLocaleString()}` : g.strands.length.toLocaleString();
-        n.title = g.within !== undefined ? `${g.within.toLocaleString()} of this tract's ${g.strands.length.toLocaleString()} streamlines come within the distance of the structure` : "streamlines in this group";
-        if (g.more) n.title += ` (${g.more.toLocaleString()} of them added by Add lines)`;
-        // THE OTHER SIDE, for comparing (Ron, 2026-10-01; O'Donnell et al. 2017: surgeons compare the tumor's side with
-        // the healthy side).
-        const other = document.createElement("span");
-        if (g.otherSide !== undefined && g.side) {
-          const os = g.side > 0 ? "left" : "right";
-          other.textContent = `${os} ${g.otherSide.toLocaleString()}`;
-          other.title = `The same tract on the ${os} side has ${g.otherSide.toLocaleString()} streamlines, this side ${g.strands.length.toLocaleString()}.`;
-          other.style.cssText = "flex:0 0 auto;opacity:0.55;font-size:11px";
-        }
-        if (g.faint) {
-          name.style.opacity = "0.55"; n.style.opacity = "0.45";
-          name.title += (g.within ?? 0) > 0
-            ? `\nOnly ${g.within} of its streamlines come within the distance — fewer than ${MIN_NEAR_STREAMLINES}, so it is listed but hidden. It may be thin here, or hidden by swelling. Show it and press Add lines to see it better.`
-            : `\nIt comes ${Number.isFinite(g.distanceMm ?? Infinity) ? `within ${(g.distanceMm as number).toFixed(1)} mm` : "no closer than the distance measured"} — farther than the distance chosen, so it is listed but hidden. Show it to see how it passes the structure.`;
-        }
-        if (g.tract !== undefined || g.unnamed) {
-          // The tract's own color, as it is drawn (and as its card will show it).
-          const c = g.tract !== undefined ? tractColor(g.tract, tractCount) : UNNAMED;
-          const sw = document.createElement("span");
-          sw.style.cssText = `flex:0 0 10px;width:10px;height:10px;border:1px solid var(--sl-border, #000);background:rgb(${c.slice(0, 3).map((v) => Math.round(v * 255)).join(",")})`;
-          row.append(sw);
-        }
-        const dist = document.createElement("span");
-        if (g.distanceMm !== undefined) {
-          // Measured out to the margin and 2 mm beyond (streamlineDistances); farther is "far" (Ron's screenshot,
-          // 2026-10-01: the other side, added by Add lines, read "Infinity mm").
-          dist.textContent = g.distanceMm < 0.05 ? "touches" : Number.isFinite(g.distanceMm) ? `${g.distanceMm.toFixed(1)} mm` : "far";
-          dist.title = g.distanceMm < 0.05 ? "This tract reaches into the structure." : "This tract's closest distance to the structure.";
-          dist.style.cssText = "flex:0 0 auto;opacity:0.85";
-        }
-        const icon = "background:none;border:none;padding:0 2px;cursor:pointer;color:inherit;font-size:13px;min-width:0;flex:0 0 auto";
-        const eye = document.createElement("button"); eye.style.cssText = icon; eye.textContent = g.visible ? "👁" : "🚫"; eye.title = g.visible ? "Hide these tracts" : "Show these tracts";
-        eye.onclick = () => { g.visible = !g.visible; redraw3d(); render(); };
-        const x = document.createElement("button"); x.style.cssText = icon; x.textContent = "✕"; x.title = "Remove these tracts";
-        x.onclick = () => { groups.splice(groups.indexOf(g), 1); redraw3d(); render(); };
-        row.style.paddingLeft = "14px";
-        row.append(name, dist, n, other, eye, x);
-        listBox.append(row);
-        }
-      }
-      // THE CAVEAT (Ron, 2026-10-01; O'Donnell et al. 2017: a missing tract cannot be told destroyed from hidden by edema).
-      if (groups.some((g) => g.run && g.tract !== undefined)) {
-        const cav = document.createElement("p"); cav.className = "sl-hint";
-        cav.textContent = "A tract that looks thin or missing on the tumor's side may be destroyed by the tumor, or still there but hidden by swelling (edema). Compare it with the other side, and press Add lines for a closer look.";
-        listBox.append(cav);
-        // Which brain these tracts were followed in, kept with the run (critic, 2026-10-04, finding 9).
-        const runNow = runs.get(scan.browserId);
-        if (runNow?.directions) { const dl = document.createElement("p"); dl.className = "sl-hint"; dl.textContent = `${runNow.directions[0].toUpperCase()}${runNow.directions.slice(1)}.`; listBox.append(dl); }
-        if (runNow?.brain) { const bl = document.createElement("p"); bl.className = "sl-hint"; bl.textContent = `${runNow.brain[0].toUpperCase()}${runNow.brain.slice(1)}.`; listBox.append(bl); }
-      }
-      const as = document.createElement("div");
-      as.style.cssText = "display:flex;gap:3px";
-      for (const [k, label, tip] of [["lines", "Lines", "Thin lines: many tracts stay readable."], ["tubes", "Tubes", "Round, lit tubes: depth is easier to see."]] as const) {
-        const b = document.createElement("button"); b.textContent = label; b.title = tip;
-        b.className = "sl-sh-look-b" + (drawAs === k ? " sl-on" : ""); b.setAttribute("aria-pressed", String(drawAs === k));
-        b.onclick = () => { drawAs = k; redraw3d(); render(); };
-        as.append(b);
-      }
-      shell.row(more, "Draw as").append(as);
-      // Shorter ends (drawing only).
-      const tw = document.createElement("span"); tw.style.cssText = "display:flex;gap:6px;align-items:center";
-      const ti = document.createElement("input"); ti.type = "number"; ti.min = "0"; ti.max = "6"; ti.step = "0.5"; ti.value = String(trimVoxels); ti.style.width = "4em";
-      const tl = document.createElement("span"); tl.style.opacity = "0.7";
-      const vmm = groups.length ? voxelMm(groups[0].scan) : 2;
-      tl.textContent = `voxels at each end (≈ ${(trimVoxels * vmm).toFixed(1)} mm on this ${vmm.toFixed(1)} mm grid)`;
-      ti.title = "Draws every tract a little shorter at both ends, where the fibers fan out. The tracts themselves stay whole. 0 draws them whole.";
-      ti.onchange = () => { const v = Number(ti.value); trimVoxels = Number.isFinite(v) ? Math.max(0, Math.min(6, v)) : trimVoxels; redraw3d(); render(); };
-      tw.append(ti, tl);
-      shell.row(more, "Shorten ends").append(tw);
-      if (groups.some((g) => g.tract !== undefined)) {
-        const cb = document.createElement("div");
-        cb.style.cssText = "display:flex;gap:3px";
-        for (const [k, label, tip] of [["tract", "Tract", "Each named tract in its own color; streamlines without a name in gray."], ["direction", "Direction", "Every piece by its direction: red left-right, green front-back, blue up-down."]] as const) {
-          const b = document.createElement("button"); b.textContent = label; b.title = tip;
-          b.className = "sl-sh-look-b" + (colorBy === k ? " sl-on" : ""); b.setAttribute("aria-pressed", String(colorBy === k));
-          b.onclick = () => { colorBy = k; redraw3d(); render(); };
-          cb.append(b);
-        }
-        shell.row(more, "Color").append(cb);
-      }
-    }
+    seedBtn.disabled = !!busy; seedBtn.onclick = () => { if (seeding) { cancelSeeding?.(); say("Seeding cancelled."); } else seedWhereIClick(); };
+    bar9.append(seedBtn);
   }
+  let howOpen = false;
 
   // THE TUBES IN FRONT, for the 3D probe (critic, 2026-10-01, finding 4): where along the mouse ray the first shown tube
   // is -- the first step that comes within a tube's radius (plus half a millimeter) of a drawn streamline point.
