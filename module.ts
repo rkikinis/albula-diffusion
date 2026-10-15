@@ -113,7 +113,10 @@ interface Run { sl: Float32Array[]; named: Named; sorted: Sorted; structure: Str
   /** The fit it was tracked on (critic, 2026-10-01, finding 5): Add lines on a different fit is refused. */
   maxB: number; partnerId: string;
   /** The anatomy MRI the scan was aligned to when the run was made ("" none): Add lines tracks in the same space only. */
-  anatomyId: string }
+  anatomyId: string;
+  /** The run's streamlines are the ones made at import (DMRI-AT-IMPORT.md): corrected and aligned to the T1 by the job,
+   *  so Add lines checks only that this scan is aligned to an anatomy MRI as well, not that its fit is the one recorded. */
+  stored?: boolean }
 /** How tracts are followed: one tensor per voxel (fast, the classic), or the two-tensor UKF (ukf.ts; crossing fibers;
  *  the method SlicerDMRI uses for tumor planning), with the settings of the current tracking rule (tracking-rules.ts). */
 /** "ptt": fiber distributions from multi-shell CSD (csd.ts, responses from the scan) and parallel transport tracking
@@ -758,8 +761,6 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
    */
   async function makeNamedTracts(scan: Scan, target: { seg: MrsonNode; labelValue: number; label: string }) {
     try {
-      const c = await ensureFit(scan);
-      const times: StageTimes = takeFitTimes(), before = times.total ?? 0;
       const t0 = performance.now();
       const model = await tractCloud();
       tractCount = model.json.tracts.length;
@@ -775,12 +776,18 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
         stored = await loadStored(scan, model).catch(() => null);
         busy = "Making tracts…"; render();
       }
+      // THE SCAN'S OWN FIT only when the tracts are made here: stored tracts were corrected and aligned by the job, and
+      // measuring them against the structure needs neither (on PAT16 the press took 48 s, 45 of them the fit; Ron's
+      // budget is 33 s). A fit made already (the maps on load) is used; one still running is not waited for.
+      const c = stored ? computed.get(scan.browserId) : await ensureFit(scan);
+      const times: StageTimes = stored ? {} : takeFitTimes(), before = times.total ?? 0;
       let sl: Float32Array[], named: Named;
       if (stored) {
         sl = stored.sl; named = stored.named;
         times.track = 0; times.name = 0;
         say(`Using the fiber tracts made when the scan was imported${stored.made ? ` (${stored.made.slice(0, 10)})` : ""}: ${sl.length.toLocaleString()} streamlines.`);
       } else {
+        if (!c) throw new Error("the scan's maps are not made");
         if (method === "ukf") await brainFor(c);
         const seeds = method === "ukf" ? seedsFor(c.fit, TRACKING_RULES[c.rule]) : wholeBrainSeeds(c.fit);
         times.seeds = performance.now() - t0;
@@ -803,7 +810,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       const dist = await streamlineDistances(structure, sl, grayMm + 2);
       // Streamlines that cross the fluid at the brain's edge would keep no tract's name (outside-brain.ts; Ron, 2026-10-04:
       // "The only bad thing is mislabeling them"). OFF: it also took corticospinal fibers along the medulla.
-      const outside = OUTSIDE_RULE.on ? outsideBrain(sl, c.fit, edgeFluid(c.fit)) : undefined;
+      const outside = OUTSIDE_RULE.on && c ? outsideBrain(sl, c.fit, edgeFluid(c.fit)) : undefined;
       const sorted = sortByDistance(model, named, dist, withinMm, MIN_NEAR_STREAMLINES, grayMm, outside), nearTracts = sorted.near;
       times.distances = performance.now() - tDist;
       const tDraw = performance.now();
@@ -812,14 +819,14 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       // A NEW RUN REPLACES THE LAST ONE for this scan (critic, finding 5: a second press doubled every tract).
       groups.splice(0, groups.length, ...withoutLastRun(groups, scan.browserId));   // face.ts
       const pick = (idx: number[]) => idx.map((i) => sl[i]);
-      runs.set(scan.browserId, { sl, named, sorted, structure, label: target.label, withinMm, method, added: new Set(), dist, maxB: c.maxB, partnerId: c.partnerId, anatomyId: c.anatomyId ?? "", rule: method === "ukf" ? c.rule : undefined, brain: method === "ukf" ? c.brain.note : "", ...(c.directions ? { directions: c.directions } : {}) });
+      runs.set(scan.browserId, { sl, named, sorted, structure, label: target.label, withinMm, method, added: new Set(), dist, stored: !!stored, maxB: c?.maxB ?? 0, partnerId: c?.partnerId ?? "", anatomyId: c?.anatomyId ?? "", rule: method === "ukf" && c ? c.rule : undefined, brain: method === "ukf" && c ? c.brain.note : "", ...(c?.directions ? { directions: c.directions } : {}) });
       // The anatomy behind the slices, where the tracts' crossings are drawn (Yogesh Rathi via Ron, 2026-10-01), and over
       // it this scan's own map -- never another patient's left from before (critic, 2026-10-01, finding 3).
       const anat = anatomyFor(scan);
       if (anat) {
         const fg = ((([...live.nodes.values()].find((n) => n.type === "sliceComposite")?.refs as Record<string, string[]> | undefined)?.foreground) ?? [])[0];
-        const mine = fg !== undefined && (fg === c.colorFaId || fg === c.faId);
-        putBackground(anat.id, mine ? undefined : (c.colorFaId && live.nodes.get(c.colorFaId) ? c.colorFaId : null));
+        const mine = fg !== undefined && !!c && (fg === c.colorFaId || fg === c.faId);
+        putBackground(anat.id, mine ? undefined : (c?.colorFaId && live.nodes.get(c.colorFaId) ? c.colorFaId : null));
       }
       // The near tracts shown; the faint ones (within reach, fewer than the minimum) listed after them, hidden.
       for (const [e, faint] of [...nearTracts.map((e) => [e, false] as const), ...sorted.faint.map((e) => [e, true] as const)]) {
@@ -864,7 +871,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     try {
       const c = await ensureFit(scan), t0 = performance.now();
       // THE SAME SPACE (critic, 2026-10-03, finding 1): the scan aligned to the same anatomy MRI, or to none, as the run.
-      if (c.maxB !== run.maxB || c.partnerId !== run.partnerId || (c.anatomyId ?? "") !== run.anatomyId) {
+      if (run.stored ? !c.anatomyId : (c.maxB !== run.maxB || c.partnerId !== run.partnerId || (c.anatomyId ?? "") !== run.anatomyId)) {
         say("The maps were made again since these tracts were found (Highest b, the distortion correction, or the MRI of the anatomy changed): press “Show the fiber tracts near the tumor” again first.");
         return;
       }
