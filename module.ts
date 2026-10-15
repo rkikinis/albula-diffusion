@@ -1770,6 +1770,17 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     }
   }
 
+  // THE PLAYER IN THE TOP BAR stays hidden for every diffusion series -- the scan and its reversed partner (Ron, 2026-10-15:
+  // their volumes are directions, not moments; "probably hide with the ability to bring it up under advanced"); Advanced ›
+  // Maps › Volumes brings the scan's back. Set once per series, so the person's own choice is kept.
+  function hideDiffusionPlayers() {
+    for (const b of sequenceBrowsers(live)) {
+      if (b.transport !== undefined) continue;
+      const first = browserFrames(live, b.id).frames[0], n = first ? live.nodes.get(first.node) : undefined;
+      if ((n?.origin as Record<string, unknown> | undefined)?.diffusion !== undefined) live.write({ op: "patch", id: b.id, path: "#/transport", value: "hidden" });
+    }
+  }
+
   // REDRAW ONLY WHEN WHAT THE PANEL SHOWS CHANGED (critic, finding 14: every sequence step closed Advanced and dropped a
   // value being typed). And COLOR FA WHEN A DIFFUSION SCAN LOADS (Ron's yes on the mockup).
   let lastSig = "";
@@ -1792,12 +1803,12 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       if (was === "fa" || was === "colorfa") void showMap(s, was);
     }
     mapsBack();
+    hideDiffusionPlayers();
     for (const s of scans()) {
       if (seenScans.has(s.browserId)) continue;
       seenScans.add(s.browserId);
       // THE PLAYER IN THE TOP BAR stays hidden for a diffusion scan (Ron, 2026-10-15: its volumes are directions, not
       // moments; "probably hide with the ability to bring it up under advanced"): Advanced › Maps › Volumes brings it back.
-      if (live.nodes.get(s.browserId)?.transport === undefined) live.write({ op: "patch", id: s.browserId, path: "#/transport", value: "hidden" });
       arrivedAt.set(s.browserId, performance.now());
       chosen = s.browserId;
       void showMap(s, "colorfa");
