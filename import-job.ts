@@ -238,11 +238,13 @@ export async function brainOnT1(server: string, t1: ReadSeries, onProgress?: (li
     if (s.ok) r = await synthstripBrainMask(stub, key, onProgress, { transport, upload });
   }
   // A STUCK SERVER, RESTARTED ONCE (Ron, 2026-10-15: "Agree" -- the first catch-up met one: it took the requests and never
-  // started them). "Stuck" is said only when the server runs nothing else (brain-mask.ts nothingRunning), so a restart
-  // loses nothing; a busy server is never restarted from here (critic 2026-10-06, finding 12). Still stuck after that:
+  // started them; and, Ron the same day: "If the biggest danger is that you have to repeat an import, then being aggressive
+  // is not a problem"). "Stuck" is our job queued three minutes while the server runs nothing else, or our job running
+  // with no progress for two minutes (brain-mask.ts); a server busy with someone else's job is never restarted from here
+  // (critic 2026-10-06, finding 12: it may be a person's own AI run). Still stuck after that:
   // the case waits, said so, and is looked at again at the next start.
   if (!r.ok && r.reason === "stuck") {
-    onProgress?.("the segmentation server was stuck with nothing running; restarting it");
+    onProgress?.("the segmentation server seemed stuck; restarting it");
     const s = await restartSegmentationServer(onProgress, toRoot);
     if (s.ok) r = await synthstripBrainMask(stub, key, onProgress, { transport, upload });
   }

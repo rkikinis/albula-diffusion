@@ -50,7 +50,8 @@ import { MOTION_RULE, type MotionRuleId } from "./motion.ts";
 const ADV_MIN_FA = 0.15;
 import { DCM2NIIX_VERSION, secondOpinion, type SecondOpinion } from "./second-opinion.ts";
 import { databaseSeries, openDatabaseId } from "albula";
-import { colorFaPath, dicomToTracts, faPath, UNNAMED as UNNAMED_SET } from "./tracts-dicom.ts";
+import { adPath, colorFaPath, dicomToTracts, faPath, mdPath, rdPath, UNNAMED as UNNAMED_SET } from "./tracts-dicom.ts";
+import { byName, laterality, measure, openingWay, throughBox, toCsv, voxelsOf, type Maps, type Measures, type Way } from "./selection.ts";
 import { databaseFileUrl, nrrdDecode, nrrdGeometry, nrrdSplitHeader } from "albula";
 import { assetUrl, holdDrawing, seriesDicomFiles, startPlacing, restartSegmentationServer, startSegmentationServer, synthstripBrainMask, type BrainMaskResult } from "albula";
 import { createSegmentation, growIntoSegmentation, openDicomDatabase, openLoadFromDisk, paintInto, registerProbeRows, registerRayHits, runAction, saveSegmentationToDicom, showHideAllState } from "albula";
@@ -560,7 +561,14 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
    * overlay them on the t1 instead?"): with the case's anatomical MRI loaded, the map is the layer over it at half
    * opacity (a slider the user moved stays where it is); without one, the map is the background, as before.
    */
+  /** The map this module put over each scan's slices (scan -> image id), for putting it back (mapsBack). */
+  const mapOn = new Map<string, string>();
+  /** When each scan arrived (performance.now()), for the log line saying how long its Color FA took. */
+  const arrivedAt = new Map<string, number>();
   const putMap = (scan: Scan, mapId: string) => {
+    mapOn.set(scan.browserId, mapId);
+    const t = arrivedAt.get(scan.browserId);
+    if (t !== undefined) { arrivedAt.delete(scan.browserId); status(`Color FA on the slices ${((performance.now() - t) / 1000).toFixed(1)} s after the diffusion MRI arrived.`); }
     const anat = anatomyFor(scan);
     if (!anat) { putBackground(mapId, null); return; }
     const cur = [...live.nodes.values()].find((n) => n.type === "sliceComposite")?.foregroundOpacity as number | undefined;
@@ -780,6 +788,44 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     storedMaps.set(scan.browserId, { ...storedMaps.get(scan.browserId), [what]: res.imageId });
     return res.imageId;
   }
+  /** A float NRRD the import job stored in the database's cache folder, or null. */
+  async function storedNrrd(path: string): Promise<{ dims: [number, number, number]; ijkToRAS: number[]; data: Float32Array } | null> {
+    const url = await databaseFileUrl(path);
+    const r = url ? await fetch(url).catch(() => null) : null;
+    if (!r?.ok) return null;
+    const { f, body } = nrrdSplitHeader(new Uint8Array(await r.arrayBuffer()));
+    const dims = (f["sizes"] ?? "").split(/\s+/).filter(Boolean).map(Number) as [number, number, number];
+    const raw = await nrrdDecode(f, body, dims[0] * dims[1] * dims[2] * 4);
+    return { dims, ijkToRAS: nrrdGeometry(f).ijkToRAS, data: new Float32Array(raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength)) };
+  }
+  /**
+   * THE MAPS A TRACT IS MEASURED ON (v3: FA, MD, AD, RD per tract and side; selection.ts measure): the ones the import job
+   * stored beside the tracts used (after every correction, on the T1's grid), else this module's own fit. Kept per scan
+   * and per source, so tracts made here are measured on the fit they were made from.
+   */
+  const mapsKept = new Map<string, { key: string; maps: Promise<Maps | null> }>();
+  function mapsFor(scan: Scan): Promise<Maps | null> {
+    const w = whole.get(scan.browserId), st = storedState.get(scan.browserId);
+    const key = w && !w.stored ? `fit:${w.key}` : `stored:${st?.seriesUID ?? ""}`;
+    const have = mapsKept.get(scan.browserId);
+    if (have && have.key === key) return have.maps;
+    const maps = (async (): Promise<Maps | null> => {
+      if (key.startsWith("stored:") && st?.seriesUID) {
+        const uid = st.seriesUID;
+        const [fa, md, ad, rd] = await Promise.all([faPath(uid), mdPath(uid), adPath(uid), rdPath(uid)].map((p) => storedNrrd(p).catch(() => null)));
+        const g = fa ?? md;
+        if (!g) return null;
+        return { dims: g.dims, ijkToRAS: g.ijkToRAS, fa: fa?.data, md: md?.data, ad: ad?.data, rd: rd?.data };
+      }
+      const c = w?.c ?? computed.get(scan.browserId);
+      if (!c) return null;
+      const n = c.fit.fa.length, ad = new Float32Array(n), rd = new Float32Array(n), ev = c.fit.evals;
+      for (let v = 0; v < n; v++) { ad[v] = ev[3 * v]; rd[v] = (ev[3 * v + 1] + ev[3 * v + 2]) / 2; }
+      return { dims: c.fit.dims, ijkToRAS: c.fit.ijkToRAS, fa: c.fit.fa, md: c.fit.md, ad, rd };
+    })().catch(() => null);
+    mapsKept.set(scan.browserId, { key, maps });
+    return maps;
+  }
   /** Is the server preparing this extension's work right now? (GET /_jobs, desktop/extension-jobs.ts) */
   // ONLY FOR THE DATABASE THIS WINDOW HAS OPEN (critic 2026-10-14, import-time jobs, finding 4: the button waited for work
   // on any database). It cannot say which scan the run is on (counts only), so it waits for the run on this database.
@@ -809,58 +855,99 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
    * streamlines that pass that close are shown too, in gray (hiding a real tract is worse than showing an unnamed one);
    * everything else is kept, hidden, as "Rest of the brain".
    */
+  // ── THE WHOLE BRAIN'S RUN, ONCE PER SCAN (v3, Ron 2026-10-15): every way of choosing tracts -- by name, through a
+  // box, near a segment or a tract -- picks from the same named whole-brain streamlines: the ones made at import when
+  // the database has them, else the ones this module makes, once, with the settings in force (kept until a setting or
+  // the scan changes).
+  interface Whole { sl: Float32Array[]; named: Named; stored: boolean; storedInputs?: { partner?: string | null; t1?: string | null }; made?: string; c?: Computed; times: StageTimes; key: string }
+  const whole = new Map<string, Whole>();
+  const settingsKey = () => JSON.stringify([method, correct, adv]);
+  let wholeBusy: Promise<Whole> | undefined;
+  async function ensureWholeBrain(scan: Scan): Promise<Whole> {
+    const have = whole.get(scan.browserId);
+    if (have && (have.stored ? usesDefaults(scan) : have.key === settingsKey())) return have;
+    if (wholeBusy) return await wholeBusy;
+    wholeBusy = (async () => {
+      let releaseHold: (() => void) | undefined;
+      try {
+        const t0 = performance.now();
+        const model = await tractCloud();
+        tractCount = model.json.tracts.length;
+        // THE TRACTS MADE AT IMPORT, when the database has them (UKF, the default method, is what the job runs); while the
+        // server is still preparing them, wait for it and say so (Ron's "q3: A": one run, never two).
+        let stored = usesDefaults(scan) ? await loadStored(scan, model).catch(() => null) : null;
+        if (!usesDefaults(scan)) say("Your settings under Advanced differ from the ones the tracts made at import used: making them here, as set.");
+        if (!stored && usesDefaults(scan) && await jobRunning()) {
+          const tw = performance.now();
+          while (await jobRunning() && performance.now() - tw < 15 * 60_000) {
+            busy = `Waiting for the fiber tracts being prepared… ${Math.round((performance.now() - tw) / 1000)} s`; render();
+            await new Promise((r) => setTimeout(r, 3000));
+          }
+          stored = await loadStored(scan, model).catch(() => null);
+          busy = "Making tracts…"; render();
+        }
+        // THE SCAN'S OWN FIT only when the tracts are made here: stored tracts were corrected and aligned by the job, and
+        // choosing among them needs neither (PAT16: 48 s, 45 of them the fit). A fit made already is used.
+        const c = stored ? computed.get(scan.browserId) : await ensureFit(scan);
+        const times: StageTimes = stored ? {} : takeFitTimes();
+        let w: Whole;
+        if (stored) {
+          times.track = 0; times.name = 0;
+          w = { sl: stored.sl, named: stored.named, stored: true, storedInputs: storedState.get(scan.browserId)?.inputs, made: stored.made, c, times, key: "stored" };
+          say(`Using the fiber tracts made when the scan was imported${stored.made ? ` (${new Date(stored.made).toLocaleDateString()})` : ""}: ${stored.sl.length.toLocaleString()} streamlines.`);
+        } else {
+          if (!c) throw new Error("the scan's maps are not made");
+          releaseHold = holdJobs();
+          if (method === "ukf") await brainFor(c);
+          const seeds = method === "ukf" ? seedsFor(c.fit, TRACKING_RULES[c.rule]) : wholeBrainSeeds(c.fit);
+          times.seeds = performance.now() - t0;
+          say(`Following tracts through the whole brain from ${seeds.length.toLocaleString()} starting points…`);
+          lastTiming = undefined;
+          const sl = method === "ptt" ? await trackPtt(c, seeds) : await trackUkf(c, seeds);
+          const t1 = performance.now();
+          times.track = t1 - t0 - times.seeds;
+          if (lastTiming) times.trackDetail = lastTiming;
+          busy = "Naming tracts…"; render();
+          const rp = await rapidParc(), releaseN = holdDrawing("naming tracts");
+          const named = await nameTracts(device, model, sl, { rapidParc: rp }).finally(releaseN);
+          times.name = named.seconds * 1000;
+          w = { sl, named, stored: false, c, times, key: settingsKey() };
+        }
+        whole.set(scan.browserId, w);
+        return w;
+      } finally { releaseHold?.(); wholeBusy = undefined; }
+    })();
+    return await wholeBusy;
+  }
+
+  /** TRACTS NEAR A SEGMENT: its voxels as the structure (the near-the-tumor list, and any segment). */
   async function makeNamedTracts(scan: Scan, target: { seg: MrsonNode; labelValue: number; label: string }) {
-    let releaseHold: (() => void) | undefined;
-    let runStoredInputs: { partner?: string | null; t1?: string | null } | undefined;
+    const z = await fetchZarrVolumeNative(live.blobBase(), target.seg.zarr as ZarrDesc), lab = z.data;
+    await measureNear(scan, { dims: target.seg.dims as number[], ijkToRAS: target.seg.ijkToRAS as number[], inside: (v) => Number(lab[v]) === target.labelValue }, target.label);
+  }
+  /** TRACTS NEAR A TRACT (v3's "Tracts near this one…"; Ron, 2026-10-14: "could mean: near the uncinate fasciculus"): the
+   *  voxels its streamlines pass through, on the scan's maps' grid, as the structure. */
+  async function tractsNearTract(scan: Scan, strands: Float32Array[], label: string) {
+    const maps = await mapsFor(scan);
+    if (!maps) { say("The tract's place cannot be measured: the scan's maps are not ready."); return; }
+    const vox = voxelsOf(strands, maps);
+    await measureNear(scan, { dims: maps.dims, ijkToRAS: maps.ijkToRAS, inside: (v) => vox.has(v) }, label);
+  }
+
+  /**
+   * TRACTS NEAR A STRUCTURE, NAMED (Ron, 2026-09-30: whole brain first, then keep what is near the tumor, whole): each
+   * named tract that comes within `withinMm` of the structure is shown -- all of it, since planning asks what a connection
+   * would lose. Unnamed streamlines that pass that close are shown too, in gray; everything else is kept, hidden, as
+   * "Rest of the brain".
+   */
+  async function measureNear(scan: Scan, structure: Structure, label: string) {
     try {
       const t0 = performance.now();
-      const model = await tractCloud();
-      tractCount = model.json.tracts.length;
-      // THE TRACTS MADE AT IMPORT, when the database has them (UKF, the default method, is what the job runs); while the
-      // server is still preparing them, wait for it and say so (Ron's "q3: A": one run, never two).
-      let stored = usesDefaults(scan) ? await loadStored(scan, model).catch(() => null) : null;
-      if (!usesDefaults(scan)) say("Your settings under Advanced differ from the ones the tracts made at import used: making them here, as set.");
-      if (!stored && usesDefaults(scan) && await jobRunning()) {
-        const tw = performance.now();
-        while (await jobRunning() && performance.now() - tw < 15 * 60_000) {
-          busy = `Waiting for the fiber tracts being prepared… ${Math.round((performance.now() - tw) / 1000)} s`; render();
-          await new Promise((r) => setTimeout(r, 3000));
-        }
-        stored = await loadStored(scan, model).catch(() => null);
-        busy = "Making tracts…"; render();
-      }
-      // THE SCAN'S OWN FIT only when the tracts are made here: stored tracts were corrected and aligned by the job, and
-      // measuring them against the structure needs neither (on PAT16 the press took 48 s, 45 of them the fit; Ron's
-      // budget is 33 s). A fit made already (the maps on load) is used; one still running is not waited for.
-      const c = stored ? computed.get(scan.browserId) : await ensureFit(scan);
-      const times: StageTimes = stored ? {} : takeFitTimes(), before = times.total ?? 0;
-      let sl: Float32Array[], named: Named;
-      if (stored) {
-        sl = stored.sl; named = stored.named;
-        times.track = 0; times.name = 0;
-        runStoredInputs = storedState.get(scan.browserId)?.inputs;
-        say(`Using the fiber tracts made when the scan was imported${stored.made ? ` (${stored.made.slice(0, 10)})` : ""}: ${sl.length.toLocaleString()} streamlines.`);
-      } else {
-        if (!c) throw new Error("the scan's maps are not made");
-        releaseHold = holdJobs();
-        if (method === "ukf") await brainFor(c);
-        const seeds = method === "ukf" ? seedsFor(c.fit, TRACKING_RULES[c.rule]) : wholeBrainSeeds(c.fit);
-        times.seeds = performance.now() - t0;
-        say(`Following tracts through the whole brain from ${seeds.length.toLocaleString()} starting points…`);
-        lastTiming = undefined;
-        sl = method === "ptt" ? await trackPtt(c, seeds) : await trackUkf(c, seeds);
-        const t1 = performance.now();
-        times.track = t1 - t0 - times.seeds;
-        if (lastTiming) times.trackDetail = lastTiming;
-        busy = "Naming tracts…"; render();
-        const rp = await rapidParc(), releaseN = holdDrawing("naming tracts");
-        named = await nameTracts(device, model, sl, { rapidParc: rp }).finally(releaseN);
-        times.name = named.seconds * 1000;
-      }
+      busy = busy || "Making tracts…"; render();
+      const w = await ensureWholeBrain(scan), model = await tractCloud();
+      const { sl, named, c } = w, times: StageTimes = { ...w.times }, before = 0;
       const tDist = performance.now();
       busy = "Measuring distances…"; render();
-      const z = await fetchZarrVolumeNative(live.blobBase(), target.seg.zarr as ZarrDesc), lab = z.data;
-      const structure: Structure = { dims: target.seg.dims as number[], ijkToRAS: target.seg.ijkToRAS as number[], inside: (v) => Number(lab[v]) === target.labelValue };
       const grayMm = withinMm + GRAY_BAND_MM;
       const dist = await streamlineDistances(structure, sl, grayMm + 2);
       // Streamlines that cross the fluid at the brain's edge would keep no tract's name (outside-brain.ts; Ron, 2026-10-04:
@@ -874,14 +961,15 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       // A NEW RUN REPLACES THE LAST ONE for this scan (critic, finding 5: a second press doubled every tract).
       groups.splice(0, groups.length, ...withoutLastRun(groups, scan.browserId));   // face.ts
       const pick = (idx: number[]) => idx.map((i) => sl[i]);
-      runs.set(scan.browserId, { sl, named, sorted, structure, label: target.label, withinMm, method, added: new Set(), dist, stored: !!stored, storedInputs: runStoredInputs, maxB: c?.maxB ?? 0, partnerId: c?.partnerId ?? "", anatomyId: c?.anatomyId ?? "", rule: method === "ukf" && c ? c.rule : undefined, brain: method === "ukf" && c ? c.brain.note : "", ...(c?.directions ? { directions: c.directions } : {}) });
+      runs.set(scan.browserId, { sl, named, sorted, structure, label, withinMm, method, added: new Set(), dist, stored: w.stored, storedInputs: w.storedInputs, maxB: c?.maxB ?? 0, partnerId: c?.partnerId ?? "", anatomyId: c?.anatomyId ?? "", rule: method === "ukf" && c ? c.rule : undefined, brain: method === "ukf" && c ? c.brain.note : "", ...(c?.directions ? { directions: c.directions } : {}) });
       // The anatomy behind the slices, where the tracts' crossings are drawn (Yogesh Rathi via Ron, 2026-10-01), and over
       // it this scan's own map -- never another patient's left from before (critic, 2026-10-01, finding 3).
       const anat = anatomyFor(scan);
       if (anat) {
         const fg = ((([...live.nodes.values()].find((n) => n.type === "sliceComposite")?.refs as Record<string, string[]> | undefined)?.foreground) ?? [])[0];
-        const mine = fg !== undefined && !!c && (fg === c.colorFaId || fg === c.faId);
-        putBackground(anat.id, mine ? undefined : (c?.colorFaId && live.nodes.get(c.colorFaId) ? c.colorFaId : null));
+        const mapId = storedMaps.get(scan.browserId)?.colorfa ?? c?.colorFaId;
+        const mine = fg !== undefined && (fg === mapId || fg === c?.faId || fg === storedMaps.get(scan.browserId)?.fa);
+        putBackground(anat.id, mine ? undefined : (mapId && live.nodes.get(mapId) ? mapId : null));
       }
       // The near tracts shown; the faint ones (within reach, fewer than the minimum) listed after them, hidden.
       for (const [e, faint] of [...nearTracts.map((e) => [e, false] as const), ...sorted.faint.map((e) => [e, true] as const)]) {
@@ -891,17 +979,17 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       }
       // The rest: the unnamed far ones and the far tracts not listed as faint (a faint tract is its own row).
       const unnamedNear = sorted.unnamedNear, faintSet = new Set(sorted.faint), rest = [...sorted.unnamedFar, ...sorted.outsideFar, ...sorted.far.filter((e) => !faintSet.has(e)).flatMap((e) => e.idx)];
-      if (sorted.outsideNear.length) groups.push({ id: ++groupSeq, name: `Outside the brain, possibly a cranial nerve, within ${withinMm} mm of ${target.label}`, scan: scan.browserId, strands: pick(sorted.outsideNear), visible: true, method, unnamed: true, run: true, outside: true });
-      if (unnamedNear.length) groups.push({ id: ++groupSeq, name: `Not named, within ${withinMm} mm of ${target.label}`, scan: scan.browserId, strands: pick(unnamedNear), visible: true, method, unnamed: true, run: true });
+      if (sorted.outsideNear.length) groups.push({ id: ++groupSeq, name: `Outside the brain, possibly a cranial nerve, within ${withinMm} mm of ${label}`, scan: scan.browserId, strands: pick(sorted.outsideNear), visible: true, method, unnamed: true, run: true, outside: true });
+      if (unnamedNear.length) groups.push({ id: ++groupSeq, name: `Not named, within ${withinMm} mm of ${label}`, scan: scan.browserId, strands: pick(unnamedNear), visible: true, method, unnamed: true, run: true });
       if (rest.length) groups.push({ id: ++groupSeq, name: "Rest of the brain", scan: scan.browserId, strands: pick(rest), visible: false, method, unnamed: true, run: true });
       redraw3d();
       const t2 = performance.now();
       times.draw = t2 - tDraw;
       times.total = before + (t2 - t0);
-      say(`${nearTracts.length} named tracts come within ${withinMm} mm of ${target.label} (at least ${MIN_NEAR_STREAMLINES} streamlines each)${sorted.faint.length ? `; ${sorted.faint.length} more come that close with fewer, or within ${grayMm} mm (listed in gray, hidden)` : ""}${unnamedNear.length ? `, and ${unnamedNear.length.toLocaleString()} streamlines no name fits` : ""}${sorted.outsideNear.length ? `; ${sorted.outsideNear.length.toLocaleString()} streamlines that close run outside the brain (possibly a cranial nerve) and keep no tract's name` : ""}. ` +
+      say(`${nearTracts.length} named tracts come within ${withinMm} mm of ${label} (at least ${MIN_NEAR_STREAMLINES} streamlines each)${sorted.faint.length ? `; ${sorted.faint.length} more come that close with fewer, or within ${grayMm} mm (listed in gray, hidden)` : ""}. ` +
         `${sl.length.toLocaleString()} streamlines through the whole brain. Step by step: ${stageText(times)}.`);
     } catch (e) { say(`Tracts could not be made: ${(e as Error).message}`); }
-    finally { releaseHold?.(); busy = ""; render(); }
+    finally { busy = ""; render(); }
   }
 
   /**
@@ -1278,12 +1366,12 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       st.onclick = () => { void runAction(st, async () => { const r = await startSegmentationServer((l) => say(l)); say(r.ok ? `${r.message[0].toUpperCase()}${r.message.slice(1)}. Press the button above again.` : `The segmentation server did not start: ${r.message}.`); if (r.ok) cNow.brain.reason = undefined; render(); }, { busyLabel: "Starting…", doneLabel: "Started", failedLabel: "Did not start" }).catch(() => {}); };
       face.append(st);
     }
-    // A STUCK SERVER (Ron's demo, 2026-10-06: idle, it never started the job): the wait ends after three minutes
-    // (brain-mask.ts) and this restarts it -- one button, then the main button again.
+    // A STUCK SERVER (Ron's demo, 2026-10-06: idle, it never started the job; or a job that stopped moving): the wait ends
+    // after two or three minutes (brain-mask.ts) and this restarts it -- one button, then the main button again.
     if (cNow?.brain.reason === "stuck") {
       const rs = document.createElement("button");
       rs.textContent = "Restart the segmentation server";
-      rs.title = "The program that finds the brain on the MRI of the anatomy has taken no work for three minutes although it runs nothing else. This stops it and starts it again (a minute or two); anything else waiting for it starts again from the beginning. Then press the button above again.";
+      rs.title = "The program that finds the brain on the MRI of the anatomy has stopped making progress. This stops it and starts it again (a minute or two); anything else waiting for it starts again from the beginning. Then press the button above again.";
       rs.style.cssText = "width:100%;margin:0 0 4px";
       rs.disabled = !!busy;
       rs.onclick = () => { void runAction(rs, async () => { const r = await restartSegmentationServer((l) => say(l)); say(r.ok ? `${r.message[0].toUpperCase()}${r.message.slice(1)}. Press the button above again.` : `The segmentation server could not be restarted: ${r.message}.`); if (r.ok) cNow.brain.reason = undefined; render(); }, { busyLabel: "Restarting…", doneLabel: "Restarted", failedLabel: "Did not restart" }).catch(() => {}); };
@@ -1612,6 +1700,29 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     onShow() { render(); },
   });
 
+  // THE MAP STAYS OVER THE ANATOMY WHILE THE CASE LOADS (Ron, 2026-10-15: "the two D viewers show the T1 which i like
+  // but they don't show the color by orientation overlay"): every new volume takes the slice views' background
+  // (logic/ingest.ts), so a scan of the same case that finishes after the diffusion MRI -- the reversed scan, the T1 --
+  // took the T1 or the map away. When another volume of the case arrives, the map this module put is put back over the
+  // anatomy; a volume of another patient, or the person's own choice in the slice gear, is left alone.
+  const knownImages = new Set<string>();
+  function mapsBack() {
+    const fresh = [...live.nodes.values()].filter((n) => n.type === "image" && !knownImages.has(n.id));
+    for (const n of fresh) knownImages.add(n.id);
+    if (!fresh.length) return;
+    for (const s of scans()) {
+      const mapId = mapOn.get(s.browserId);
+      if (!mapId || !live.nodes.get(mapId) || busy) continue;
+      const ours = new Set([mapId, ...s.frameIds, ...[...storedMaps.values()].flatMap((m) => [m.fa, m.colorfa]), computed.get(s.browserId)?.faId, computed.get(s.browserId)?.colorFaId]);
+      const ofCase = fresh.some((n) => {
+        if (ours.has(n.id)) return false;
+        const o = (n.origin as Record<string, unknown> | undefined) ?? {};
+        return (!!s.study && o.studyInstanceUID === s.study) || (!!s.patient && o.patientID === s.patient);
+      });
+      if (ofCase && s.browserId === chosen) putMap(s, mapId);
+    }
+  }
+
   // REDRAW ONLY WHEN WHAT THE PANEL SHOWS CHANGED (critic, finding 14: every sequence step closed Advanced and dropped a
   // value being typed). And COLOR FA WHEN A DIFFUSION SCAN LOADS (Ron's yes on the mockup).
   let lastSig = "";
@@ -1633,9 +1744,11 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       dropMaps(c); computed.delete(s.browserId);
       if (was === "fa" || was === "colorfa") void showMap(s, was);
     }
+    mapsBack();
     for (const s of scans()) {
       if (seenScans.has(s.browserId)) continue;
       seenScans.add(s.browserId);
+      arrivedAt.set(s.browserId, performance.now());
       chosen = s.browserId;
       void showMap(s, "colorfa");
       void findStored(s).then(() => render()).catch(() => {});
