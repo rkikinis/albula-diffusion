@@ -40,6 +40,9 @@ export const colorFaPath = (tractsSeriesUID: string) => `SlicerAlbula-Cache/colo
 export const colorFaTalairachPath = (tractsSeriesUID: string) => `SlicerAlbula-Cache/colorfa-talairach-${tractsSeriesUID}.nrrd`;
 /** The same map colored in the head's brainstem frame (the crus is judged in it). */
 export const colorFaBrainstemPath = (tractsSeriesUID: string) => `SlicerAlbula-Cache/colorfa-brainstem-${tractsSeriesUID}.nrrd`;
+/** FA beside them (Ron, 2026-10-14: "Why not do all proper registrations as part of the import?"), on the same grid, after
+ *  every correction: the Diffusion module shows the stored maps instead of fitting the scan again when a case opens. */
+export const faPath = (tractsSeriesUID: string) => `SlicerAlbula-Cache/fa-${tractsSeriesUID}.nrrd`;
 /** The b = 0 image beside them (Ron, 2026-10-06: "substantia nigra should be visible on the B0 images, which are heavily
  *  T2 weighted"), on the same grid -- the fit's S0, after every correction. */
 export const b0Path = (tractsSeriesUID: string) => `SlicerAlbula-Cache/b0-${tractsSeriesUID}.nrrd`;

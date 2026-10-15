@@ -23,7 +23,7 @@ import { parseNiftiVolumes } from "albula";
 import "./hooks.ts";
 import { loadModel, type ModelJson } from "./tractcloud/tractcloud.ts";
 import { loadRapidParc } from "./rapidparc/rapidparc.ts";
-import { importGraph, makeTracts, planStudy, storedTracts, studiesOf, synthstripVersion } from "./import-job.ts";
+import { b0Path, colorFaPath, faPath, importGraph, makeTracts, planStudy, storedTracts, studiesOf, synthstripVersion } from "./import-job.ts";
 
 const args = parseArgs(Deno.args, { string: ["server", "db", "series", "assets"], boolean: ["dry-run", "force", "counts-only", "only-missing"] });
 const quiet = args["counts-only"];
@@ -98,7 +98,11 @@ try {
       if (args.series && plan.dwi.facts.uid !== args.series) continue;
       k++;
       const t0 = performance.now();
-      if (args["only-missing"] && (await storedTracts(db.path, plan.dwi.facts.uid).catch(() => [])).length) {
+      // KEPT = tracts there AND the maps the module shows beside the newest (FA, Color FA, b = 0): a case whose maps were
+      // never written (a stopped job, an older version without FA) is made again: a new set beside the old, which stays.
+      const there = await storedTracts(db.path, plan.dwi.facts.uid).catch(() => []);
+      const mapsThere = there.length > 0 && (await Promise.all([colorFaPath, faPath, b0Path].map((p) => Deno.stat(`${db.path}/${p(there[0].seriesUID)}`).then(() => true, () => false)))).every(Boolean);
+      if (args["only-missing"] && mapsThere) {
         n.kept++;
         say({ event: "case", case: k, series: plan.dwi.facts.uid, state: "kept", said: "fiber tracts are there already (made by an earlier or the same version); kept" });
         continue;

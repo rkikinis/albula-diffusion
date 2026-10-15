@@ -50,7 +50,8 @@ import { MOTION_RULE, type MotionRuleId } from "./motion.ts";
 const ADV_MIN_FA = 0.15;
 import { DCM2NIIX_VERSION, secondOpinion, type SecondOpinion } from "./second-opinion.ts";
 import { databaseSeries } from "albula";
-import { dicomToTracts, UNNAMED as UNNAMED_SET } from "./tracts-dicom.ts";
+import { colorFaPath, dicomToTracts, faPath, UNNAMED as UNNAMED_SET } from "./tracts-dicom.ts";
+import { databaseFileUrl, nrrdDecode, nrrdGeometry, nrrdSplitHeader } from "albula";
 import { assetUrl, holdDrawing, seriesDicomFiles, startPlacing, restartSegmentationServer, startSegmentationServer, synthstripBrainMask, type BrainMaskResult } from "albula";
 import { createSegmentation, growIntoSegmentation, openDicomDatabase, openLoadFromDisk, paintInto, registerProbeRows, registerRayHits, runAction, saveSegmentationToDicom, showHideAllState } from "albula";
 import { buildTractIndex, tractsNear, type TractIndex } from "./tract-index.ts";
@@ -391,7 +392,9 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     if (!scan) return "";
     const refs = ([...live.nodes.values()].find((n) => n.type === "sliceComposite")?.refs as Record<string, string[]> | undefined) ?? {};
     const bg = (refs.background ?? [])[0], fg = (refs.foreground ?? [])[0];
-    const c = computed.get(scan.browserId);
+    const c = computed.get(scan.browserId), m = storedMaps.get(scan.browserId);
+    if (m?.colorfa && (bg === m.colorfa || fg === m.colorfa)) return "colorfa";
+    if (m?.fa && (bg === m.fa || fg === m.fa)) return "fa";
     if (c?.colorFaId && (bg === c.colorFaId || fg === c.colorFaId)) return "colorfa";
     if (c?.faId && (bg === c.faId || fg === c.faId)) return "fa";
     if (bg && scan.frameIds.includes(bg)) return "signal";
@@ -514,6 +517,9 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
         putBackground(frames[selected]?.node ?? scan.frameIds[0], null);
         return;
       }
+      // The stored map when the import made one (no fit); else the module's own.
+      const kept = await storedMap(scan, what).catch(() => undefined);
+      if (kept) { putMap(scan, kept); return; }
       const c = await ensureFit(scan);
       if (what === "fa") {
         if (!c.faId || !live.nodes.get(c.faId)) {
@@ -745,6 +751,29 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     const made = typeof t.provenance?.made === "string" ? t.provenance.made : undefined;
     storedState.set(scan.browserId, { state: "stored", seriesUID: at.seriesUID, made });
     return { sl, named: { tract: Int32Array.from(tract), side: Int8Array.from(side), draws: 0, seconds: 0 }, made };
+  }
+  // THE MAPS MADE AT IMPORT (Ron, 2026-10-14: "Why not do all proper registrations as part of the import? That would allow
+  // to ignore how much time they need"): FA and Color FA, stored by the job beside its tracts, after every correction and
+  // on the T1's grid -- shown as they are, so a case opens without fitting the scan (PAT16: 45 s of fit).
+  const storedMaps = new Map<string, { fa?: string; colorfa?: string }>();   // scan -> image node ids
+  async function storedMap(scan: Scan, what: "fa" | "colorfa"): Promise<string | undefined> {
+    const have = storedMaps.get(scan.browserId)?.[what];
+    if (have && live.nodes.get(have)) return have;
+    const st = storedState.get(scan.browserId)?.state === "stored" ? storedState.get(scan.browserId) : await findStored(scan).then(() => storedState.get(scan.browserId)).catch(() => undefined);
+    if (st?.state !== "stored" || !st.seriesUID) return undefined;
+    const url = await databaseFileUrl(what === "fa" ? faPath(st.seriesUID) : colorFaPath(st.seriesUID));
+    const r = url ? await fetch(url).catch(() => null) : null;
+    if (!r?.ok) return undefined;
+    const { f, body } = nrrdSplitHeader(new Uint8Array(await r.arrayBuffer()));
+    const sizes = (f["sizes"] ?? "").split(/\s+/).filter(Boolean).map(Number) as [number, number, number];
+    const raw = await nrrdDecode(f, body, sizes[0] * sizes[1] * sizes[2] * 4);
+    const data = new Float32Array(raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength));
+    const name = `${scan.name} ${what === "fa" ? "FA" : "Color FA"}`;
+    const res = await loadVolumeIntoScene(live, store, { dims: sizes, ijkToRAS: nrrdGeometry(f).ijkToRAS, data, dtype: "<f4", name },
+      { name, extra: { ...(what === "colorfa" ? { rgb24: true } : {}), autoVolumeRendering: false, recomputable: true } });
+    if (what === "fa") { live.write({ op: "patch", id: res.displayId, path: "#/window", value: 1 }); live.write({ op: "patch", id: res.displayId, path: "#/level", value: 0.5 }); }
+    storedMaps.set(scan.browserId, { ...storedMaps.get(scan.browserId), [what]: res.imageId });
+    return res.imageId;
   }
   /** Is the server preparing this extension's work right now? (GET /_jobs, desktop/extension-jobs.ts) */
   const jobRunning = async (): Promise<boolean> => {
@@ -1082,6 +1111,8 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     const ids = new Set(scans().map((s) => s.browserId));
     let changed = false;
     for (const [id, c] of computed) if (!ids.has(id)) { computed.delete(id); dropMaps(c); changed = true; }
+    // The stored maps of a scan that left go with it, as the computed ones do.
+    for (const [id, m] of storedMaps) if (!ids.has(id)) { for (const n of [m.fa, m.colorfa]) if (n && live.nodes.get(n)) removeVolumeFromScene(live, n); storedMaps.delete(id); storedState.delete(id); changed = true; }
     for (const id of [...runs.keys()]) if (!ids.has(id)) runs.delete(id);
     for (let i = groups.length - 1; i >= 0; i--) if (!ids.has(groups[i].scan)) { groups.splice(i, 1); changed = true; }
     for (const id of [...seenScans]) if (!ids.has(id)) seenScans.delete(id);
