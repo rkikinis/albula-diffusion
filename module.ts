@@ -49,7 +49,7 @@ import { MOTION_RULE, type MotionRuleId } from "./motion.ts";
 /** "Stop below FA"'s default under Advanced (the single-tensor tracker's; the UKF's comes from the tracking rule). */
 const ADV_MIN_FA = 0.15;
 import { DCM2NIIX_VERSION, secondOpinion, type SecondOpinion } from "./second-opinion.ts";
-import { databaseSeries } from "albula";
+import { databaseSeries, openDatabaseId } from "albula";
 import { colorFaPath, dicomToTracts, faPath, UNNAMED as UNNAMED_SET } from "./tracts-dicom.ts";
 import { databaseFileUrl, nrrdDecode, nrrdGeometry, nrrdSplitHeader } from "albula";
 import { assetUrl, holdDrawing, seriesDicomFiles, startPlacing, restartSegmentationServer, startSegmentationServer, synthstripBrainMask, type BrainMaskResult } from "albula";
@@ -117,7 +117,9 @@ interface Run { sl: Float32Array[]; named: Named; sorted: Sorted; structure: Str
   anatomyId: string;
   /** The run's streamlines are the ones made at import (DMRI-AT-IMPORT.md): corrected and aligned to the T1 by the job,
    *  so Add lines checks only that this scan is aligned to an anatomy MRI as well, not that its fit is the one recorded. */
-  stored?: boolean }
+  stored?: boolean;
+  /** The stored set's inputs (its reversed scan, its T1), for Add lines to track the way it was made. */
+  storedInputs?: { partner?: string | null; t1?: string | null } }
 /** How tracts are followed: one tensor per voxel (fast, the classic), or the two-tensor UKF (ukf.ts; crossing fibers;
  *  the method SlicerDMRI uses for tumor planning), with the settings of the current tracking rule (tracking-rules.ts). */
 /** "ptt": fiber distributions from multi-shell CSD (csd.ts, responses from the scan) and parallel transport tracking
@@ -710,7 +712,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
   // WHICH ONE: the newest the database holds for the scan. Every object records the version that made it; none is
   // "stale" (Ron, 2026-10-14: "for reproducibility scientists would like to run a specific version of a pipeline on
   // data"): choosing among versions is the versioning design still to come.
-  const storedState = new Map<string, { state: "stored" | "none" | "unknown"; made?: string; seriesUID?: string }>();
+  const storedState = new Map<string, { state: "stored" | "none" | "unknown"; made?: string; seriesUID?: string; tracking?: number; inputs?: { partner?: string | null; t1?: string | null } }>();
   let jobBusyNow = false;
   // While a loaded scan has no stored tracts: look again every 10 s (the server may be making them right now).
   setInterval(() => {
@@ -719,7 +721,9 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     void (async () => {
       const was = jobBusyNow, before = waiting.map((x) => storedState.get(x.browserId)?.state).join();
       jobBusyNow = await jobRunning();
-      for (const x of waiting) await findStored(x).catch(() => {});
+      // Asked of the database only while the server works on it, or once when it just finished (finding 19: every 10 s,
+      // forever, on a Mac without jobs).
+      if (jobBusyNow || was) for (const x of waiting) await findStored(x).catch(() => {});
       if (was !== jobBusyNow || before !== waiting.map((x) => storedState.get(x.browserId)?.state).join()) render();
     })();
   }, 10_000);
@@ -749,7 +753,8 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       for (const p of set.streamlines) { sl.push(p); tract.push(ti); side.push(ti === OTHER ? 0 : set.side); }
     }
     const made = typeof t.provenance?.made === "string" ? t.provenance.made : undefined;
-    storedState.set(scan.browserId, { state: "stored", seriesUID: at.seriesUID, made });
+    const rules = t.provenance?.rules as { tracking?: number } | undefined;
+    storedState.set(scan.browserId, { state: "stored", seriesUID: at.seriesUID, made, tracking: rules?.tracking, inputs: t.provenance?.inputs as { partner?: string | null; t1?: string | null } | undefined });
     return { sl, named: { tract: Int32Array.from(tract), side: Int8Array.from(side), draws: 0, seconds: 0 }, made };
   }
   // THE MAPS MADE AT IMPORT (Ron, 2026-10-14: "Why not do all proper registrations as part of the import? That would allow
@@ -776,10 +781,26 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     return res.imageId;
   }
   /** Is the server preparing this extension's work right now? (GET /_jobs, desktop/extension-jobs.ts) */
+  // ONLY FOR THE DATABASE THIS WINDOW HAS OPEN (critic 2026-10-14, import-time jobs, finding 4: the button waited for work
+  // on any database). It cannot say which scan the run is on (counts only), so it waits for the run on this database.
   const jobRunning = async (): Promise<boolean> => {
-    const s = await fetch("/_jobs", { cache: "no-store" }).then((r) => r.ok ? r.json() : null).catch(() => null) as { running?: { extension?: string }; queued?: string[] } | null;
-    return !!s && (s.running?.extension === "diffusion" || !!s.queued?.length);
+    const s = await fetch("/_jobs", { cache: "no-store" }).then((r) => r.ok ? r.json() : null).catch(() => null) as { running?: { extension?: string; db?: string }; queued?: string[] } | null;
+    if (!s) return false;
+    const open = await openDatabaseId().catch(() => null);
+    if (!open) return false;
+    return (s.running?.extension === "diffusion" && s.running.db === open) || !!s.queued?.includes(open);
   };
+  /** The server starts no job while this window tracks on the graphics card (finding 3); renewed while the run lasts. */
+  const holdJobs = (): (() => void) => {
+    const ask = () => { void fetch("/_jobs/hold", { method: "POST" }).catch(() => {}); };
+    ask();
+    const t = setInterval(ask, 60_000);
+    return () => clearInterval(t);
+  };
+  // THE STORED SET ONLY WHEN IT IS WHAT THIS MODULE WOULD MAKE (finding 7): the default method and settings under
+  // Advanced. Anything else the person chose is made here, as chosen.
+  const ADV_DEFAULT = JSON.stringify(adv);
+  const usesDefaults = (scan: Scan) => method === "ukf" && correct && JSON.stringify(adv) === ADV_DEFAULT && !preCorrected.has(scan.browserId);
 
   /**
    * TRACTS NEAR A STRUCTURE, NAMED (Ron, 2026-09-30: whole brain first, then keep what is near the tumor, whole): UKF
@@ -789,14 +810,17 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
    * everything else is kept, hidden, as "Rest of the brain".
    */
   async function makeNamedTracts(scan: Scan, target: { seg: MrsonNode; labelValue: number; label: string }) {
+    let releaseHold: (() => void) | undefined;
+    let runStoredInputs: { partner?: string | null; t1?: string | null } | undefined;
     try {
       const t0 = performance.now();
       const model = await tractCloud();
       tractCount = model.json.tracts.length;
       // THE TRACTS MADE AT IMPORT, when the database has them (UKF, the default method, is what the job runs); while the
       // server is still preparing them, wait for it and say so (Ron's "q3: A": one run, never two).
-      let stored = method === "ukf" ? await loadStored(scan, model).catch(() => null) : null;
-      if (!stored && method === "ukf" && await jobRunning()) {
+      let stored = usesDefaults(scan) ? await loadStored(scan, model).catch(() => null) : null;
+      if (!usesDefaults(scan)) say("Your settings under Advanced differ from the ones the tracts made at import used: making them here, as set.");
+      if (!stored && usesDefaults(scan) && await jobRunning()) {
         const tw = performance.now();
         while (await jobRunning() && performance.now() - tw < 15 * 60_000) {
           busy = `Waiting for the fiber tracts being prepared… ${Math.round((performance.now() - tw) / 1000)} s`; render();
@@ -814,9 +838,11 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       if (stored) {
         sl = stored.sl; named = stored.named;
         times.track = 0; times.name = 0;
+        runStoredInputs = storedState.get(scan.browserId)?.inputs;
         say(`Using the fiber tracts made when the scan was imported${stored.made ? ` (${stored.made.slice(0, 10)})` : ""}: ${sl.length.toLocaleString()} streamlines.`);
       } else {
         if (!c) throw new Error("the scan's maps are not made");
+        releaseHold = holdJobs();
         if (method === "ukf") await brainFor(c);
         const seeds = method === "ukf" ? seedsFor(c.fit, TRACKING_RULES[c.rule]) : wholeBrainSeeds(c.fit);
         times.seeds = performance.now() - t0;
@@ -848,7 +874,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       // A NEW RUN REPLACES THE LAST ONE for this scan (critic, finding 5: a second press doubled every tract).
       groups.splice(0, groups.length, ...withoutLastRun(groups, scan.browserId));   // face.ts
       const pick = (idx: number[]) => idx.map((i) => sl[i]);
-      runs.set(scan.browserId, { sl, named, sorted, structure, label: target.label, withinMm, method, added: new Set(), dist, stored: !!stored, maxB: c?.maxB ?? 0, partnerId: c?.partnerId ?? "", anatomyId: c?.anatomyId ?? "", rule: method === "ukf" && c ? c.rule : undefined, brain: method === "ukf" && c ? c.brain.note : "", ...(c?.directions ? { directions: c.directions } : {}) });
+      runs.set(scan.browserId, { sl, named, sorted, structure, label: target.label, withinMm, method, added: new Set(), dist, stored: !!stored, storedInputs: runStoredInputs, maxB: c?.maxB ?? 0, partnerId: c?.partnerId ?? "", anatomyId: c?.anatomyId ?? "", rule: method === "ukf" && c ? c.rule : undefined, brain: method === "ukf" && c ? c.brain.note : "", ...(c?.directions ? { directions: c.directions } : {}) });
       // The anatomy behind the slices, where the tracts' crossings are drawn (Yogesh Rathi via Ron, 2026-10-01), and over
       // it this scan's own map -- never another patient's left from before (critic, 2026-10-01, finding 3).
       const anat = anatomyFor(scan);
@@ -875,7 +901,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       say(`${nearTracts.length} named tracts come within ${withinMm} mm of ${target.label} (at least ${MIN_NEAR_STREAMLINES} streamlines each)${sorted.faint.length ? `; ${sorted.faint.length} more come that close with fewer, or within ${grayMm} mm (listed in gray, hidden)` : ""}${unnamedNear.length ? `, and ${unnamedNear.length.toLocaleString()} streamlines no name fits` : ""}${sorted.outsideNear.length ? `; ${sorted.outsideNear.length.toLocaleString()} streamlines that close run outside the brain (possibly a cranial nerve) and keep no tract's name` : ""}. ` +
         `${sl.length.toLocaleString()} streamlines through the whole brain. Step by step: ${stageText(times)}.`);
     } catch (e) { say(`Tracts could not be made: ${(e as Error).message}`); }
-    finally { busy = ""; render(); }
+    finally { releaseHold?.(); busy = ""; render(); }
   }
 
   /**
@@ -897,10 +923,20 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     const want = new Map<string, { tract: number; side: number }>();
     for (const g of picked) for (const sd of g.side ? [g.side, otherSide(g.side)] : [0]) if (!run.added.has(`${g.tract}:${sd}`)) want.set(`${g.tract}:${sd}`, { tract: g.tract!, side: sd });
     busy = "Making tracts…"; adding = true; render();
+    const releaseHold = holdJobs();   // the server starts no job while these lines are followed (finding 3)
     try {
       const c = await ensureFit(scan), t0 = performance.now();
       // THE SAME SPACE (critic, 2026-10-03, finding 1): the scan aligned to the same anatomy MRI, or to none, as the run.
-      if (run.stored ? !c.anatomyId : (c.maxB !== run.maxB || c.partnerId !== run.partnerId || (c.anatomyId ?? "") !== run.anatomyId)) {
+      // ON STORED TRACTS (critic 2026-10-14, import-time jobs, finding 7): new lines are followed the way the stored set was
+      // made -- aligned to the T1, corrected with the reversed scan the set used, inside SynthStrip's brain (rule 3) -- or
+      // not at all, said in plain words.
+      if (run.stored) {
+        const why = !c.anatomyId ? "the MRI of the anatomy (T1) is not loaded with the scan"
+          : run.storedInputs?.partner && !c.partnerId ? "the scan taken with the reversed direction is not loaded (the stored tracts were corrected with it)"
+          : !usesDefaults(scan) ? "the settings under Advanced differ from the ones the stored tracts were made with" : "";
+        if (why) { say(`Lines cannot be added to the tracts made at import here: ${why}.`); return; }
+        await brainFor(c);
+      } else if (c.maxB !== run.maxB || c.partnerId !== run.partnerId || (c.anatomyId ?? "") !== run.anatomyId) {
         say("The maps were made again since these tracts were found (Highest b, the distortion correction, or the MRI of the anatomy changed): press “Show the fiber tracts near the tumor” again first.");
         return;
       }
@@ -969,7 +1005,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       times.total = before + (performance.now() - t0);
       say(`${total.toLocaleString()} lines added to ${what}, both sides, from ${seeds.length.toLocaleString()} starting points. Step by step: ${stageText(times)}.`);
     } catch (e) { say(`Lines could not be added: ${(e as Error).message}`); }
-    finally { busy = ""; adding = false; render(); }
+    finally { releaseHold(); busy = ""; adding = false; render(); }
   }
 
   /**
@@ -1164,9 +1200,9 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     if (scan) {
       const st = storedState.get(scan.browserId);
       const tl = document.createElement("div"); tl.className = "sl-hint"; tl.style.margin = "2px 0 0 22px";
-      tl.textContent = st?.state === "stored" ? `Fiber tracts: made when the scan was imported${st.made ? ` (${st.made.slice(0, 10)})` : ""}`
+      tl.textContent = st?.state === "stored" ? `Fiber tracts: made when the scan was imported${st.made ? ` (${new Date(st.made).toLocaleDateString()})` : ""}${st.tracking ? ` · tracking rule ${st.tracking}` : ""}`
         : jobBusyNow ? "Fiber tracts: being prepared in the background now"
-        : st?.state === "none" ? "Fiber tracts: not made yet; the button below makes them (about a minute)" : "";
+        : st?.state === "none" ? "Fiber tracts: not made yet; the button below makes them (a minute or more)" : "";
       tl.title = "The whole brain's fiber tracts are found and named once, when the diffusion MRI comes into the database, so the button only has to measure them. Each set records the version of the method that made it.";
       if (tl.textContent) caseSec.append(tl);
     }
