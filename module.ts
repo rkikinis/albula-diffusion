@@ -9,7 +9,7 @@
 //  2 · FIBER TRACTS NEAR THE TUMOR: one button (the named tracts, below) and the tracts it made, named as
 //      tract-info.ts says ("Arcuate fasciculus, right (AF)").
 // Everything below is under ADVANCED, in the three sections this module had before:
-//  - MAPS (blue band: a display): which diffusion scan, and what the slice views show of it -- the scan's own signal,
+//  - MAPS (blue band: a display): which diffusion scan, and what the slice views show of it -- its b0, corrected and aligned (Ron, 2026-10-15),
 //    FA, or Color FA. Color FA is what a diffusion scan shows when it loads (Ron's yes on the mockup), over the MRI of the
 //    anatomy at half opacity when one is loaded (putMap; Ron, 2026-10-01). The tensor is
 //    fitted once per scan, on the processor (tensor.ts; about 1 s on PAT16, reading included).
@@ -50,7 +50,7 @@ import { MOTION_RULE, type MotionRuleId } from "./motion.ts";
 const ADV_MIN_FA = 0.15;
 import { DCM2NIIX_VERSION, secondOpinion, type SecondOpinion } from "./second-opinion.ts";
 import { databaseSeries, openDatabaseId } from "albula";
-import { adPath, colorFaPath, dicomToTracts, faPath, mdPath, rdPath, UNNAMED as UNNAMED_SET } from "./tracts-dicom.ts";
+import { adPath, b0Path, colorFaPath, dicomToTracts, faPath, mdPath, rdPath, UNNAMED as UNNAMED_SET } from "./tracts-dicom.ts";
 import { byName, laterality, measure, openingWay, throughBox, toCsv, voxelsOf, type Maps, type Measures, type Way } from "./selection.ts";
 import { databaseFileUrl, nrrdDecode, nrrdGeometry, nrrdSplitHeader } from "albula";
 import { assetUrl, holdDrawing, seriesDicomFiles, startPlacing, restartSegmentationServer, startSegmentationServer, synthstripBrainMask, type BrainMaskResult } from "albula";
@@ -75,7 +75,7 @@ interface Scan { browserId: string; name: string; frameIds: string[]; bValues: n
   /** The scanner's record of the phase-encoding direction (diffusion-vendors.ts phaseEncodingOf: "j-", or "ROW" / "COL"). */
   phaseEncoding?: string }
 /** What has been computed for a scan, kept while the scan is in the scene. */
-interface Computed { dwi: DiffusionSeries; fit: TensorFit; maxB: number; corrected: string; partnerId: string; /** motion.ts: the head-movement rule asked for (the cache's key), the rule actually applied, and what it did in words. */ motionAsked: MotionRuleId; motionRule: MotionRuleId; movement?: string; /** gradient-check.ts: the directions' check, in words, when they were not used as recorded. */ directions?: string; /** The anatomy MRI the scan was aligned to ("" none). */ anatomyId?: string; /** The tracking rule the fit's brain mask serves (tracking-rules.ts): 2 until rule 3's brain is put in (brainFor). */ rule: TrackingRuleId; /** Rule 3's brain: what was used, in words, and why not when it was not. */ brain: BrainState; faId?: string; colorFaId?: string; ukf?: UkfData; fod?: FodVolume }
+interface Computed { dwi: DiffusionSeries; fit: TensorFit; maxB: number; corrected: string; partnerId: string; /** motion.ts: the head-movement rule asked for (the cache's key), the rule actually applied, and what it did in words. */ motionAsked: MotionRuleId; motionRule: MotionRuleId; movement?: string; /** gradient-check.ts: the directions' check, in words, when they were not used as recorded. */ directions?: string; /** The anatomy MRI the scan was aligned to ("" none). */ anatomyId?: string; /** The tracking rule the fit's brain mask serves (tracking-rules.ts): 2 until rule 3's brain is put in (brainFor). */ rule: TrackingRuleId; /** Rule 3's brain: what was used, in words, and why not when it was not. */ brain: BrainState; faId?: string; colorFaId?: string; /** The corrected b0 (the fit's S0), when shown. */ b0Id?: string; ukf?: UkfData; fod?: FodVolume }
 /** RULE 3's BRAIN for a fitted scan (critic, 2026-10-04, findings 2, 4, 8, 9): asked of the segmentation server when the
  *  maps are made but not waited for -- the maps do not use it -- and waited for by the tracking (brainFor). A failure
  *  that can go away (no server, a server without SynthStrip, a failed job) is asked again at the next tracking. */
@@ -128,7 +128,9 @@ interface Run { sl: Float32Array[]; named: Named; sorted: Sorted; structure: Str
  *  as UKF and no better on the development cases' meningiomas, so an option (Ron, 2026-10-01: "if both are close to
  *  equal in quality, we go with the faster and offer the other as option"). */
 type Method = "ukf" | "single" | "ptt";
-type Show = "signal" | "fa" | "colorfa";
+/** What the slice views show of a diffusion scan (Ron, 2026-10-15: "b0 (corrected) is the right option for our use case
+ *  scenario" -- the scan as acquired, on its own grid and uncorrected, read as "the registration hasn't happened"). */
+type Show = "b0" | "fa" | "colorfa";
 
 const FIELD_KEY = "diffusion-tracts";
 const RADIUS = { tubes: 0.5, lines: 0.12 };                // mm: SlicerDMRI's tube radius is 0.5 mm; "lines" are hairlines
@@ -310,7 +312,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     const inSequences = new Set(sequenceBrowsers(live).flatMap((b) => browserFrames(live, b.id).frames.map((f) => f.node)));
     const c = computed.get(scan.browserId);
     const cands = [...live.nodes.values()].filter((n) => {
-      if (n.type !== "image" || n.labelmap || inSequences.has(n.id) || n.id === c?.faId || n.id === c?.colorFaId) return false;
+      if (n.type !== "image" || n.labelmap || inSequences.has(n.id) || n.id === c?.faId || n.id === c?.colorFaId || n.id === c?.b0Id) return false;
       const o = (n.origin as Record<string, unknown> | undefined) ?? {};
       if ((o.diffusion as unknown) !== undefined) return false;
       return (!!scan.study && o.studyInstanceUID === scan.study) || (!!scan.patient && o.patientID === scan.patient);
@@ -396,11 +398,11 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     const refs = ([...live.nodes.values()].find((n) => n.type === "sliceComposite")?.refs as Record<string, string[]> | undefined) ?? {};
     const bg = (refs.background ?? [])[0], fg = (refs.foreground ?? [])[0];
     const c = computed.get(scan.browserId), m = storedMaps.get(scan.browserId);
+    if ((m?.b0 && bg === m.b0) || (c?.b0Id && bg === c.b0Id)) return "b0";
     if (m?.colorfa && (bg === m.colorfa || fg === m.colorfa)) return "colorfa";
     if (m?.fa && (bg === m.fa || fg === m.fa)) return "fa";
     if (c?.colorFaId && (bg === c.colorFaId || fg === c.colorFaId)) return "colorfa";
     if (c?.faId && (bg === c.faId || fg === c.faId)) return "fa";
-    if (bg && scan.frameIds.includes(bg)) return "signal";
     return "";
   };
   /** A transform on the scan or a segmentation: refused in plain words, not ignored (critic, finding 5). */
@@ -506,25 +508,29 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     return c;
   }
   const dropMaps = (c: Computed) => {
-    for (const id of [c.faId, c.colorFaId]) if (id && live.nodes.get(id)) removeVolumeFromScene(live, id);
-    c.faId = c.colorFaId = undefined;
+    for (const id of [c.faId, c.colorFaId, c.b0Id]) if (id && live.nodes.get(id)) removeVolumeFromScene(live, id);
+    c.faId = c.colorFaId = c.b0Id = undefined;
   };
 
   async function showMap(scan: Scan, what: Show) {
     if (busy) return;                                         // one computation at a time (critic, finding 10)
-    busy = what === "signal" ? "" : "Computing…";
+    busy = "Computing…";
     render();
     try {
-      if (what === "signal") {
-        const { frames, selected } = browserFrames(live, scan.browserId);
-        putBackground(frames[selected]?.node ?? scan.frameIds[0], null);
-        return;
-      }
       // The stored map when the import made one (no fit); else the module's own.
       const kept = await storedMap(scan, what).catch(() => undefined);
-      if (kept) { putMap(scan, kept); return; }
+      // The corrected b0 fills the slice views alone, as the diffusion scan itself did; FA and Color FA go over the T1.
+      if (kept) { if (what === "b0") putBackground(kept, null); else putMap(scan, kept); return; }
       const c = await ensureFit(scan);
-      if (what === "fa") {
+      if (what === "b0") {
+        // This module's own fit: its S0, the b = 0 signal after the corrections, on the fit's grid.
+        if (!c.b0Id || !live.nodes.get(c.b0Id)) {
+          const name = `${scan.name} b0 (corrected)`;
+          const r = await loadVolumeIntoScene(live, store, { dims: c.fit.dims, ijkToRAS: c.fit.ijkToRAS, data: c.fit.S0, dtype: "<f4", name }, { name, extra: { autoVolumeRendering: false, recomputable: true } });
+          c.b0Id = r.imageId;
+        }
+        putBackground(c.b0Id, null);
+      } else if (what === "fa") {
         if (!c.faId || !live.nodes.get(c.faId)) {
           // A computed map: it does not take the 3D view over from the scan (autoVolumeRendering: false).
           const r = await loadVolumeIntoScene(live, store, { dims: c.fit.dims, ijkToRAS: c.fit.ijkToRAS, data: c.fit.fa, dtype: "<f4", name: `${scan.name} FA` }, { name: `${scan.name} FA`, extra: { autoVolumeRendering: false, recomputable: true } });
@@ -768,20 +774,20 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
   // THE MAPS MADE AT IMPORT (Ron, 2026-10-14: "Why not do all proper registrations as part of the import? That would allow
   // to ignore how much time they need"): FA and Color FA, stored by the job beside its tracts, after every correction and
   // on the T1's grid -- shown as they are, so a case opens without fitting the scan (PAT16: 45 s of fit).
-  const storedMaps = new Map<string, { fa?: string; colorfa?: string }>();   // scan -> image node ids
-  async function storedMap(scan: Scan, what: "fa" | "colorfa"): Promise<string | undefined> {
+  const storedMaps = new Map<string, { fa?: string; colorfa?: string; b0?: string }>();   // scan -> image node ids
+  async function storedMap(scan: Scan, what: Show): Promise<string | undefined> {
     const have = storedMaps.get(scan.browserId)?.[what];
     if (have && live.nodes.get(have)) return have;
     const st = storedState.get(scan.browserId)?.state === "stored" ? storedState.get(scan.browserId) : await findStored(scan).then(() => storedState.get(scan.browserId)).catch(() => undefined);
     if (st?.state !== "stored" || !st.seriesUID) return undefined;
-    const url = await databaseFileUrl(what === "fa" ? faPath(st.seriesUID) : colorFaPath(st.seriesUID));
+    const url = await databaseFileUrl(what === "fa" ? faPath(st.seriesUID) : what === "b0" ? b0Path(st.seriesUID) : colorFaPath(st.seriesUID));
     const r = url ? await fetch(url).catch(() => null) : null;
     if (!r?.ok) return undefined;
     const { f, body } = nrrdSplitHeader(new Uint8Array(await r.arrayBuffer()));
     const sizes = (f["sizes"] ?? "").split(/\s+/).filter(Boolean).map(Number) as [number, number, number];
     const raw = await nrrdDecode(f, body, sizes[0] * sizes[1] * sizes[2] * 4);
     const data = new Float32Array(raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength));
-    const name = `${scan.name} ${what === "fa" ? "FA" : "Color FA"}`;
+    const name = `${scan.name} ${what === "fa" ? "FA" : what === "b0" ? "b0 (corrected)" : "Color FA"}`;
     const res = await loadVolumeIntoScene(live, store, { dims: sizes, ijkToRAS: nrrdGeometry(f).ijkToRAS, data, dtype: "<f4", name },
       { name, extra: { ...(what === "colorfa" ? { rgb24: true } : {}), autoVolumeRendering: false, recomputable: true } });
     if (what === "fa") { live.write({ op: "patch", id: res.displayId, path: "#/window", value: 1 }); live.write({ op: "patch", id: res.displayId, path: "#/level", value: 0.5 }); }
@@ -1201,7 +1207,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     const withTracts = [...new Set(groups.filter((g) => g.visible && g.strands.length).map((g) => g.scan))];
     const imagesOf = (scanId: string) => {
       const sc = scans().find((x) => x.browserId === scanId), c = computed.get(scanId);
-      return new Set([anatomyFor(sc)?.id, ...(sc?.frameIds ?? []), c?.faId, c?.colorFaId].filter((x): x is string => !!x));
+      return new Set([anatomyFor(sc)?.id, ...(sc?.frameIds ?? []), c?.faId, c?.colorFaId, c?.b0Id, storedMaps.get(scanId)?.b0].filter((x): x is string => !!x));
     };
     for (const n of live.nodes.values()) {
       if (n.type !== "view" || n.kind !== "slice" || !Array.isArray(n.sliceToRAS)) continue;
@@ -1236,7 +1242,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     let changed = false;
     for (const [id, c] of computed) if (!ids.has(id)) { computed.delete(id); dropMaps(c); changed = true; }
     // The stored maps of a scan that left go with it, as the computed ones do.
-    for (const [id, m] of storedMaps) if (!ids.has(id)) { for (const n of [m.fa, m.colorfa]) if (n && live.nodes.get(n)) removeVolumeFromScene(live, n); storedMaps.delete(id); storedState.delete(id); changed = true; }
+    for (const [id, m] of storedMaps) if (!ids.has(id)) { for (const n of [m.fa, m.colorfa, m.b0]) if (n && live.nodes.get(n)) removeVolumeFromScene(live, n); storedMaps.delete(id); storedState.delete(id); changed = true; }
     for (const id of [...runs.keys()]) if (!ids.has(id)) runs.delete(id);
     for (let i = groups.length - 1; i >= 0; i--) if (!ids.has(groups[i].scan)) { groups.splice(i, 1); changed = true; }
     for (const id of [...seenScans]) if (!ids.has(id)) seenScans.delete(id);
@@ -1394,7 +1400,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     shell.row(maps, "Scan").append(pick);
     const seg = document.createElement("div");
     seg.style.cssText = "display:flex;gap:3px";
-    for (const [k, label, tip] of [["signal", "Signal", "The scan itself, one volume at a time (the transport at the top steps through them)."], ["fa", "FA", "Fractional anisotropy: bright where water moves along one direction, as in white matter tracts."], ["colorfa", "Color FA", "FA colored by direction: red left-right, green front-back, blue up-down."]] as const) {
+    for (const [k, label, tip] of [["b0", "b0 (corrected)", "The diffusion MRI's image without diffusion weighting, corrected and lined up with the MRI of the anatomy: the image the maps and the tracts are made from."], ["fa", "FA", "Fractional anisotropy: bright where water moves along one direction, as in white matter tracts."], ["colorfa", "Color FA", "FA colored by direction: red left-right, green front-back, blue up-down."]] as const) {
       const b = document.createElement("button");
       b.textContent = label; b.title = tip; b.disabled = !!busy;
       b.className = "sl-sh-look-b" + (showing === k ? " sl-on" : ""); b.setAttribute("aria-pressed", String(showing === k));
@@ -1713,7 +1719,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     for (const s of scans()) {
       const mapId = mapOn.get(s.browserId);
       if (!mapId || !live.nodes.get(mapId) || busy) continue;
-      const ours = new Set([mapId, ...s.frameIds, ...[...storedMaps.values()].flatMap((m) => [m.fa, m.colorfa]), computed.get(s.browserId)?.faId, computed.get(s.browserId)?.colorFaId]);
+      const ours = new Set([mapId, ...s.frameIds, ...[...storedMaps.values()].flatMap((m) => [m.fa, m.colorfa, m.b0]), computed.get(s.browserId)?.faId, computed.get(s.browserId)?.colorFaId, computed.get(s.browserId)?.b0Id]);
       const ofCase = fresh.some((n) => {
         if (ours.has(n.id)) return false;
         const o = (n.origin as Record<string, unknown> | undefined) ?? {};
