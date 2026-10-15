@@ -78,6 +78,9 @@ export function voxelsOf(sl: Float32Array[], grid: { dims: number[]; ijkToRAS: n
 const lengthOf = (p: Float32Array) => { let L = 0; for (let k = 3; k < p.length; k += 3) L += Math.hypot(p[k] - p[k - 3], p[k + 1] - p[k - 2], p[k + 2] - p[k - 1]); return L; };
 
 /** How a tract's mean is taken: the numbered rules (Ron, 2026-09-25: "modular … and also versioned"). */
+// Rule 2 is SlicerDMRI's (Ron, 2026-10-15: "use and reference the slicer approach"): FiberTractMeasurements.cxx sums a
+// measure over every point of the bundle and divides by the points (references.ts). Albula reads each point's value from
+// the map's voxel under it; SlicerDMRI the value stored on the point.
 export const MEASURE_RULES = { 1: "mean over the voxels passed through, each once", 2: "mean over the streamlines' points (as SlicerDMRI's tractography measurements)" } as const;
 export type MeasureRule = keyof typeof MEASURE_RULES;
 export const MEASURE_RULE: MeasureRule = 2;
