@@ -54,7 +54,7 @@ import { adPath, b0Path, colorFaPath, dicomToTracts, faPath, mdPath, rdPath, UNN
 import { howMade } from "./methods.ts";
 import { byName, laterality, measure, MEASURE_RULE, openingWay, throughBox, toCsv, voxelsOf, type ExportRow, type Maps, type Measures, type Way } from "./selection.ts";
 import { databaseFileUrl, nrrdDecode, nrrdGeometry, nrrdSplitHeader } from "albula";
-import { addRowMenu, fitList, makeNameEditable, saveToDownloads, showInDownloads, sliceOffset, sliceOrientation, startEditing, type RowAction } from "albula";
+import { addRowMenu, fitList, makeNameEditable, pickRectangle, saveToDownloads, showInDownloads, sliceOffset, sliceOrientation, startEditing, viewBanner, type RowAction } from "albula";
 import { assetUrl, holdDrawing, seriesDicomFiles, startPlacing, restartSegmentationServer, startSegmentationServer, synthstripBrainMask, type BrainMaskResult } from "albula";
 import { createSegmentation, growIntoSegmentation, openDicomDatabase, openLoadFromDisk, paintInto, registerProbeRows, registerRayHits, runAction, saveSegmentationToDicom, showHideAllState } from "albula";
 import { buildTractIndex, tractsNear, type TractIndex } from "./tract-index.ts";
@@ -108,6 +108,9 @@ interface TractGroup {
   label?: string;
   /** The other side of a listed tract, there to compare (hidden; it does not make the row near or faint). */
   compare?: boolean;
+  /** The color the person chose for the row (Ron, 2026-10-16: "How do I give it a solid color?"): a solid color, or
+   *  "direction"; absent, the default -- the tract's color, gray when unnamed, by direction when seeded by hand. */
+  color?: RGBA | "direction";
 }
 /** The last whole-brain run for a scan, kept so "Add lines" can name new streamlines in its context and measure them
  *  against the same structure. */
@@ -277,7 +280,21 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
 
   /** Said where the person looks: the visible status bar, and the line under the module's buttons. */
   let noteFor = "";
-  const say = (t: string) => { note = t; noteFor = chosen; status(t); };
+  const say = (t: string) => { note = t; noteFor = chosen; status(t); if (busy) { bannerStep = t; syncBanner(); } };
+  // WHAT IS GOING ON, ACROSS THE TOP OF THE 3D VIEW (Ron, 2026-10-16, seeding: "How do I know that something is
+  // happening? A progress bar immediately when I click … Perhaps the progress bar at the top of the 3d viewer?"; SDK 14
+  // viewBanner): while the module waits for a click to seed, and while any work runs, with the step it is on and its
+  // progress when it has one.
+  let banner: ReturnType<typeof viewBanner> = null, bannerStep = "";
+  function syncBanner() {
+    const pct = /(\d+)%/.exec(busy)?.[1];
+    const want = seeding
+      ? { title: "Seed: click where the tracts should start, in a slice or the 3D view", hint: "Esc cancels", progress: undefined, actions: [{ label: "Cancel", title: "Stop waiting for a click (Esc)", onClick: () => { cancelSeeding?.(); say("Seeding cancelled."); } }] }
+      : busy ? { title: busy.replace(/\s*\d+%$/, ""), hint: bannerStep && bannerStep !== busy ? bannerStep.replace(/…$/, "") : undefined, progress: pct ? Number(pct) / 100 : null, actions: [] }
+      : null;
+    if (!want) { banner?.close(); banner = null; bannerStep = ""; return; }
+    if (banner) banner.update(want); else banner = viewBanner(want);
+  }
 
   // ── what is in the scene ────────────────────────────────────────────────────────────────────────────────────────
   const scans = (): Scan[] => sequenceBrowsers(live).flatMap((b) => {
@@ -1254,12 +1271,14 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     let slot = TRACT_ID, shared = false;
     const strands: Strand[] = shownNow.flatMap((g) => {
       let id = 0;
-      if (colorBy === "tract" && (g.tract !== undefined || g.unnamed)) {
-        const c = g.tract !== undefined ? sideShade(tractColor(g.tract, count), g.side) : UNNAMED;
-        const k = g.tract !== undefined ? c.join(",") : "unnamed";
+      // THE PERSON'S CHOICE FIRST (the row's color square): a solid color for any group, or by direction.
+      const own = colorBy === "tract" ? g.color : undefined;
+      if (colorBy === "tract" && own !== "direction" && (own || g.tract !== undefined || g.unnamed)) {
+        const c = own ? sideShade(own, g.side) : g.tract !== undefined ? sideShade(tractColor(g.tract, count), g.side) : UNNAMED;
+        const k = own || g.tract !== undefined ? c.join(",") : "unnamed";
         let sid = byColor.get(k);
         if (sid !== undefined) shared = true;
-        else if (g.tract === undefined) sid = GRAY_ID;
+        else if (!own && g.tract === undefined) sid = GRAY_ID;
         else if (slot <= 255) sid = slot++;
         if (sid !== undefined) { byColor.set(k, sid); pal[sid] = c; id = sid; slots.set(g, { id, n: g.strands.length, color: c }); }
       }
@@ -1293,6 +1312,8 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     const view = live.view as { setOverlay?: (cell: string, layer: string, items: unknown[]) => void } | undefined;
     if (!view?.setOverlay) return;
     const color = (g: TractGroup, dir: number[]): number[] => {
+      if (colorBy === "tract" && g.color && g.color !== "direction") { const c = sideShade(g.color, g.side); return [c[0], c[1], c[2]]; }
+      if (colorBy === "tract" && g.color === "direction") return [Math.abs(dir[0]), Math.abs(dir[1]), Math.abs(dir[2])];
       if (colorBy === "tract" && g.tract !== undefined) { const c = sideShade(tractColor(g.tract, tractCount), g.side); return [c[0], c[1], c[2]]; }
       if (colorBy === "tract" && g.unnamed) return [UNNAMED[0], UNNAMED[1], UNNAMED[2]];
       return [Math.abs(dir[0]), Math.abs(dir[1]), Math.abs(dir[2])];    // by direction, as in 3D: red left-right ...
@@ -1494,7 +1515,80 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     render();
   }
 
+  /** The row's color choice (its color square): eight solid colors, by direction, or the tract's own. */
+  const CHOICE_COLORS: RGBA[] = [[0.973, 0.843, 0.392, 1], [0.82, 0.27, 0.23, 1], [0.30, 0.79, 0.54, 1], [0.36, 0.61, 0.84, 1], [0.75, 0.31, 0.82, 1], [1.0, 0.60, 0.36, 1], [0.98, 0.98, 0.96, 1], [0.54, 0.49, 0.42, 1]];
+  function colorChoice(anchor: HTMLElement, gs: TractGroup[], named: boolean) {
+    const pop = document.createElement("div");
+    const r = anchor.getBoundingClientRect();
+    pop.style.cssText = `position:fixed;left:${Math.round(r.left)}px;top:${Math.round(r.bottom + 4)}px;z-index:1000;background:var(--sl-surface);border:1px solid var(--sl-control-edge);border-radius:6px;padding:8px;display:grid;gap:6px;box-shadow:var(--sl-shadow-float);width:210px`;
+    const pal = document.createElement("div"); pal.style.cssText = "display:grid;grid-template-columns:repeat(8,1fr);gap:4px";
+    const close = () => { pop.remove(); removeEventListener("pointerdown", outside, true); removeEventListener("keydown", esc, true); };
+    const pick = (c: RGBA | "direction" | undefined) => { for (const g of gs) g.color = c; fieldSlots = null; redraw3d(); render(); close(); };
+    for (const c of CHOICE_COLORS) {
+      const b = document.createElement("button"); b.type = "button"; b.title = "This color";
+      b.style.cssText = `height:20px;min-width:0;padding:0;border:1px solid var(--sl-line-strong);border-radius:3px;cursor:pointer;background:rgb(${c.slice(0, 3).map((v) => Math.round(v * 255)).join(",")})`;
+      b.onclick = () => pick(c); pal.append(b);
+    }
+    const dir = document.createElement("button"); dir.type = "button"; dir.textContent = "By direction"; dir.title = "Red left–right, green front–back, blue up–down"; dir.onclick = () => pick("direction");
+    pop.append(pal, dir);
+    if (named) { const own = document.createElement("button"); own.type = "button"; own.textContent = "Its tract's color"; own.onclick = () => pick(undefined); pop.append(own); }
+    const outside = (e: PointerEvent) => { if (!pop.contains(e.target as Node)) close(); };
+    const esc = (e: KeyboardEvent) => { if (e.key === "Escape") { e.preventDefault(); close(); } };
+    document.body.append(pop);
+    addEventListener("pointerdown", outside, true); addEventListener("keydown", esc, true);
+  }
+
+  // STRAY LINES, TAKEN OUT BY THE PERSON (Ron, 2026-10-16: "let the user do it. draw a rectangle to identify the culprits.
+  // have an undo option"): a rectangle dragged in the 3D view or a slice (SDK 14 pickRectangle) takes out every SHOWN
+  // line of the row that passes through it, as drawn; each rectangle is one step of undo, kept until the scan's list is
+  // made again.
+  const undoStack: { batch: number; g: TractGroup; strands: Float32Array[] }[] = [];
+  /** What each row showed when the header's eye turned everything off, per scan: turned on, exactly that comes back. */
+  const allOffMemory = new Map<string, Map<TractGroup, boolean>>();
+  let undoBatch = 0, strayActive = false;
+  function undoRemoval(gs: TractGroup[]): number {
+    const last = [...undoStack].reverse().find((u) => gs.includes(u.g));
+    if (!last) return 0;
+    const batch = undoStack.filter((u) => u.batch === last.batch);
+    let n = 0;
+    for (const u of batch) { n += u.strands.length - u.g.strands.length; u.g.strands = u.strands; undoStack.splice(undoStack.indexOf(u), 1); }
+    fieldSlots = null; redraw3d(); render();
+    return n;
+  }
+  async function removeStray(gs: TractGroup[], base: string) {
+    if (strayActive) return;
+    strayActive = true;
+    const ends = () => dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    const done = { label: "Done", primary: true, title: "Stop removing lines (Esc)", onClick: ends };
+    const b = viewBanner({ title: `Remove stray lines: ${base}`, hint: "drag a rectangle around them, in the 3D view or a slice · Esc ends", actions: [done] });
+    const say2 = (title: string) => b?.update({ title, hint: "drag again to remove more · Esc ends", actions: undoStack.some((u) => gs.includes(u.g)) ? [{ label: "Undo (⌘Z)", title: "Put back the lines the last rectangle took out", onClick: () => { const n = undoRemoval(gs); say2(n ? `${n.toLocaleString()} line${n === 1 ? "" : "s"} put back in ${base}` : `Nothing to put back in ${base}`); } }, done] : [done] });
+    const onZ = (e: KeyboardEvent) => { if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z") { e.preventDefault(); e.stopPropagation(); const n = undoRemoval(gs); say2(n ? `${n.toLocaleString()} line${n === 1 ? "" : "s"} put back in ${base}` : `Nothing to put back in ${base}`); } };
+    addEventListener("keydown", onZ, true);
+    try {
+      for (;;) {
+        const r = await pickRectangle();
+        if (!r) break;
+        const batch = ++undoBatch;
+        let n = 0;
+        for (const g of gs) {
+          if (!g.visible) continue;                       // only what is shown
+          const mm = trimVoxels * voxelMm(g.scan), keep: Float32Array[] = [];
+          for (const st of g.strands) {
+            const d = mm > 0 ? trimEnds(st, mm) : st;     // the part drawn
+            let hit = false;
+            if (d && d.length >= 6) for (let i = 0; i < d.length && !hit; i += 3) hit = r.inside([d[i], d[i + 1], d[i + 2]]);
+            if (!hit) keep.push(st);
+          }
+          if (keep.length !== g.strands.length) { undoStack.push({ batch, g, strands: g.strands }); n += g.strands.length - keep.length; g.strands = keep; }
+        }
+        if (n) { fieldSlots = null; redraw3d(); render(); }
+        say2(n ? `${n.toLocaleString()} line${n === 1 ? "" : "s"} removed from ${base}` : `No line of ${base} in that rectangle`);
+      }
+    } finally { removeEventListener("keydown", onZ, true); b?.close(); strayActive = false; }
+  }
+
   function render() {
+    syncBanner();
     if (!root) return;
     if (!tractCountModel) void tractCloud().then((m) => { if (!tractCountModel) { tractCountModel = m; render(); } }).catch(() => {});
     const list = scans();
@@ -1734,7 +1828,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       const hasDist = mineAll.some((g) => g.distanceMm !== undefined);
       // AS THE MOCKUP HAS IT: near a structure, closest and the lines per side (FA in the tooltip); otherwise lines and FA
       // per side. Five number columns did not leave the name room in the module column.
-      const cols = hasDist ? "18px 10px minmax(0,1fr) 50px 44px 44px 22px" : "18px 10px minmax(0,1fr) 44px 34px 44px 34px 22px";
+      const cols = hasDist ? "18px 14px minmax(0,1fr) 50px 58px 58px 22px" : "18px 14px minmax(0,1fr) 58px 34px 58px 34px 22px";
       const head = document.createElement("div"); head.className = "sl-hint";
       head.style.cssText = `display:grid;grid-template-columns:${cols};gap:4px;align-items:end;font-size:11px;margin:2px 0`;
       head.innerHTML = hasDist
@@ -1762,6 +1856,23 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
         sh.append(cav);
       }
       if (run?.brain) { const bl = document.createElement("p"); bl.className = "sl-hint"; bl.style.margin = "0 0 4px"; bl.textContent = `${run.brain[0].toUpperCase()}${run.brain.slice(1)}.`; sh.append(bl); }
+      // ALL ON OR OFF (Ron, 2026-10-16: "where is the toggle for turn all on/off?"): the eye in the header, above the list
+      // so it never scrolls away. Off: every row hidden; on: the listed rows shown again (not the gray ones or the
+      // comparison sides, which stay as the person left them hidden).
+      {
+        const allOn = mineAll.some((g) => g.visible);
+        const he = document.createElement("button"); he.textContent = allOn ? "👁" : "🚫";
+        he.style.cssText = "background:none;border:none;padding:0;cursor:pointer;color:inherit;font-size:14px;min-width:0;width:18px;height:18px";
+        he.title = allOn ? "Hide every tract in the list" : "Show every listed tract"; he.setAttribute("aria-label", he.title);
+        // Off remembers what was shown; on puts back exactly that (or, with nothing remembered, the listed tracts -- not
+        // the gray ones, the comparison sides or "Rest of the brain", which start hidden).
+        he.onclick = () => {
+          if (allOn) { allOffMemory.set(scan.browserId, new Map(mineAll.map((g) => [g, g.visible]))); for (const g of mineAll) g.visible = false; }
+          else { const m = allOffMemory.get(scan.browserId); for (const g of mineAll) g.visible = m?.has(g) ? m.get(g)! : !g.faint && !g.compare && !(g.run && g.name === "Rest of the brain"); allOffMemory.delete(scan.browserId); }
+          redraw3d(); render();
+        };
+        head.firstElementChild?.replaceWith(he);
+      }
       sh.append(head);
       const box = document.createElement("div");
       const f2 = (x?: number) => x === undefined ? "–" : x.toFixed(2);
@@ -1773,8 +1884,15 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
         const eye = document.createElement("button"); eye.textContent = anyOn ? "👁" : "🚫";
         eye.style.cssText = "background:none;border:none;padding:0;cursor:pointer;color:inherit;font-size:14px;min-width:0;width:18px;height:18px";   // a glyph button: not the 64 px of a button with words (PALETTE.md)
         eye.onclick = () => { for (const g of all) g.visible = !anyOn; redraw3d(); render(); };
-        const c = r.tract !== undefined ? tractColor(r.tract, tractCount) : UNNAMED;
-        const sw = document.createElement("span"); sw.style.cssText = `width:10px;height:10px;border:1px solid var(--sl-border);background:rgb(${c.slice(0, 3).map((v) => Math.round(v * 255)).join(",")})`;
+        // ITS COLOR, AND THE CHOICE OF ANOTHER (Ron, 2026-10-16: "How do I give it a solid color?"): the square shows the
+        // row's color -- by direction as a gradient -- and opens the choice.
+        const chosenC = all[0].color;
+        const byDir = chosenC === "direction" || (!chosenC && r.tract === undefined && !all[0].unnamed);
+        const c = chosenC && chosenC !== "direction" ? chosenC : r.tract !== undefined ? tractColor(r.tract, tractCount) : UNNAMED;
+        const sw = document.createElement("button"); sw.type = "button";
+        sw.style.cssText = `width:14px;height:14px;padding:0;min-width:0;border:1px solid var(--sl-control-edge);border-radius:2px;cursor:pointer;background:${byDir ? "linear-gradient(135deg,#d33,#3b3,#33d)" : `rgb(${c.slice(0, 3).map((v) => Math.round(v * 255)).join(",")})`}`;
+        sw.title = byDir ? "Colored by direction: click to choose a color" : "Its color: click to choose another";
+        sw.onclick = (e) => { e.stopPropagation(); colorChoice(sw, all, r.tract !== undefined); };
         const nm = document.createElement("span"); nm.style.cssText = "min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap";
         const base = r.other ? nameOf(r.other) : (all[0].label ?? tractTitle(r.tract!));
         eye.title = `${anyOn ? "Hide" : "Show"} ${base}`; eye.setAttribute("aria-label", eye.title);
@@ -1788,8 +1906,25 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
           const d = near0(r), ds = document.createElement("span"); ds.style.cssText = "font-size:12px;opacity:0.85;text-align:right";
           ds.textContent = !Number.isFinite(d) ? "" : d < 0.05 ? "touches" : `${d.toFixed(1)} mm`; row.append(ds);
         }
-        const cell = (g?: TractGroup) => { const a = document.createElement("span"), b = document.createElement("span"); a.style.cssText = b.style.cssText = "font-size:12px;text-align:right;font-variant-numeric:tabular-nums"; a.textContent = g ? g.strands.length.toLocaleString() : "–"; b.textContent = g ? f2(measured.get(g)?.m.fa) : "–"; if (g && !g.visible) { a.style.opacity = b.style.opacity = "0.55"; } return hasDist ? [a] : [a, b]; };
-        if (r.left || r.right) row.append(...cell(r.left), ...cell(r.right));
+        // LEFT AND RIGHT EACH WITH ITS OWN EYE (Ron, 2026-10-16: "I would like to have the left and right sides separate.
+        // Or at least the ability to turn them on/off separately"); the row's eye still turns both.
+        const cell = (g?: TractGroup, side?: string) => {
+          const a = document.createElement("span"), b = document.createElement("span");
+          a.style.cssText = b.style.cssText = "font-size:12px;text-align:right;font-variant-numeric:tabular-nums";
+          a.style.cssText += ";display:flex;align-items:center;justify-content:flex-end;gap:2px";
+          if (g) {
+            const se = document.createElement("button"); se.textContent = g.visible ? "👁" : "🚫";
+            se.style.cssText = "background:none;border:none;padding:0;cursor:pointer;color:inherit;font-size:12px;min-width:0;width:16px;height:16px";
+            se.title = `${g.visible ? "Hide" : "Show"} the ${side} side`; se.setAttribute("aria-label", se.title);
+            se.onclick = (e) => { e.stopPropagation(); g.visible = !g.visible; redraw3d(); render(); };
+            const n = document.createElement("span"); n.textContent = g.strands.length.toLocaleString();
+            a.append(se, n);
+          } else a.textContent = "–";
+          b.textContent = g ? f2(measured.get(g)?.m.fa) : "–";
+          if (g && !g.visible) { a.style.opacity = b.style.opacity = "0.55"; }
+          return hasDist ? [a] : [a, b];
+        };
+        if (r.left || r.right) row.append(...cell(r.left, "left"), ...cell(r.right, "right"));
         else { const one = r.mid ?? r.other!; const s = document.createElement("span"); s.style.cssText = `grid-column:span ${hasDist ? 2 : 4};font-size:12px;text-align:center;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis`; s.textContent = `${one.strands.length.toLocaleString()} lines${measured.get(one)?.m.fa !== undefined ? ` · FA ${f2(measured.get(one)!.m.fa)}` : ""}${r.mid ? " (across the midline)" : ""}`; row.append(s); }
         // THE REST IN THE TOOLTIP (Ron's v3): per side MD, AD, RD, volume, length; how lopsided (left vs right).
         const tip: string[] = [base];
@@ -1811,7 +1946,9 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
           const acts: RowAction[] = [
             { label: "Rename", run: () => startEditing(nm, base, (v) => { for (const g of all) g.label = v; render(); }) },
             { label: "Remove", run: () => { for (const g of all) groups.splice(groups.indexOf(g), 1); redraw3d(); render(); } },
+            { label: "Remove stray lines…", title: "Drag a rectangle around lines to take them out of this tract, in the 3D view or a slice; each removal can be undone.", run: () => { void removeStray(all, base); } },
           ];
+          if (undoStack.some((u) => all.includes(u.g))) acts.push({ label: "Undo the last removal", title: "Puts back the lines the last rectangle took out of this tract.", run: () => undoRemoval(all) });
           if (r.tract !== undefined) acts.push({ label: "Tracts near this one…", title: "Lists the tracts that pass near this one, as near a structure.", run: () => { const strands = all.flatMap((g) => g.strands); nearTract.set(scan.browserId, { strands, label: base }); if (wb) { wb.way = "near"; wb.touched = true; } void tractsNearTract(scan, strands, base); } });
           if (all.some((g) => g.run) && r.tract !== undefined) acts.push({ label: "Add lines", title: "Follows many more lines in this tract, on both sides.", run: () => { void addLines(all.filter((g) => g.run)); } });
           if (r.tract !== undefined) { const t = tractCountModel?.json.tracts[r.tract]; if (t) { const ref = readMore(t.abbr); acts.push({ label: "About this tract", title: ref.cite, run: () => { void fetch(`/_open?url=${encodeURIComponent(ref.link)}`).then((x) => { if (!x.ok) throw new Error(); }).catch(() => { globalThis.open?.(ref.link, "_blank"); }); } }); } }
