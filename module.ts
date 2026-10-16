@@ -54,7 +54,7 @@ import { adPath, b0Path, colorFaPath, dicomToTracts, faPath, mdPath, rdPath, UNN
 import { howMade } from "./methods.ts";
 import { byName, laterality, measure, MEASURE_RULE, openingWay, throughBox, toCsv, voxelsOf, type ExportRow, type Maps, type Measures, type Way } from "./selection.ts";
 import { databaseFileUrl, nrrdDecode, nrrdGeometry, nrrdSplitHeader } from "albula";
-import { addRowMenu, fitList, makeNameEditable, pickRectangle, saveToDownloads, showInDownloads, sliceOffset, sliceOrientation, startEditing, viewBanner, type RowAction } from "albula";
+import { addRowMenu, fitList, makeNameEditable, pickRectangle, type PickedRectangle, saveToDownloads, showInDownloads, sliceOffset, sliceOrientation, startEditing, viewBanner, type RowAction } from "albula";
 import { assetUrl, holdDrawing, seriesDicomFiles, startPlacing, restartSegmentationServer, startSegmentationServer, synthstripBrainMask, type BrainMaskResult } from "albula";
 import { createSegmentation, growIntoSegmentation, openDicomDatabase, openLoadFromDisk, paintInto, registerProbeRows, registerRayHits, runAction, saveSegmentationToDicom, showHideAllState } from "albula";
 import { buildTractIndex, tractsNear, type TractIndex } from "./tract-index.ts";
@@ -290,7 +290,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     const pct = /(\d+)%/.exec(busy)?.[1];
     const want = seeding
       ? { title: "Seed: click where the tracts should start, in a slice or the 3D view", hint: "Esc cancels", progress: undefined, actions: [{ label: "Cancel", title: "Stop waiting for a click (Esc)", onClick: () => { cancelSeeding?.(); say("Seeding cancelled."); } }] }
-      : busy ? { title: busy.replace(/\s*\d+%$/, ""), hint: bannerStep && bannerStep !== busy ? bannerStep.replace(/…$/, "") : undefined, progress: pct ? Number(pct) / 100 : null, actions: [] }
+      : busy ? { title: busy.replace(/\s*\d+%$/, ""), hint: !pct && bannerStep && bannerStep !== busy ? bannerStep.replace(/…$/, "") : undefined, progress: pct ? Number(pct) / 100 : null, actions: [] }
       : null;
     if (!want) { banner?.close(); banner = null; bannerStep = ""; return; }
     if (banner) banner.update(want); else banner = viewBanner(want);
@@ -1010,6 +1010,10 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       // STILL WANTED? A scan removed while this ran leaves nothing behind (critic, 2026-10-01, finding 8; CONSTRAINTS).
       if (!scans().some((s) => s.browserId === scan.browserId)) return;
       // A NEW RUN REPLACES THE LAST ONE for this scan (critic, finding 5: a second press doubled every tract).
+      // WHAT THE PERSON SET ON THE LAST LIST'S ROWS -- a color, a side turned off -- carries over to the same tract and
+      // side in the new list (critic 2026-10-16, shown-list finding 5: a Within change dropped them silently). Lines
+      // taken out by hand do not: the new list is made afresh, and the banner of a removal in progress ends.
+      const carried = new Map(groups.filter((g) => g.scan === scan.browserId && g.run && g.tract !== undefined).map((g) => [`${g.tract}:${g.side ?? 0}`, { color: g.color, visible: g.visible }]));
       groups.splice(0, groups.length, ...withoutLastRun(groups, scan.browserId));   // face.ts
       const pick = (idx: number[]) => idx.map((i) => sl[i]);
       runs.set(scan.browserId, { sl, named, sorted, structure, label, withinMm, method, added: new Set(), dist, stored: w.stored, storedInputs: w.storedInputs, maxB: c?.maxB ?? 0, partnerId: c?.partnerId ?? "", anatomyId: c?.anatomyId ?? "", rule: method === "ukf" && c ? c.rule : undefined, brain: method === "ukf" && c ? c.brain.note : "", ...(c?.directions ? { directions: c.directions } : {}) });
@@ -1027,6 +1031,8 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
         const t = model.json.tracts[e.tract];
         groups.push({ id: ++groupSeq, name: t ? tractLabel(t.abbr, t.name, e.side) : tractName(model, e.tract, e.side), scan: scan.browserId, strands: pick(e.idx), visible: !faint, method,
           tract: e.tract, side: e.side, distanceMm: e.d, within: e.within, run: true, faint, otherSide: e.side ? sorted.total(e.tract, otherSide(e.side)) : undefined });
+        const was = carried.get(`${e.tract}:${e.side ?? 0}`);
+        if (was) { const g = groups[groups.length - 1]; g.color = was.color; g.visible = was.visible; }
       }
       // THE OTHER SIDE OF EACH LISTED TRACT, hidden, so the row has Left and Right to compare (v3; Ron, 2026-10-01 and
       // O'Donnell et al. 2017: the tumor's side against the healthy side), measured like the rest.
@@ -1523,7 +1529,9 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     pop.style.cssText = `position:fixed;left:${Math.round(r.left)}px;top:${Math.round(r.bottom + 4)}px;z-index:1000;background:var(--sl-surface);border:1px solid var(--sl-control-edge);border-radius:6px;padding:8px;display:grid;gap:6px;box-shadow:var(--sl-shadow-float);width:210px`;
     const pal = document.createElement("div"); pal.style.cssText = "display:grid;grid-template-columns:repeat(8,1fr);gap:4px";
     const close = () => { pop.remove(); removeEventListener("pointerdown", outside, true); removeEventListener("keydown", esc, true); };
-    const pick = (c: RGBA | "direction" | undefined) => { for (const g of gs) g.color = c; fieldSlots = null; redraw3d(); render(); close(); };
+    // Choosing a color while every line is drawn by direction (Advanced › Color by) brings the colors back, so the
+    // choice is seen (critic, finding 14).
+    const pick = (c: RGBA | "direction" | undefined) => { for (const g of gs) g.color = c; if (c !== "direction") colorBy = "tract"; fieldSlots = null; redraw3d(); render(); close(); };
     for (const c of CHOICE_COLORS) {
       const b = document.createElement("button"); b.type = "button"; b.title = "This color";
       b.style.cssText = `height:20px;min-width:0;padding:0;border:1px solid var(--sl-line-strong);border-radius:3px;cursor:pointer;background:rgb(${c.slice(0, 3).map((v) => Math.round(v * 255)).join(",")})`;
@@ -1542,7 +1550,9 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
   // have an undo option"): a rectangle dragged in the 3D view or a slice (SDK 14 pickRectangle) takes out every SHOWN
   // line of the row that passes through it, as drawn; each rectangle is one step of undo, kept until the scan's list is
   // made again.
-  const undoStack: { batch: number; g: TractGroup; strands: Float32Array[] }[] = [];
+  const undoStack: { batch: number; g: TractGroup; gone: Float32Array[] }[] = [];
+  /** Undo steps of rows no longer in the list go (critic, finding 4: they held the removed lines for the session). */
+  const pruneUndo = () => { for (let i = undoStack.length - 1; i >= 0; i--) if (!groups.includes(undoStack[i].g)) undoStack.splice(i, 1); };
   /** What each row showed when the header's eye turned everything off, per scan: turned on, exactly that comes back. */
   const allOffMemory = new Map<string, Map<TractGroup, boolean>>();
   let undoBatch = 0, strayActive = false;
@@ -1551,44 +1561,67 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     if (!last) return 0;
     const batch = undoStack.filter((u) => u.batch === last.batch);
     let n = 0;
-    for (const u of batch) { n += u.strands.length - u.g.strands.length; u.g.strands = u.strands; undoStack.splice(undoStack.indexOf(u), 1); }
+    // THE LINES TAKEN OUT GO BACK IN, and nothing else changes (critic, finding 3: restoring the earlier list threw away
+    // the lines "Add lines" had added since).
+    for (const u of batch) { n += u.gone.length; u.g.strands = [...u.g.strands, ...u.gone]; undoStack.splice(undoStack.indexOf(u), 1); }
     fieldSlots = null; redraw3d(); render();
     return n;
   }
   async function removeStray(gs: TractGroup[], base: string) {
     if (strayActive) return;
     strayActive = true;
-    const ends = () => dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
-    const done = { label: "Done", primary: true, title: "Stop removing lines (Esc)", onClick: ends };
-    const b = viewBanner({ title: `Remove stray lines: ${base}`, hint: "drag a rectangle around them, in the 3D view or a slice · Esc ends", actions: [done] });
-    const say2 = (title: string) => b?.update({ title, hint: "drag again to remove more · Esc ends", actions: undoStack.some((u) => gs.includes(u.g)) ? [{ label: "Undo (⌘Z)", title: "Put back the lines the last rectangle took out", onClick: () => { const n = undoRemoval(gs); say2(n ? `${n.toLocaleString()} line${n === 1 ? "" : "s"} put back in ${base}` : `Nothing to put back in ${base}`); } }, done] : [done] });
-    const onZ = (e: KeyboardEvent) => { if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z") { e.preventDefault(); e.stopPropagation(); const n = undoRemoval(gs); say2(n ? `${n.toLocaleString()} line${n === 1 ? "" : "s"} put back in ${base}` : `Nothing to put back in ${base}`); } };
+    const stop = new AbortController();
+    const done = { label: "Done", primary: true, title: "Stop removing lines (Esc)", onClick: () => stop.abort() };
+    const hint = "drag a rectangle around them, in the 3D view or a slice · Esc or Done ends · the views turn again after Done";
+    const b = viewBanner({ title: `Remove stray lines: ${base}`, hint, actions: [done] });
+    const undoAct = () => ({ label: "Undo (⌘Z)", title: "Put back the lines the last rectangle took out", onClick: () => undoOnce() });
+    const say2 = (title: string) => b?.update({ title, hint, actions: undoStack.some((u) => gs.includes(u.g)) ? [undoAct(), done] : [done] });
+    const undoOnce = () => { const n = undoRemoval(gs); say2(n ? `${n.toLocaleString()} line${n === 1 ? "" : "s"} put back in ${base}` : `Nothing to put back in ${base}`); };
+    const onZ = (e: KeyboardEvent) => { if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z") { e.preventDefault(); e.stopPropagation(); undoOnce(); } };
     addEventListener("keydown", onZ, true);
+    /** The lines of the shown groups a rectangle holds, as drawn: in a slice view where they cross its plane. */
+    const takenBy = (r: PickedRectangle) => {
+      const out = new Map<TractGroup, Set<Float32Array>>();
+      for (const g of gs) {
+        if (!g.visible) continue;                       // only what is shown
+        const mm = trimVoxels * voxelMm(g.scan), hit = new Set<Float32Array>();
+        for (const st of g.strands) {
+          const d = mm > 0 ? trimEnds(st, mm) : st;     // the part drawn
+          if (!d || d.length < 6) continue;
+          for (let i = 0; i + 5 < d.length; i += 3) if (r.insideSegment([d[i], d[i + 1], d[i + 2]], [d[i + 3], d[i + 4], d[i + 5]])) { hit.add(st); break; }
+        }
+        if (hit.size) out.set(g, hit);
+      }
+      return out;
+    };
+    // THE MODE ENDS WITH ITS LIST (critic, findings 2 and 4): when the module is left, or its rows are no longer in the
+    // list (a new run, the scan closed).
+    const stale = () => !root?.isConnected || root.offsetParent === null || gs.some((g) => !groups.includes(g));
+    const watch = setInterval(() => { if (stale()) stop.abort(); }, 300);
     try {
       for (;;) {
-        const r = await pickRectangle();
-        if (!r) break;
+        const r = await pickRectangle({ signal: stop.signal, onDrag: (p) => {
+          if (!p) { say2(`Remove stray lines: ${base}`); return; }
+          let n = 0; for (const set of takenBy(p).values()) n += set.size;
+          b?.update({ title: n ? `This rectangle would take ${n.toLocaleString()} line${n === 1 ? "" : "s"} of ${base}` : `No line of ${base} in this rectangle` });
+        } });
+        if (!r || stale()) break;
         const batch = ++undoBatch;
         let n = 0;
-        for (const g of gs) {
-          if (!g.visible) continue;                       // only what is shown
-          const mm = trimVoxels * voxelMm(g.scan), keep: Float32Array[] = [];
-          for (const st of g.strands) {
-            const d = mm > 0 ? trimEnds(st, mm) : st;     // the part drawn
-            let hit = false;
-            if (d && d.length >= 6) for (let i = 0; i < d.length && !hit; i += 3) hit = r.inside([d[i], d[i + 1], d[i + 2]]);
-            if (!hit) keep.push(st);
-          }
-          if (keep.length !== g.strands.length) { undoStack.push({ batch, g, strands: g.strands }); n += g.strands.length - keep.length; g.strands = keep; }
+        for (const [g, hit] of takenBy(r)) {
+          const gone = g.strands.filter((st) => hit.has(st));
+          g.strands = g.strands.filter((st) => !hit.has(st));
+          undoStack.push({ batch, g, gone }); n += gone.length;
         }
         if (n) { fieldSlots = null; redraw3d(); render(); }
         say2(n ? `${n.toLocaleString()} line${n === 1 ? "" : "s"} removed from ${base}` : `No line of ${base} in that rectangle`);
       }
-    } finally { removeEventListener("keydown", onZ, true); b?.close(); strayActive = false; }
+    } finally { clearInterval(watch); removeEventListener("keydown", onZ, true); b?.close(); strayActive = false; pruneUndo(); }
   }
 
   function render() {
     syncBanner();
+    pruneUndo();
     if (!root) return;
     if (!tractCountModel) void tractCloud().then((m) => { if (!tractCountModel) { tractCountModel = m; render(); } }).catch(() => {});
     const list = scans();
@@ -1820,7 +1853,8 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
         if (g.tract === undefined) r.other = g; else if (g.side === -1) r.left = g; else if (g.side === 1) r.right = g; else r.mid = g;
       }
       const gs = (r: Row) => [r.left, r.right, r.mid, r.other].filter((x): x is TractGroup => !!x);
-      const near0 = (r: Row) => Math.min(...gs(r).filter((g) => !g.compare).map((g) => g.distanceMm ?? Infinity));
+      // A side emptied by hand no longer counts as near (critic, finding 7).
+      const near0 = (r: Row) => Math.min(...gs(r).filter((g) => !g.compare && g.strands.length > 0).map((g) => g.distanceMm ?? Infinity));
       const faintRow = (r: Row) => { const own = gs(r).filter((g) => !g.compare); return own.length > 0 && own.every((g) => g.faint); };
       rows.sort((a, b) => Number(faintRow(a)) - Number(faintRow(b)) || (a.other ? 1 : 0) - (b.other ? 1 : 0) || near0(a) - near0(b));
       const listed = rows.filter((r) => !faintRow(r) && !r.other).length;
@@ -1828,7 +1862,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       const hasDist = mineAll.some((g) => g.distanceMm !== undefined);
       // AS THE MOCKUP HAS IT: near a structure, closest and the lines per side (FA in the tooltip); otherwise lines and FA
       // per side. Five number columns did not leave the name room in the module column.
-      const cols = hasDist ? "18px 14px minmax(0,1fr) 50px 58px 58px 22px" : "18px 14px minmax(0,1fr) 58px 34px 58px 34px 22px";
+      const cols = hasDist ? "18px 14px minmax(0,1fr) 50px 52px 52px 22px" : "18px 14px minmax(0,1fr) 52px 34px 52px 34px 22px";
       const head = document.createElement("div"); head.className = "sl-hint";
       head.style.cssText = `display:grid;grid-template-columns:${cols};gap:4px;align-items:end;font-size:11px;margin:2px 0`;
       head.innerHTML = hasDist
@@ -1887,7 +1921,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
         // ITS COLOR, AND THE CHOICE OF ANOTHER (Ron, 2026-10-16: "How do I give it a solid color?"): the square shows the
         // row's color -- by direction as a gradient -- and opens the choice.
         const chosenC = all[0].color;
-        const byDir = chosenC === "direction" || (!chosenC && r.tract === undefined && !all[0].unnamed);
+        const byDir = colorBy === "direction" || chosenC === "direction" || (!chosenC && r.tract === undefined && !all[0].unnamed);
         const c = chosenC && chosenC !== "direction" ? chosenC : r.tract !== undefined ? tractColor(r.tract, tractCount) : UNNAMED;
         const sw = document.createElement("button"); sw.type = "button";
         sw.style.cssText = `width:14px;height:14px;padding:0;min-width:0;border:1px solid var(--sl-control-edge);border-radius:2px;cursor:pointer;background:${byDir ? "linear-gradient(135deg,#d33,#3b3,#33d)" : `rgb(${c.slice(0, 3).map((v) => Math.round(v * 255)).join(",")})`}`;
