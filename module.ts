@@ -1539,7 +1539,9 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     }
     const dir = document.createElement("button"); dir.type = "button"; dir.textContent = "By direction"; dir.title = "Red left–right, green front–back, blue up–down"; dir.onclick = () => pick("direction");
     pop.append(pal, dir);
-    if (named) { const own = document.createElement("button"); own.type = "button"; own.textContent = "Its tract's color"; own.onclick = () => pick(undefined); pop.append(own); }
+    // BACK TO ITS OWN (critic, finding 16): the tract's color for a named tract, gray for an unnamed one, by direction for
+    // lines seeded by hand.
+    { const own = document.createElement("button"); own.type = "button"; own.textContent = named ? "Its tract's color" : "Its own color"; own.onclick = () => pick(undefined); pop.append(own); }
     const outside = (e: PointerEvent) => { if (!pop.contains(e.target as Node)) close(); };
     const esc = (e: KeyboardEvent) => { if (e.key === "Escape") { e.preventDefault(); close(); } };
     document.body.append(pop);
@@ -1555,7 +1557,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
   const pruneUndo = () => { for (let i = undoStack.length - 1; i >= 0; i--) if (!groups.includes(undoStack[i].g)) undoStack.splice(i, 1); };
   /** What each row showed when the header's eye turned everything off, per scan: turned on, exactly that comes back. */
   const allOffMemory = new Map<string, Map<TractGroup, boolean>>();
-  let undoBatch = 0, strayActive = false;
+  let undoBatch = 0, strayActive = false, strayStop: AbortController | null = null;
   function undoRemoval(gs: TractGroup[]): number {
     const last = [...undoStack].reverse().find((u) => gs.includes(u.g));
     if (!last) return 0;
@@ -1568,9 +1570,11 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     return n;
   }
   async function removeStray(gs: TractGroup[], base: string) {
-    if (strayActive) return;
+    // ANOTHER ROW WHILE ONE IS ON (critic, finding 17): the first ends, the second begins.
+    if (strayActive) { strayStop?.abort(); for (let i = 0; i < 40 && strayActive; i++) await new Promise((r) => setTimeout(r, 25)); if (strayActive) return; }
     strayActive = true;
     const stop = new AbortController();
+    strayStop = stop;
     const done = { label: "Done", primary: true, title: "Stop removing lines (Esc)", onClick: () => stop.abort() };
     const hint = "drag a rectangle around them, in the 3D view or a slice · Esc or Done ends · the views turn again after Done";
     const b = viewBanner({ title: `Remove stray lines: ${base}`, hint, actions: [done] });
