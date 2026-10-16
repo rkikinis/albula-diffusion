@@ -1234,28 +1234,40 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     // color back, and the view redraws. The field is rebuilt only for something new, a different look, or direction
     // coloring (one slot per direction, shared by groups).
     const look = `${drawAs}|${trimVoxels}|${colorBy}|${tractCount}`;
-    const fast = !!field && fieldSlots && colorBy === "tract" && fieldLook === look
+    // NOT WHEN NOTHING IS SHOWN (critic 2026-10-15, render-audit-fixes finding 5: with every tract hidden or removed, or
+    // the scan gone from the scene, the field stayed on the card -- 38 MB -- and every ray still walked its grid): then
+    // the field goes, below, and showing a tract again builds it.
+    const fast = !!field && fieldSlots && colorBy === "tract" && fieldLook === look && shownNow.length > 0
       && shownNow.every((g) => fieldSlots!.get(g)?.n === g.strands.length);
     if (fast) {
       for (const [g, s] of fieldSlots!) field!.setBundleColor(s.id, g.visible && groups.includes(g) ? s.color : [0, 0, 0, 0]);
       view.redraw();
       return;
     }
-    // Colored by tract: each group its own slot -- its tract's color (tract-colors.ts), the left side a shade darker,
-    // unnamed ones gray; otherwise, and when the slots run out, by direction.
+    // Colored by tract: each COLOR its own slot -- the tract's color (tract-colors.ts), the left side a shade darker, the
+    // unnamed ones all gray in one (GRAY_ID); a group seeded by hand, and every group when colored by direction, by
+    // direction. Groups of one color share a slot (critic 2026-10-15, render-audit-fixes finding 6: each unnamed group
+    // took a slot of its own, and past the 38 slots tracts were drawn by direction in 3D while their rows and their
+    // dots on the slices kept the tract's color); only past 38 different colors at once does a group fall back.
     const pal = directionPalette(), count = tractCount, slots = new Map<TractGroup, { id: number; n: number; color: RGBA }>();
-    let slot = TRACT_ID;
+    const byColor = new Map<string, number>();
+    let slot = TRACT_ID, shared = false;
     const strands: Strand[] = shownNow.flatMap((g) => {
       let id = 0;
-      if (colorBy === "tract" && (g.tract !== undefined || g.unnamed) && slot <= 255) {
-        id = slot++;
-        pal[id] = g.tract !== undefined ? sideShade(tractColor(g.tract, count), g.side) : UNNAMED;
-        slots.set(g, { id, n: g.strands.length, color: pal[id] });
+      if (colorBy === "tract" && (g.tract !== undefined || g.unnamed)) {
+        const c = g.tract !== undefined ? sideShade(tractColor(g.tract, count), g.side) : UNNAMED;
+        const k = g.tract !== undefined ? c.join(",") : "unnamed";
+        let sid = byColor.get(k);
+        if (sid !== undefined) shared = true;
+        else if (g.tract === undefined) sid = GRAY_ID;
+        else if (slot <= 255) sid = slot++;
+        if (sid !== undefined) { byColor.set(k, sid); pal[sid] = c; id = sid; slots.set(g, { id, n: g.strands.length, color: c }); }
       }
       return drawn(g).map((p) => id ? { points: p, bundle: id } : { points: p, bundle: directionId(p), pointBundles: pointIds(p) });
     });
-    // Every shown group got its own slot: the next show or hide can be a color.
-    fieldSlots = slots.size === shownNow.length ? slots : null;
+    // Every shown group has a slot of its own: the next show or hide can be a color. A shared slot cannot hide one of
+    // its groups alone, so then the next change rebuilds.
+    fieldSlots = !shared && slots.size === shownNow.length ? slots : null;
     fieldLook = look;
     // NOTHING SHOWN: when the field could stay (tract colors, same look), the fast path above already made every slot
     // transparent and kept it, so hiding the last tract or showing the first again rebuilds nothing (finding 5); here the
