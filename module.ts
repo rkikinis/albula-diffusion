@@ -1826,7 +1826,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
               lab.append(cb, sw, nm); box.append(lab);
             }
           }
-          fitList(box, "diffusion-tract-names");
+          fitList(box, "diffusion-tract-names", { scrollKey: scan.browserId });   // each scan its own scroll position
           ch.append(box);
           if (busy) { const p = document.createElement("p"); p.className = "sl-hint"; p.textContent = busy; ch.append(p); }
         }
@@ -1994,7 +1994,9 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
         }, base);
         box.append(row);
       }
-      fitList(box, "diffusion-shown", { min: 150 });   // about six rows at least
+      // About six rows at least; each scan its own scroll position (critic 2026-10-16, tonight's fixes, finding 5: another
+      // patient's list opened where the last one was scrolled to).
+      fitList(box, "diffusion-shown", { min: 150, scrollKey: scan.browserId });
       sh.append(box);
       void ensureMeasures(scan);
     }
