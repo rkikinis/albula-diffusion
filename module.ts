@@ -28,7 +28,7 @@
 // This file belongs to the diffusion extension and registers through core's queue (render/demos/extension-modules.ts);
 // core never imports it. Critic round 2026-09-29 (qa/2026-09-29-diffusion-module.md) answered in this version.
 import type { ModuleContext } from "albula";
-import { queueModule } from "albula";
+import { MAJOR_TRACTS, queueModule, registerAfterLoad } from "albula";
 import type { MrsonNode } from "albula";
 import { fetchZarrVolumeNative, type ZarrDesc } from "albula";
 import { packRGB24 } from "albula";
@@ -1445,6 +1445,25 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     } catch (e) { say(`Tracts could not be shown: ${(e as Error).message}`); }
     finally { busy = ""; render(); void ensureMeasures(scan); }
   }
+
+  // WHAT A LOAD SHOWS (the core's render/after-load.ts, SDK 16; Ron, 2026-10-19, on the after-load mockup: a diffusion case
+  // "D" -- the six major tracts, both sides, no slice plane -- and a brain tumor case "only the six major tracts"): a
+  // diffusion scan the load brought, with whole-brain tracts stored for it, comes up with the major tracts in 3D. A scan
+  // without stored tracts shows none (making them takes minutes: the import's job), and the core's rules apply.
+  registerAfterLoad(async ({ added }) => {
+    let shown = false;
+    for (const s of scans().filter((x) => added.includes(x.browserId))) {
+      if (!(await findStored(s))) continue;
+      const model = await tractCloud();
+      for (const abbr of MAJOR_TRACTS) {
+        const i = model.json.tracts.findIndex((t: { abbr?: string }) => t.abbr === abbr);
+        if (i < 0) continue;
+        await showByName(s, i, true);
+        if (groups.some((g) => g.scan === s.browserId && g.tract === i && g.visible)) shown = true;
+      }
+    }
+    return shown;
+  });
 
   /** THROUGH A PLACE: one box (a Markups box), put at the slice views' crossing; the streamlines through it follow it as
    *  it moves, with nothing to press (Ron's v3 "2: yes"). */
