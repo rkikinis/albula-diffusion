@@ -1492,8 +1492,12 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     if (!w) return;
     const box = { center: n.center as number[], size: n.size as number[], orientation: n.orientation as number[] | undefined };
     const idx = throughBox(w.sl, box);
+    // THE ROW'S OWN CHOICES STAY WHEN THE BOX MOVES (Ron, 2026-10-20: "I selected a custom color. Everytime I move the
+    // box, the color gets reset"): the lines are made again; the color and the eye are carried over from the row before.
+    const before = groups.find((g) => g.scan === scan.browserId && g.by === "box");
     for (let i = groups.length - 1; i >= 0; i--) if (groups[i].scan === scan.browserId && groups[i].by === "box") groups.splice(i, 1);
-    if (idx.length) groups.push({ id: ++groupSeq, name: "Through the box", scan: scan.browserId, strands: idx.map((i) => w.sl[i]), visible: true, method, unnamed: true, by: "box" });
+    if (idx.length) groups.push({ id: ++groupSeq, name: "Through the box", scan: scan.browserId, strands: idx.map((i) => w.sl[i]), visible: before?.visible ?? true, method, unnamed: true, by: "box",
+      ...(before?.color !== undefined ? { color: before.color } : {}) });
     // Which tract most of them belong to, said in the line under the box.
     const count = new Map<string, number>();
     for (const i of idx) { const k = `${w.named.tract[i]}:${w.named.side[i]}`; count.set(k, (count.get(k) ?? 0) + 1); }
