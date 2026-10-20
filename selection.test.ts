@@ -1,7 +1,7 @@
 // selection.ts: by name, through a box, the whole-tract numbers (each voxel once), laterality, the CSV, the opening way.
 //   deno test -A --no-check --config ../../src/SlicerLive/deno.jsonc selection.test.ts
 import { assert, assertAlmostEquals, assertEquals } from "jsr:@std/assert@1";
-import { byName, laterality, measure, openingWay, throughBox, toCsv, voxelsOf } from "./selection.ts";
+import { byName, laterality, measure, openingWay, throughBox, throughVoxels, toCsv, voxelsOf } from "./selection.ts";
 
 const line = (...pts: number[][]) => Float32Array.from(pts.flat());
 
@@ -56,4 +56,18 @@ Deno.test("the CSV: a header, a row per tract and side, quoted where needed", ()
 
 Deno.test("the face opens near the tumor when there is one, else by name", () => {
   assertEquals([openingWay(true), openingWay(false)], ["near", "name"]);
+});
+
+Deno.test("through a structure: a line crossing a one-voxel-thick region counts, even stepping past it; one beside it does not", () => {
+  // A 10 x 10 x 10 grid of 1 mm voxels; the region is the coronal layer j = 5, i 3..6, k 3..6.
+  const dims = [10, 10, 10], ijk = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+  const inside = (v: number) => { const i = v % 10, j = Math.floor(v / 10) % 10, k = Math.floor(v / 100); return j === 5 && i >= 3 && i <= 6 && k >= 3 && k <= 6; };
+  const across = new Float32Array([4, 2, 4, 4, 8, 4]);   // one 6 mm step from j 2 to j 8, through the layer
+  const beside = new Float32Array([8, 2, 4, 8, 8, 4]);   // the same, at i = 8, outside the region
+  const ends = new Float32Array([5, 5, 5]);              // a single point in it
+  assertEquals(throughVoxels([across, beside, ends], { dims, ijkToRAS: ijk, inside }), [0, 2]);
+});
+
+Deno.test("through a structure: an empty segment passes nothing", () => {
+  assertEquals(throughVoxels([new Float32Array([1, 1, 1, 2, 2, 2])], { dims: [4, 4, 4], ijkToRAS: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], inside: () => false }), []);
 });

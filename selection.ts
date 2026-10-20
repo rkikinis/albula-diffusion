@@ -4,6 +4,8 @@
 // calls them and holds no copy of the rules.
 //   - by name: the streamlines of chosen tracts and sides;
 //   - through a box: the streamlines with a point inside a box (a Markups Box: center, size, its own axes);
+//   - through a structure: the streamlines that pass through a segment's voxels (Ron, 2026-10-20: a cingulum bundle drawn
+//     on a coronal slice, "the box is not a good way to capture it");
 //   - the numbers of a set of streamlines: lines, the mean FA / MD / AD / RD, the volume (the voxels they pass through,
 //     each once) and the median length. HOW THE MEAN IS TAKEN is a numbered rule (MEASURE_RULES; the export records it):
 //     2, the default since 2026-10-15, the mean over the streamlines' points, each read from the voxel it falls in, as
@@ -46,6 +48,43 @@ export function throughBox(sl: Float32Array[], box: Box): number[] {
       if (Math.abs(dx * ax[0][0] + dy * ax[0][1] + dz * ax[0][2]) <= h[0] && Math.abs(dx * ax[1][0] + dy * ax[1][1] + dz * ax[1][2]) <= h[1]
         && Math.abs(dx * ax[2][0] + dy * ax[2][1] + dz * ax[2][2]) <= h[2]) { out.push(i); break; }
     }
+  }
+  return out;
+}
+
+/** A segment as voxels: its grid and which voxels are in it (index (k*ny + j)*nx + i). */
+export interface Voxels { dims: number[]; ijkToRAS: number[]; inside: (index: number) => boolean }
+
+/**
+ * The streamlines that pass through a segment: a point of the line, or of the line between two of its points sampled
+ * every half voxel, falls in a voxel of it. The half-voxel sampling matters for a region drawn on one slice -- one
+ * voxel thick -- which a line stepping more than a voxel at a time would otherwise jump over.
+ */
+export function throughVoxels(sl: Float32Array[], v: Voxels): number[] {
+  const [nx, ny, nz] = v.dims, m = v.ijkToRAS, inv = inverse(m);
+  // The segment's box in voxels: a point outside it is not looked up.
+  const lo = [nx, ny, nz], hi = [-1, -1, -1];
+  for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+    if (!v.inside((k * ny + j) * nx + i)) continue;
+    if (i < lo[0]) lo[0] = i; if (j < lo[1]) lo[1] = j; if (k < lo[2]) lo[2] = k;
+    if (i > hi[0]) hi[0] = i; if (j > hi[1]) hi[1] = j; if (k > hi[2]) hi[2] = k;
+  }
+  if (hi[0] < 0) return [];
+  const step = 0.5 * Math.min(...[0, 1, 2].map((c) => Math.hypot(m[c], m[4 + c], m[8 + c])));
+  const at = (x: number, y: number, z: number) => {
+    const i = Math.round(inv[0] * x + inv[1] * y + inv[2] * z + inv[3]), j = Math.round(inv[4] * x + inv[5] * y + inv[6] * z + inv[7]), k = Math.round(inv[8] * x + inv[9] * y + inv[10] * z + inv[11]);
+    return i >= lo[0] && i <= hi[0] && j >= lo[1] && j <= hi[1] && k >= lo[2] && k <= hi[2] && v.inside((k * ny + j) * nx + i);
+  };
+  const out: number[] = [];
+  for (let n = 0; n < sl.length; n++) {
+    const p = sl[n];
+    let hit = p.length >= 3 && at(p[0], p[1], p[2]);
+    for (let q = 3; !hit && q < p.length; q += 3) {
+      const dx = p[q] - p[q - 3], dy = p[q + 1] - p[q - 2], dz = p[q + 2] - p[q - 1];
+      const parts = Math.max(1, Math.ceil(Math.hypot(dx, dy, dz) / step));
+      for (let s = 1; s <= parts && !hit; s++) hit = at(p[q - 3] + dx * s / parts, p[q - 2] + dy * s / parts, p[q - 1] + dz * s / parts);
+    }
+    if (hit) out.push(n);
   }
   return out;
 }

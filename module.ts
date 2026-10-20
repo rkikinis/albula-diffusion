@@ -52,7 +52,7 @@ import { DCM2NIIX_VERSION, secondOpinion, type SecondOpinion } from "./second-op
 import { databaseSeries, openDatabaseId } from "albula";
 import { adPath, b0Path, colorFaPath, dicomToTracts, faPath, mdPath, rdPath, UNNAMED as UNNAMED_SET } from "./tracts-dicom.ts";
 import { howMade } from "./methods.ts";
-import { byName, laterality, measure, MEASURE_RULE, openingWay, throughBox, toCsv, voxelsOf, type ExportRow, type Maps, type Measures, type Way } from "./selection.ts";
+import { byName, laterality, measure, MEASURE_RULE, openingWay, throughBox, throughVoxels, toCsv, voxelsOf, type ExportRow, type Maps, type Measures, type Way } from "./selection.ts";
 import { databaseFileUrl, nrrdDecode, nrrdGeometry, nrrdSplitHeader } from "albula";
 import { addRowMenu, fitList, makeNameEditable, pickRectangle, type PickedRectangle, saveToDownloads, showInDownloads, sliceOffset, sliceOrientation, startEditing, viewBanner, type RowAction } from "albula";
 import { assetUrl, holdDrawing, seriesDicomFiles, startPlacing, restartSegmentationServer, startSegmentationServer, synthstripBrainMask, type BrainMaskResult } from "albula";
@@ -103,7 +103,9 @@ interface TractGroup {
   /** Streamlines "Add lines" added to this group. */
   more?: number;
   /** v3: how it was chosen -- by name (ticked) or through the box -- when not by a near-a-structure run. */
-  by?: "name" | "box";
+  by?: "name" | "box" | "through";
+  /** Through a structure: which segment (segmentChoices' key). */
+  throughKey?: string;
   /** A name the person gave the row (one click on it; the module template's rename). */
   label?: string;
   /** The other side of a listed tract, there to compare (hidden; it does not make the row near or faint). */
@@ -1392,6 +1394,14 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
   let wantOutline = false;
   const boxes = new Map<string, string>(), boxLines = new Map<string, string>();
   let boxQueued = false;
+  /** THROUGH A STRUCTURE (Ron, 2026-10-20, on the cingulum: "the box is not a good way to capture it"): per scan the
+   *  segments whose lines are shown, each its own row, made again whenever its voxels change (Draw, Paint, Undo). */
+  const throughs = new Map<string, Set<string>>(), throughLines = new Map<string, string>();
+  /** A row's own choices -- color, eye, name -- kept by what it is through, so they outlast a pass with no lines (the
+   *  critic, 2026-10-20: the box's row lost them when the box crossed an empty region). */
+  const rowStyle = new Map<string, Pick<TractGroup, "color" | "visible" | "label">>();
+  const keepStyle = (k: string, g: TractGroup | undefined) => { if (g) rowStyle.set(k, { color: g.color, visible: g.visible, label: g.label }); };
+  const styleFor = (k: string) => { const st = rowStyle.get(k); return { visible: st?.visible ?? true, ...(st?.color !== undefined ? { color: st.color } : {}), ...(st?.label !== undefined ? { label: st.label } : {}) }; };
   const exportedFor = new Map<string, string>();
   /** "Tracts near this one…": the tract that is the structure now, per scan (finding 18). */
   const nearTract = new Map<string, { strands: Float32Array[]; label: string }>();
@@ -1406,7 +1416,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
   // ONE MEASURING AT A TIME, AND A CALLER WAITS FOR IT (finding 3: an export pressed while measuring wrote a partial file).
   async function ensureMeasures(scan: Scan): Promise<boolean> {
     while (measuringP) await measuringP;
-    const todo = groups.filter((g) => g.scan === scan.browserId && (g.tract !== undefined || g.by === "box") && measured.get(g)?.n !== g.strands.length);
+    const todo = groups.filter((g) => g.scan === scan.browserId && (g.tract !== undefined || g.by === "box" || g.by === "through") && measured.get(g)?.n !== g.strands.length);
     if (!todo.length) return true;
     let ok = false;
     measuringP = (async () => {
@@ -1476,7 +1486,11 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     }
     const boxId = `diffusion-box-${scan.browserId}`;
     boxes.set(scan.browserId, boxId);
-    live.write({ op: "put", id: boxId, node: { type: "markup", id: boxId, name: "Tracts through this box", markupType: "roi", frame: "RAS", center: c, size: [20, 20, 20], visible: true, locked: false, points: [], source: { mrmlClass: "vtkMRMLMarkupsROINode" }, origin: { local: true } } as unknown as MrsonNode });
+    // TEN VOXELS OF THE SCAN A SIDE, not a length (Ron, 2026-10-20: "did you forget about scales?"): 20 mm on a 2 mm grid.
+    const g = live.nodes.get(scan.frameIds[0] ?? "")?.ijkToRAS as number[] | undefined;
+    const vox = g && g.length >= 12 ? Math.max(...[0, 1, 2].map((a) => Math.hypot(g[a], g[4 + a], g[8 + a]))) : 2;
+    const side = 10 * vox;
+    live.write({ op: "put", id: boxId, node: { type: "markup", id: boxId, name: "Tracts through this box", markupType: "roi", frame: "RAS", center: c, size: [side, side, side], visible: true, locked: false, points: [], source: { mrmlClass: "vtkMRMLMarkupsROINode" }, origin: { local: true } } as unknown as MrsonNode });
     void boxMoved(scan);
   }
   async function boxMoved(scan: Scan) {
@@ -1494,22 +1508,56 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     const idx = throughBox(w.sl, box);
     // THE ROW'S OWN CHOICES STAY WHEN THE BOX MOVES (Ron, 2026-10-20: "I selected a custom color. Everytime I move the
     // box, the color gets reset"): the lines are made again; the color and the eye are carried over from the row before.
-    const before = groups.find((g) => g.scan === scan.browserId && g.by === "box");
+    const styleKey = `${scan.browserId}|box`;
+    keepStyle(styleKey, groups.find((g) => g.scan === scan.browserId && g.by === "box"));
     for (let i = groups.length - 1; i >= 0; i--) if (groups[i].scan === scan.browserId && groups[i].by === "box") groups.splice(i, 1);
-    if (idx.length) groups.push({ id: ++groupSeq, name: "Through the box", scan: scan.browserId, strands: idx.map((i) => w.sl[i]), visible: before?.visible ?? true, method, unnamed: true, by: "box",
-      ...(before?.color !== undefined ? { color: before.color } : {}) });
-    // Which tract most of them belong to, said in the line under the box.
+    if (idx.length) groups.push({ id: ++groupSeq, name: "Through the box", scan: scan.browserId, strands: idx.map((i) => w.sl[i]), method, unnamed: true, by: "box", ...styleFor(styleKey) });
+    boxLines.set(scan.browserId, await linesSaid("the box", w, idx));
+    console.info(`diffusion box: ${idx.length} lines in ${Math.round(performance.now() - t0)} ms`);
+    redraw3d(); render();
+  }
+  /** The line under a place: how many lines pass through it, and the named tract with the most of them. */
+  async function linesSaid(what: string, w: Whole, idx: number[]): Promise<string> {
+    if (!idx.length) return `No lines pass through ${what}.`;
     const count = new Map<string, number>();
     for (const i of idx) { const k = `${w.named.tract[i]}:${w.named.side[i]}`; count.set(k, (count.get(k) ?? 0) + 1); }
     const model = await tractCloud(); tractCountModel = model;
     const OTHER = model.json.tracts.length - 1;
-    // The commonest NAMED tract: in the deep white matter most lines through a small box have no name.
+    // The commonest NAMED tract: in the deep white matter most lines through a small place have no name.
     const top = [...count.entries()].filter(([k]) => Number(k.split(":")[0]) !== OTHER).sort((a, b) => b[1] - a[1])[0];
     const topName = top ? tractLabel(model.json.tracts[Number(top[0].split(":")[0])].abbr, model.json.tracts[Number(top[0].split(":")[0])].name, Number(top[0].split(":")[1])) : "";
-    boxLines.set(scan.browserId, idx.length ? `Through the box: ${idx.length.toLocaleString()} lines${topName ? `; the named tract with the most of them: ${topName} (${Math.round(100 * top[1] / idx.length)}%)` : ", none of them named"}` : "No lines pass through the box.");
-    console.info(`diffusion box: ${idx.length} lines in ${Math.round(performance.now() - t0)} ms`);
+    return `Through ${what}: ${idx.length.toLocaleString()} lines${topName ? `; the named tract with the most of them: ${topName} (${Math.round(100 * top[1] / idx.length)}%)` : ", none of them named"}`;
+  }
+  /** THROUGH A STRUCTURE: the whole brain's lines that pass through a segment's voxels, as one row named after it. */
+  async function throughStructure(scan: Scan, key: string) {
+    const target = segmentChoices(scan).find((c) => c.key === key);
+    const styleKey = `${scan.browserId}|${key}`, lineKey = styleKey;
+    keepStyle(styleKey, groups.find((g) => g.scan === scan.browserId && g.by === "through" && g.throughKey === key));
+    const drop = () => { for (let i = groups.length - 1; i >= 0; i--) if (groups[i].scan === scan.browserId && groups[i].by === "through" && groups[i].throughKey === key) groups.splice(i, 1); };
+    if (!target?.seg.zarr) { drop(); throughs.get(scan.browserId)?.delete(key); throughLines.delete(lineKey); redraw3d(); render(); return; }
+    const t0 = performance.now();
+    const w = await ensureWholeBrain(scan).catch((e) => { say(`Tracts could not be shown: ${(e as Error).message}`); return undefined; }).finally(() => render());
+    if (!w) return;
+    const lab = (await fetchZarrVolumeNative(live.blobBase(), target.seg.zarr as ZarrDesc)).data;
+    const idx = throughVoxels(w.sl, { dims: target.seg.dims as number[], ijkToRAS: target.seg.ijkToRAS as number[], inside: (v) => Number(lab[v]) === target.labelValue });
+    drop();
+    if (idx.length) groups.push({ id: ++groupSeq, name: `Through ${target.label}`, scan: scan.browserId, strands: idx.map((i) => w.sl[i]), method, unnamed: true, by: "through", throughKey: key, ...styleFor(styleKey) });
+    throughLines.set(lineKey, await linesSaid(target.label, w, idx));
+    console.info(`diffusion through ${target.label}: ${idx.length} lines in ${Math.round(performance.now() - t0)} ms`);
     redraw3d(); render();
   }
+  // A segment shown through changes (Draw on the next slice, Paint, Undo): its lines are made again, a third of a second
+  // after the last change.
+  const throughQueued = new Map<string, number>();
+  live.subscribe((c) => {
+    if (!c.id) return;
+    for (const [scanId, keys] of throughs) for (const key of keys) {
+      if (!key.startsWith(`${c.id}#`)) continue;
+      const q = `${scanId}|${key}`;
+      clearTimeout(throughQueued.get(q));
+      throughQueued.set(q, setTimeout(() => { throughQueued.delete(q); const s = scans().find((x) => x.browserId === scanId); if (s) void throughStructure(s, key); }, 300) as unknown as number);
+    }
+  });
   // THE BOX'S OWN SCAN, whichever is chosen (finding 5); a quarter second between updates while it is dragged (finding 12).
   live.subscribe((c) => {
     const owner = [...boxes].find(([, b]) => b === c.id)?.[0];
@@ -1854,7 +1902,17 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
           if (busy) { const p = document.createElement("p"); p.className = "sl-hint"; p.textContent = busy; ch.append(p); }
         }
       } else {
-        // THROUGH A PLACE: one box.
+        // THROUGH A PLACE: a structure of this patient (one drawn in the Segment Editor), or one box.
+        const mine = throughs.get(scan.browserId) ?? new Set<string>();
+        const choices = segmentChoices(scan);
+        const ts = document.createElement("select");
+        ts.append(new Option(choices.length ? "Add the lines through a structure…" : "no structure of this patient yet", ""));
+        for (const c of choices) if (!mine.has(c.key)) ts.append(new Option(c.label, c.key));
+        ts.disabled = !choices.length || !!busy;
+        ts.title = "Shows the lines that pass through a structure of this patient, as a row of their own; they follow the structure as it is edited. Draw one in the Segment Editor (Draw) on a slice the tract crosses.";
+        ts.onchange = () => { const k = ts.value; if (!k) return; if (!throughs.has(scan.browserId)) throughs.set(scan.browserId, new Set()); throughs.get(scan.browserId)!.add(k); void throughStructure(scan, k); };
+        shell.row(ch, "Structure").append(ts);
+        for (const k of mine) { const t = throughLines.get(`${scan.browserId}|${k}`); if (t) { const p = document.createElement("p"); p.className = "sl-hint"; p.style.margin = "4px 0"; p.textContent = t; ch.append(p); } }
         const bId = boxes.get(scan.browserId), has = !!(bId && live.nodes.get(bId)), bLine = boxLines.get(scan.browserId);
         if (bLine && has) { const p = document.createElement("p"); p.className = "sl-hint"; p.style.margin = "4px 0"; p.textContent = bLine; ch.append(p); }
         const bar = shell.actions(ch);
@@ -2006,7 +2064,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
         addRowMenu(row, () => {
           const acts: RowAction[] = [
             { label: "Rename", run: () => startEditing(nm, base, (v) => { for (const g of all) g.label = v; render(); }) },
-            { label: "Remove", run: () => { for (const g of all) groups.splice(groups.indexOf(g), 1); redraw3d(); render(); } },
+            { label: "Remove", run: () => { for (const g of all) { groups.splice(groups.indexOf(g), 1); if (g.throughKey) { throughs.get(g.scan)?.delete(g.throughKey); throughLines.delete(`${g.scan}|${g.throughKey}`); } } redraw3d(); render(); } },
             { label: "Remove stray lines…", title: "Drag a rectangle around lines to take them out of this tract, in the 3D view or a slice; each removal can be undone.", run: () => { void removeStray(all, base); } },
           ];
           if (undoStack.some((u) => all.includes(u.g))) acts.push({ label: "Undo the last removal", title: "Puts back the lines the last rectangle took out of this tract.", run: () => undoRemoval(all) });
