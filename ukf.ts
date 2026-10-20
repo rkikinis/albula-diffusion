@@ -36,20 +36,21 @@
 //     are made by `seedsInVoxels` with a fixed pseudo-random sequence, so runs repeat exactly.
 
 import { type DiffusionSeries, isotropicVolumes } from "./dwi.ts";
+import { tuned } from "./scale.ts";
 
 export const UKF_RULE = 1;
 
 export interface UkfOptions {
   freeWater?: boolean;          // default true (Simple2T_FW)
   Qm?: number; Ql?: number; Qw?: number; Rs?: number;   // defaults 0.001, 50, 0.0015, 0.02 (the original's for 2T)
-  stepLength?: number;          // mm, default 0.3
-  recordLength?: number;        // mm, default 0.9 (a point every 3 steps)
-  maxHalfFiberLength?: number;  // mm, default 250
+  stepLength?: number;          // mm, default 0.3 on a clinical grid (ukfLengths: in voxels of the scan elsewhere)
+  recordLength?: number;        // mm, default 0.9 (a point every 3 steps); scales with the step (ukfLengths)
+  maxHalfFiberLength?: number;  // mm, default 250 (834 steps); scales with the step (ukfLengths)
   seedingThreshold?: number;    // FA of the seed tensor, default 0.18
   stoppingFA?: number;          // default 0.15
   stoppingThreshold?: number;   // mean predicted signal, default 0.1
   p0?: number;                  // initial covariance, default 0.01
-  sigmaSignal?: number;         // mm, default: the smallest voxel size
+  sigmaSignal?: number;         // mm, default: the smallest voxel size on clinical grids (ukfSigma)
 }
 
 /** The data the filter reads: signals divided by the mean b=0, voxel-major, and the geometry. */
@@ -384,6 +385,40 @@ export interface UkfFiber {
 
 export interface UkfResult { fibers: UkfFiber[]; seedsUsed: number; seedsRejected: number; steps: number; projections: number; ms: number }
 
+/** UKFTractography's own lengths (cli.cc defaults): stepLength 0.3 mm, recordLength 0.9 mm, maxHalfFiberLength 250 mm. */
+export const UKF_STEP_MM = 0.3, UKF_RECORD_MM = 0.9, UKF_MAX_HALF_MM = 250;
+/**
+ * THE STEP IN VOXELS OF THE SCAN (Ron, 2026-10-20: "did you forget about scales? from astrophysics to electron
+ * microscope"). The original's 0.3 mm is 0.15 voxel of its 2 mm grid; it is kept EXACTLY while it lies between 0.05 and
+ * 0.5 voxel -- every grid from 0.6 to 6 mm, so the port's agreement with the original (828 of 838 fibers within 0.1 mm)
+ * and every clinical result stay bit for bit -- and held to that range outside it (a mouse's 0.1 mm grid and a 1e-6 mm
+ * one: half a voxel, 0.05 mm on the mouse's; a 3e19 mm grid: a twentieth). The record spacing and the longest half
+ * fiber scale with the step, so a half fiber is at most 834 steps at any scale (250 mm on the original's grid, about a
+ * head's width) and its stored points as many as the original's. A step the caller gives (in mm) is used as given.
+ */
+export function ukfLengths(voxel: ArrayLike<number>, opts: Pick<UkfOptions, "stepLength" | "recordLength" | "maxHalfFiberLength">): { step: number; perRecord: number; maxSteps: number } {
+  const vox = Math.min(voxel[0], voxel[1], voxel[2]);
+  const k = opts.stepLength === undefined ? tuned(UKF_STEP_MM, vox, 0.05, 0.5) / UKF_STEP_MM : 1;
+  const step = opts.stepLength ?? UKF_STEP_MM * k;
+  const perRecord = Math.max(1, Math.round((opts.recordLength ?? UKF_RECORD_MM) * k / step));
+  const maxSteps = Math.ceil((opts.maxHalfFiberLength ?? UKF_MAX_HALF_MM) * k / step);
+  return { step, perRecord, maxSteps };
+}
+
+/**
+ * THE SIGNAL'S SMOOTHING, IN VOXELS OF THE SCAN (the same day, found by the test at 1 parsec voxels): the original's
+ * Interp3Signal weighs the 27 neighbors by exp(-d² / σ), d in mm and σ the voxel in mm (sigmaSignal's default), so the
+ * weight of a neighbor n voxels away is exp(-n² · v) with v the voxel's number of mm -- exp(-2n²) on a 2 mm grid. Kept
+ * EXACTLY on grids of 0.6 to 6 mm (the step's range above; every clinical result as before), and held to the kernel of
+ * the nearest end outside it: at 1 nm voxels every neighbor weighed alike (a plain 3×3×3 mean), at 1 pc none but the
+ * center voxel -- and that only when the point is exactly on it, so every fiber stopped at its seed.
+ */
+export function ukfSigma(voxel: ArrayLike<number>, opts: Pick<UkfOptions, "sigmaSignal">): number {
+  if (opts.sigmaSignal !== undefined) return opts.sigmaSignal;
+  const v = Math.min(voxel[0], voxel[1], voxel[2]);
+  return v >= 0.6 && v <= 6 ? v : v * v / (v < 0.6 ? 0.6 : 6);
+}
+
 /** Points (voxel coordinates) around each seed voxel: the voxel center, and with k > 1 also k − 1 offsets of 0.5 voxel
  *  in fixed pseudo-random directions (the original draws them with rand(); fixed here so runs repeat). */
 export function seedsInVoxels(voxels: [number, number, number][], perVoxel = 1): number[][] {
@@ -400,10 +435,9 @@ export function seedsInVoxels(voxels: [number, number, number][], perVoxel = 1):
 export function trackUkf(data: UkfData, seeds: number[][], opts: UkfOptions = {}): UkfResult {
   const t0 = performance.now();
   const f = makeFilter(data, opts), n = f.n, fw = f.fw, G = data.G;
-  const step = opts.stepLength ?? 0.3, perRecord = Math.max(1, Math.round((opts.recordLength ?? 0.9) / step));
-  const maxSteps = Math.ceil((opts.maxHalfFiberLength ?? 250) / step), p0 = opts.p0 ?? 0.01;
+  const { step, perRecord, maxSteps } = ukfLengths(data.voxel, opts), p0 = opts.p0 ?? 0.01;
   const seedFA = opts.seedingThreshold ?? 0.18, stopFA = opts.stoppingFA ?? 0.15, stopSignal = opts.stoppingThreshold ?? 0.1;
-  const sigma = opts.sigmaSignal ?? Math.min(...data.voxel), M = data.ijkToRAS, [nx, ny, nz] = data.dims;
+  const sigma = ukfSigma(data.voxel, opts), M = data.ijkToRAS, [nx, ny, nz] = data.dims;
   const z = new Float64Array(G), yp = new Float64Array(G);
   const inBrain = (p: number[]) => {
     const i = Math.round(p[0]), j = Math.round(p[1]), k = Math.round(p[2]);

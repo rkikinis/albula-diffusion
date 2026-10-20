@@ -56,5 +56,19 @@ Deno.test("the outline of the crossings: one loop around the bundle, its own sma
   assert(around && small && around !== small, "each loop encloses its own crossings");
   for (const p of small) assert(Math.abs(Math.hypot(p[0] - 22, p[1] + 5) - 1) < 0.6, "the stray fiber's loop lies about 1 mm from it");
   for (const l of loops) for (const p of l) assertEquals(p[2], z, "on the slice");
-  assertEquals(crossingOutlines([], [0, 0, 0], [1, 0, 0], [0, 1, 0]), []);
+  assertEquals(crossingOutlines([], [0, 0, 0], [1, 0, 0], [0, 1, 0], 1), []);
+});
+
+// THE SAME OUTLINE AT 1 nm, 1 mm AND 1 pc VOXELS (Ron, 2026-10-20: "did you forget about scales?"): the bundle and the
+// stray fiber above with every length times a voxel and the radius one voxel give the same two loops; a fixed 0.5 mm
+// cell had put all of them in one cell at 1 nm and drawn none at 1 pc.
+Deno.test("the outline at 1 nm, 1 mm and 1 pc voxels: the same two loops, near the crossings", () => {
+  for (const v of [1e-6, 1, 3.086e19]) {
+    const z = 7 * v, bundle: [number, number, number][] = [];
+    for (let k = 0; k < 40; k++) bundle.push([(10 + 1.5 * Math.cos(k)) * v, (-5 + 1.5 * Math.sin(k * 1.3)) * v, z]);
+    const loops = crossingOutlines([...bundle, [22 * v, -5 * v, z]], [0, 0, z], [1, 0, 0], [0, 1, 0], v);
+    assertEquals(loops.length, 2, `${v} mm voxels`);
+    for (const p of loops[0].concat(loops[1])) assert(Math.abs(p[0] / v) < 40 && Math.abs(p[1] / v) < 40, "the loops near the crossings");
+  }
+  assertEquals(crossingOutlines([[0, 0, 0]], [0, 0, 0], [1, 0, 0], [0, 1, 0], 0), [], "no radius, no outline");
 });

@@ -1,7 +1,7 @@
 // The Tract review's own arithmetic (review.ts): which streamlines are judged, on which side, at which levels.
 //   deno test -A --no-check --config ../../src/SlicerLive/deno.jsonc review.test.ts
 import { assert, assertEquals } from "jsr:@std/assert@1";
-import { carriedVerdict, CST, cstOf, dorsalTo, ventralOf, fibersFingerprint, frameAxial, frameCoronal, inPlane, intoFrame, levelsFromPair, levelsOf, mergeCase, midlineX, sideToJudge, type Review, type ReviewFile } from "./review.ts";
+import { carriedVerdict, CST, cstOf, dorsalTo, ventralOf, fibersFingerprint, frameAxial, frameCoronal, inPlane, intoFrame, levelsFromPair, levelsOf, mergeCase, midlineX, reviewSizes, sideToJudge, type Review, type ReviewFile } from "./review.ts";
 import type { TractSetData } from "./tracts-dicom.ts";
 
 /** A synthetic corticospinal tract as the real ones are (the test cases, 2026-10-06): 60 fibers from z = -40 (brainstem)
@@ -165,4 +165,16 @@ Deno.test("the tract without the fibers dorsal to a border: crossing behind the 
   const through = (y: number) => new Float32Array([0, y, -5, 0, y, 5]);
   const r = ventralOf([through(3), through(-3), through(2), new Float32Array([0, 0, 10, 0, 0, 20])], b);
   assertEquals([r.kept.length, r.removed, r.notCrossing], [3, 1, 1]);
+});
+
+// THE TUBE AND THE OUTLINE IN VOXELS OF THE T1 (Ron, 2026-10-20: "did you forget about scales?"): as they were on
+// clinical grids, held to a sane number of voxels at 1 nm and 1 pc.
+Deno.test("the review's tube and outline: 0.35 mm and 1 mm on a 1 mm T1, a sane number of voxels at 1 nm and 1 pc", () => {
+  assertEquals(reviewSizes(1), { tube: 0.35, outline: 1 });
+  assertEquals(reviewSizes(0.9), { tube: 0.35, outline: 1 });
+  assertEquals(reviewSizes(undefined), { tube: 0.35, outline: 1 });
+  for (const v of [1e-6, 3.086e19]) {
+    const s = reviewSizes(v);
+    assert(s.tube / v >= 0.1 - 1e-9 && s.tube / v <= 0.5 + 1e-9 && s.outline / v >= 0.5 - 1e-9 && s.outline / v <= 2 + 1e-9, `${v} mm voxels: ${s.tube / v}, ${s.outline / v} voxels`);
+  }
 });

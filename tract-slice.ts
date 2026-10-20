@@ -60,11 +60,16 @@ export function trimEnds(f: Float32Array, mm: number): Float32Array | null {
  * THE OUTLINE OF WHERE A TRACT CROSSES A SLICE (Ron, 2026-10-06, on the Tract review: dots hide the direction-colored
  * map under them, and that map is what shows the tract in the posterior limb of the internal capsule and in front of the
  * substantia nigra). Every crossing is widened to a disk of `radiusMm`, and the edge of their union is returned as
- * closed loops in RAS mm: the bundle becomes one outline with the map visible inside it, a stray fiber a small circle
- * of its own. `e1`, `e2` are the slice's in-plane axes (unit vectors), `origin` a point on it. Grid: `cellMm`.
+ * closed loops in RAS: the bundle becomes one outline with the map visible inside it, a stray fiber a small circle
+ * of its own. `e1`, `e2` are the slice's in-plane axes (unit vectors), `origin` a point on it.
+ * THE GRID IS A SIZE OF THE DATA, not 0.5 mm (Ron, 2026-10-20: "did you forget about scales? from astrophysics to
+ * electron microscope"): `radius` is the caller's, from the image's voxel, and the cell half of it by default (0.5 mm
+ * for the 1 mm radius on a 1 mm T1, as before), so the grid has as many cells at any scale. A grid past four million
+ * cells (a slice-wide spray) draws no outline.
  */
-export function crossingOutlines(points: [number, number, number][], origin: [number, number, number], e1: [number, number, number], e2: [number, number, number], radiusMm = 1, cellMm = 0.5): [number, number, number][][] {
-  if (!points.length) return [];
+export function crossingOutlines(points: [number, number, number][], origin: [number, number, number], e1: [number, number, number], e2: [number, number, number], radius: number, cell = radius / 2): [number, number, number][][] {
+  if (!points.length || !(radius > 0) || !(cell > 0) || !Number.isFinite(radius) || !Number.isFinite(cell)) return [];
+  const radiusMm = radius, cellMm = cell;
   const uv = points.map((p) => {
     const d = [p[0] - origin[0], p[1] - origin[1], p[2] - origin[2]];
     return [d[0] * e1[0] + d[1] * e1[1] + d[2] * e1[2], d[0] * e2[0] + d[1] * e2[1] + d[2] * e2[2]];

@@ -28,7 +28,7 @@
 // floored at 100 in the original's 1e-6 units (0.1 here) in F, H and the step. At most 192 gradients.
 
 import type { UkfData, UkfOptions } from "./ukf.ts";
-import { seedTensor, signalAt } from "./ukf.ts";
+import { seedTensor, signalAt, ukfLengths, ukfSigma } from "./ukf.ts";
 
 // The STATE LAYOUT keeps the free-water model's slots for both models (x at 0, P at 11, P⁻¹ at 132); the plain model's
 // 10×10 matrices use the first 100 floats of their slot.
@@ -599,9 +599,9 @@ export async function trackUkfGpu(device: GPUDevice, data: UkfData, seeds: numbe
   if (!fw && opts.onePass) throw new Error("onePass is written for the free-water model's 11 state values");
   const G = data.G;
   if (G > MAXG) throw new Error(`${G} gradients: the graphics-card UKF holds at most ${MAXG}`);
-  const step = opts.stepLength ?? 0.3, perRecord = Math.max(1, Math.round((opts.recordLength ?? 0.9) / step));
-  const maxSteps = Math.ceil((opts.maxHalfFiberLength ?? 250) / step), cap = Math.ceil(maxSteps / perRecord) + 2;
-  const sigma = opts.sigmaSignal ?? Math.min(...data.voxel), p0 = opts.p0 ?? 0.01, seedFA = opts.seedingThreshold ?? 0.18;
+  // The step in voxels of the scan, 0.3 mm on clinical grids as the original's (ukf.ts ukfLengths).
+  const { step, perRecord, maxSteps } = ukfLengths(data.voxel, opts), cap = Math.ceil(maxSteps / perRecord) + 2;
+  const sigma = ukfSigma(data.voxel, opts), p0 = opts.p0 ?? 0.01, seedFA = opts.seedingThreshold ?? 0.18;
   const [nx, ny, nz] = data.dims;
   // THE PACKED SIGNAL AND THE COMPILED SHADER, ONCE PER SCAN AND DEVICE (2026-10-01 night): a whole brain is tracked in 13
   // batches, and each batch packed the whole signal again and compiled the shader again -- on the processor, and in

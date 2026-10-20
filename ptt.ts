@@ -18,6 +18,7 @@
 // would -- to be confirmed with DIPY before saying more; here both use one unit (mm).
 import { shBasis, shCount } from "./csd.ts";
 import type { FodVolume } from "./csd-volume.ts";
+import { tuned } from "./scale.ts";
 
 export interface PttOptions {
   /** Step, in voxels (default 0.25). */
@@ -30,12 +31,14 @@ export interface PttOptions {
   fodThreshold?: number;
   /** Rejection sampling: candidates to estimate the largest support (10), tries (100). */
   samples?: number; tries?: number;
-  /** Longest streamline, mm (default 250). */
+  /** Longest streamline, mm (default 250 on a clinical grid: 125 voxels of a 2 mm grid; see pttStreamline). */
   maxLengthMm?: number;
   seed?: number;
 }
 
-const DEF = { stepVoxels: 0.25, probeVoxels: 1, probeQuality: 4, minRadiusVoxels: 1, fodThreshold: 0.1, samples: 10, tries: 100, maxLengthMm: 250, seed: 20261001 };
+const DEF = { stepVoxels: 0.25, probeVoxels: 1, probeQuality: 4, minRadiusVoxels: 1, fodThreshold: 0.1, samples: 10, tries: 100, seed: 20261001 };
+/** The longest streamline, as published for clinical grids (250 mm). */
+const MAX_LENGTH_MM = 250;
 
 function rng(seed: number): () => number {
   let a = seed >>> 0;
@@ -102,6 +105,11 @@ export class FodField {
 export function pttStreamline(field: FodField, seed: number[], o: Required<PttOptions>, rand: () => number): Float32Array | undefined {
   const vox = field.voxelMm, step = o.stepVoxels * vox, probe = o.probeVoxels * vox, kMax = 1 / (o.minRadiusVoxels * vox);
   const dq = probe / (o.probeQuality - 1), thr = o.fodThreshold;
+  // THE LONGEST STREAMLINE IN VOXELS OF THE SCAN (Ron, 2026-10-20: "did you forget about scales?"): 250 mm while that is
+  // 50 to 500 voxels (grids of 0.5 to 5 mm, unchanged), held to that range outside it. A fixed 250 mm stopped every
+  // streamline after one step on a 3e19 mm grid and allowed 5e8 steps a half on a 1e-6 mm one; now at most 1,000 steps
+  // a half at the 0.25-voxel step.
+  const maxLen = o.maxLengthMm ?? tuned(MAX_LENGTH_MM, vox, 50, 500);
   const d0 = field.peakDirection(seed);
   if (!d0 || field.value(seed, d0) < thr) return undefined;
   const halves: number[][][] = [];
@@ -130,7 +138,7 @@ export function pttStreamline(field: FodField, seed: number[], o: Required<PttOp
       [pos, T, N, B] = transport(pos, T, N, B, k1, k2, step);
       if (!field.inside(pos)) break;
       pts.push(pos.slice()); length += step;
-      if (length >= o.maxLengthMm / 2) break;
+      if (length >= maxLen / 2) break;
     }
     halves.push(pts);
   }

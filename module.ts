@@ -57,7 +57,7 @@ import { databaseFileUrl, nrrdDecode, nrrdGeometry, nrrdSplitHeader } from "albu
 import { addRowMenu, fitList, makeNameEditable, pickRectangle, type PickedRectangle, saveToDownloads, showInDownloads, sliceOffset, sliceOrientation, startEditing, viewBanner, type RowAction } from "albula";
 import { assetUrl, holdDrawing, seriesDicomFiles, startPlacing, restartSegmentationServer, startSegmentationServer, synthstripBrainMask, type BrainMaskResult } from "albula";
 import { createSegmentation, growIntoSegmentation, openDicomDatabase, openLoadFromDisk, paintInto, registerProbeRows, registerRayHits, runAction, saveSegmentationToDicom, showHideAllState } from "albula";
-import { buildTractIndex, tractsNear, type TractIndex } from "./tract-index.ts";
+import { buildTractIndex, firstAlongRay, tractsNear, type TractIndex } from "./tract-index.ts";
 import { sliceCrossings, trimEnds } from "./tract-slice.ts";
 import { readMore, tnaLine, tractInfo, tractLabel, tractNote } from "./tract-info.ts";
 import { faceNear as nearOnFace, isTumorName, matchesSearch, patientOf, pickAnatomy, tractGroupKey, TRACT_GROUPS, withoutLastRun } from "./face.ts";
@@ -71,6 +71,7 @@ import { DIFFUSION_REFERENCES } from "./references.ts";
 import { estimateResponses, kernelFromResponses } from "./responses.ts";
 import { csdVolume, type FodVolume } from "./csd-volume.ts";
 import { trackPttParallel } from "./ptt.ts";
+import { drawnRadius, finestVoxel, lengthText, MAX_RAY_STEPS, probeReach, raySlack, seedRadius } from "./scale.ts";
 
 /** A diffusion scan in the scene: a sequence whose frames carry diffusion values. */
 interface Scan { browserId: string; name: string; frameIds: string[]; bValues: number[]; study?: string; patient?: string;
@@ -146,7 +147,7 @@ type Method = "ukf" | "single" | "ptt";
 type Show = "b0" | "fa" | "colorfa";
 
 const FIELD_KEY = "diffusion-tracts";
-const RADIUS = { tubes: 0.5, lines: 0.12 };                // mm: SlicerDMRI's tube radius is 0.5 mm; "lines" are hairlines
+// The drawn, probed and seeded sizes (tube radius, probe reach, seed sphere) are in voxels of the scan: scale.ts.
 const SEEDS_PER_BATCH = 1500;                               // tracking yields to the page between batches
 /** Palette ids: 1..216 are the direction colors; named groups take ids from TRACT_ID up (the palette ends at 255). */
 const GRAY_ID = 217, TRACT_ID = 218;
@@ -1214,7 +1215,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       busy = "Making tracts…"; render();
       try {
         const c = await ensureFit(scan);
-        const sl = await follow(c, seedsInSphere(p, 5));
+        const sl = await follow(c, seedsInSphere(p, seedRadius(finestVoxel(c.fit.ijkToRAS))));
         addGroup(`Seed ${groups.filter((x) => x.name.startsWith("Seed")).length + 1}`, scan, sl);
         say(sl.length ? `${sl.length.toLocaleString()} tracts from the point clicked.` : "No tracts from that point: it is not in white matter (FA below the stopping value).");
       } catch (e) { say(`Tracts could not be made: ${(e as Error).message}`); }
@@ -1231,7 +1232,13 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
   /** "Add lines" is running: its button shows the step (tracking with a percentage, naming, measuring). */
   let adding = false;
   const trimCache = new WeakMap<TractGroup, { key: string; strands: Float32Array[] }>();
-  const voxelMm = (scanId: string) => { const M = computed.get(scanId)?.fit.ijkToRAS; return M ? Math.min(...[0, 1, 2].map((c) => Math.hypot(M[c], M[4 + c], M[8 + c]))) : 2; };
+  // The scan's finest voxel: the fit's grid, else the scan's own (tracts stored at import are shown without a fit);
+  // 2 mm only when the scan has neither.
+  const scanVoxel = (scanId: string) => finestVoxel(computed.get(scanId)?.fit.ijkToRAS) ??
+    finestVoxel(live.nodes.get(scans().find((s) => s.browserId === scanId)?.frameIds[0] ?? "")?.ijkToRAS as number[] | undefined);
+  const voxelMm = (scanId: string) => scanVoxel(scanId) ?? 2;
+  /** The finest voxel of the scans whose tracts are shown: the drawn and probed sizes are made from it. */
+  const shownVoxel = (shown: TractGroup[]) => { let v: number | undefined; for (const id of new Set(shown.map((g) => g.scan))) { const f = scanVoxel(id); if (f !== undefined && (v === undefined || f < v)) v = f; } return v; };
   function drawn(g: TractGroup): Float32Array[] {
     const mm = trimVoxels * voxelMm(g.scan), key = `${mm}:${g.strands.length}`;
     const hit = trimCache.get(g); if (hit && hit.key === key) return hit.strands;
@@ -1244,9 +1251,10 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
   /** The tracts shown, indexed for the data probe (tract-index.ts); rebuilt with every redraw. */
   // THE PROBE'S INDEX IS MADE WHEN IT IS NEEDED, not at every redraw (Ron, 2026-10-20: "when I initiate a box there is a
   // pause"; it was a third of the box's redraw): the first probe after a change makes it, or a quiet half second does.
-  let probeShown: TractGroup[] = [], probeBuilt: { ix: TractIndex; shown: TractGroup[] } | undefined, probeStale = false, probeIdle: number | undefined;
+  // Its cell is a voxel of the scans shown (tract-index.ts), and the probe's sizes are made from the same voxel.
+  let probeShown: TractGroup[] = [], probeBuilt: { ix: TractIndex; shown: TractGroup[]; voxel: number | undefined } | undefined, probeStale = false, probeIdle: number | undefined;
   const probeIndexNow = () => {
-    if (probeStale) { probeStale = false; probeBuilt = probeShown.length ? { ix: buildTractIndex(probeShown.map(drawn)), shown: probeShown } : undefined; }
+    if (probeStale) { probeStale = false; const voxel = shownVoxel(probeShown); probeBuilt = probeShown.length ? { ix: buildTractIndex(probeShown.map(drawn), voxel), shown: probeShown, voxel } : undefined; }
     return probeBuilt;
   };
   /** LEFT AND RIGHT IN TWO SHADES OF THE TRACT'S COLOR (the v3 mockup, "drawn in two shades of its color"; critic
@@ -1315,7 +1323,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     // look changed or the coloring is by direction, and the field goes.
     if (!strands.length) { const old = field; field = undefined; fieldSlots = null; view.removeField(FIELD_KEY); old?.destroy?.(); return; }
     const old = field;
-    field = new FiberField(device, strands, { radius: RADIUS[drawAs], bundleColors: pal });
+    field = new FiberField(device, strands, { radius: drawnRadius(drawAs, shownVoxel(shownNow)), bundleColors: pal });
     view.setField(FIELD_KEY, field);
     old?.destroy?.();
     lap("field");
@@ -2165,7 +2173,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     const tw = document.createElement("span"); tw.style.cssText = "display:flex;gap:6px;align-items:center";
     const ti = document.createElement("input"); ti.type = "number"; ti.min = "0"; ti.max = "6"; ti.step = "0.5"; ti.value = String(trimVoxels); ti.style.width = "4em";
     const vmm = voxelMm(scan.browserId);
-    const tl2 = document.createElement("span"); tl2.style.opacity = "0.7"; tl2.textContent = `voxels at each end (≈ ${(trimVoxels * vmm).toFixed(1)} mm on this ${vmm.toFixed(1)} mm grid)`;
+    const tl2 = document.createElement("span"); tl2.style.opacity = "0.7"; tl2.textContent = `voxels at each end (≈ ${lengthText(trimVoxels * vmm, true)} on this ${lengthText(vmm, true)} grid)`;
     ti.title = "Draws every tract a little shorter at both ends, where the fibers fan out. The tracts themselves stay whole.";
     ti.onchange = () => { const v = Number(ti.value); trimVoxels = Number.isFinite(v) ? Math.max(0, Math.min(6, v)) : trimVoxels; redraw3d(); render(); };
     tw.append(ti, tl2);
@@ -2204,40 +2212,28 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
   let howOpen = false;
 
   // THE TUBES IN FRONT, for the 3D probe (critic, 2026-10-01, finding 4): where along the mouse ray the first shown tube
-  // is -- the first step that comes within a tube's radius (plus half a millimeter) of a drawn streamline point.
+  // is -- the first step that comes within a tube's radius (plus half a millimeter on a clinical grid: raySlack) of a
+  // drawn streamline point. The step is that slack, and never more than MAX_RAY_STEPS of them (Ron, 2026-10-20: "did you
+  // forget about scales?" -- a fixed 0.5 mm step was 6e21 steps across a 3e19 mm grid's tracts).
   registerRayHits((o, d) => {
     const probeIndex = probeIndexNow();
     if (!probeIndex) return null;
-    const r = (drawAs === "tubes" ? RADIUS.tubes : RADIUS.lines) + 0.5;
-    // Only the stretch of the ray inside the box around the shown streamlines (the slab method).
-    const { xyz } = probeIndex.ix;
-    let t0 = 0, t1 = Infinity;
-    for (let a = 0; a < 3; a++) {
-      let lo = Infinity, hi = -Infinity;
-      for (let i = a; i < xyz.length; i += 3) { if (xyz[i] < lo) lo = xyz[i]; if (xyz[i] > hi) hi = xyz[i]; }
-      lo -= r; hi += r;
-      if (Math.abs(d[a]) < 1e-12) { if (o[a] < lo || o[a] > hi) return null; continue; }
-      const ta = (lo - o[a]) / d[a], tb = (hi - o[a]) / d[a];
-      t0 = Math.max(t0, Math.min(ta, tb)); t1 = Math.min(t1, Math.max(ta, tb));
-    }
-    if (!(t1 >= t0)) return null;
-    for (let t = t0; t <= t1; t += 0.5) {
-      const p: [number, number, number] = [o[0] + d[0] * t, o[1] + d[1] * t, o[2] + d[2] * t];
-      if (tractsNear(probeIndex.ix, p, r).length) return t;
-    }
-    return null;
+    const slack = raySlack(probeIndex.voxel);
+    return firstAlongRay(probeIndex.ix, o, d, drawnRadius(drawAs, probeIndex.voxel) + slack, slack, MAX_RAY_STEPS);
   });
 
   // THE TRACTS IN THE DATA PROBE (Ron, 2026-10-01: "the tracts are not in the data probe"): every tract shown that passes
-  // within 2 mm of the point under the pointer, with its color, how many of its fibers, and how close.
+  // within 2 mm of the point under the pointer (on a clinical grid; in voxels of the scan elsewhere: probeReach), with
+  // its color, how many of its fibers, and how close.
   registerProbeRows((ras) => {
     const probeIndex = probeIndexNow();
     if (!probeIndex) return [];
-    return tractsNear(probeIndex.ix, ras, 2).slice(0, 6).map((h) => {
+    const reach = probeReach(probeIndex.voxel), within = lengthText(reach);
+    return tractsNear(probeIndex.ix, ras, reach).slice(0, 6).map((h) => {
       const g = probeIndex!.shown[h.set];
       const c = g.tract !== undefined ? tractColor(g.tract, tractCount) : g.unnamed ? UNNAMED : undefined;
       return { color: c ? [c[0], c[1], c[2]] as [number, number, number] : undefined,
-        text: `${g.label ?? g.name} · ${h.streamlines} fiber${h.streamlines === 1 ? "" : "s"} within 2 mm${h.closestMm < 0.5 ? "" : `, closest ${h.closestMm.toFixed(1)} mm`}`, source: "fiber tracts (Diffusion)" };
+        text: `${g.label ?? g.name} · ${h.streamlines} fiber${h.streamlines === 1 ? "" : "s"} within ${within}${h.closestMm < reach / 4 ? "" : `, closest ${lengthText(h.closestMm, true)}`}`, source: "fiber tracts (Diffusion)" };
     });
   });
 

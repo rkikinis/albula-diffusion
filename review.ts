@@ -21,12 +21,22 @@ import { b0Path, colorFaBrainstemPath, colorFaPath, colorFaTalairachPath, dicomT
 import { apply4, inv4, mul4, type M4 } from "./head-frame.ts";
 import { gateTract, type GateResult, type PackedColorMap } from "./cst-gates.ts";
 import { crossingOutlines, sliceCrossings } from "./tract-slice.ts";
+import { finestVoxel, tuned } from "./scale.ts";
 
 export const CST = "corticospinal tract";
-/** The fibers' one color (the mockup's yellow) and their tube radius in 3D (mm). */
-const FIBER_RGB: [number, number, number] = [1, 0.83, 0.3], RADIUS = 0.35;
-/** How far around each crossing the outline on a slice runs (mm; about 1 voxel of the 1 mm T1). */
+/** The fibers' one color (the mockup's yellow) and their tube radius in 3D (0.35 mm on clinical grids: see reviewSizes). */
+const FIBER_RGB: [number, number, number] = [1, 0.83, 0.3], RADIUS_MM = 0.35;
+/** How far around each crossing the outline on a slice runs (1 mm: 1 voxel of the 1 mm T1; see reviewSizes). */
 const OUTLINE_MM = 1;
+/**
+ * THE TUBE AND THE OUTLINE IN VOXELS OF THE IMAGES SHOWN, not in mm (Ron, 2026-10-20: "did you forget about scales? from
+ * astrophysics to electron microscope"): of the finest image in the scene (the T1). Both were set by eye on clinical
+ * grids and stay as they are there -- the tube 0.35 mm while that is 0.1 to 0.5 voxel (grids of 0.7 to 3.5 mm), the
+ * outline 1 mm while that is 0.5 to 2 voxels (0.5 to 2 mm) -- and are held to those ranges outside them.
+ */
+export function reviewSizes(voxel: number | undefined): { tube: number; outline: number } {
+  return { tube: tuned(RADIUS_MM, voxel, 0.1, 0.5), outline: tuned(OUTLINE_MM, voxel, 0.5, 2) };
+}
 const REVIEWS = "tract-review.json";
 
 // ── The pure parts (tested: review.test.ts) ─────────────────────────────────────────────────────────────────────────
@@ -420,6 +430,12 @@ function registerTractReview(ctx: ModuleContext): void {
   }
   /** Is the case still what the scene shows (its T1 or map loaded)? After File › Close Scene it is not. */
   const hasCase = () => [...live.nodes.values()].some((n) => n.type === "image");
+  /** The finest voxel of the images in the scene (the T1), for the tube's and the outline's sizes. */
+  const drawSizes = () => {
+    let v: number | undefined;
+    for (const n of live.nodes.values()) if (n.type === "image") { const f = finestVoxel(n.ijkToRAS as number[] | undefined); if (f !== undefined && (v === undefined || f < v)) v = f; }
+    return reviewSizes(v);
+  };
   const sceneHasData = () => [...live.nodes.values()].some((n) => n.type === "image" || n.type === "segmentation");
 
   /** What draw() last showed, with its filters' counts: the panel's numbers are these, never a fresh computation that the
@@ -429,7 +445,7 @@ function registerTractReview(ctx: ModuleContext): void {
   function draw(sl: Float32Array[]): void {
     const view = live.view; if (!view) return;
     const old = field; field = undefined; drawn = sl;
-    if (sl.length) { field = new FiberField(device, sl.map((p) => ({ points: p, bundle: 1 })), { radius: RADIUS, bundleColors: { 1: [...FIBER_RGB, 1] } }); view.setField("tract-review", field); }
+    if (sl.length) { field = new FiberField(device, sl.map((p) => ({ points: p, bundle: 1 })), { radius: drawSizes().tube, bundleColors: { 1: [...FIBER_RGB, 1] } }); view.setField("tract-review", field); }
     else view.removeField("tract-review");
     old?.destroy?.();
     drawDots();
@@ -445,7 +461,7 @@ function registerTractReview(ctx: ModuleContext): void {
       const o: [number, number, number] = [nrm[0] * d, nrm[1] * d, nrm[2] * d];
       const cs = drawn.length ? sliceCrossings([drawn], { origin: o, normal: nrm }) : [];
       const unit = (a: number, b: number, c: number): [number, number, number] => { const l = Math.hypot(a, b, c) || 1; return [a / l, b / l, c / l]; };
-      const loops = !showOutline ? [] : crossingOutlines(cs.map((c) => c.p), o, unit(m[0], m[4], m[8]), unit(m[1], m[5], m[9]), OUTLINE_MM);
+      const loops = !showOutline ? [] : crossingOutlines(cs.map((c) => c.p), o, unit(m[0], m[4], m[8]), unit(m[1], m[5], m[9]), drawSizes().outline);
       // Ron's crus borders, on the view whose level they were drawn at.
       // A border is drawn on the view whose plane it was drawn on (the head frame's: the same normal and offset; the
       // scanner's: an axial view at its z).
