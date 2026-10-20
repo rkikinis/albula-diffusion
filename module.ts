@@ -1242,16 +1242,30 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
   /** How many tracts the model names (Other included), once it is loaded; colors need it. */
   let tractCount = 43;
   /** The tracts shown, indexed for the data probe (tract-index.ts); rebuilt with every redraw. */
-  let probeIndex: { ix: TractIndex; shown: TractGroup[] } | undefined;
+  // THE PROBE'S INDEX IS MADE WHEN IT IS NEEDED, not at every redraw (Ron, 2026-10-20: "when I initiate a box there is a
+  // pause"; it was a third of the box's redraw): the first probe after a change makes it, or a quiet half second does.
+  let probeShown: TractGroup[] = [], probeBuilt: { ix: TractIndex; shown: TractGroup[] } | undefined, probeStale = false, probeIdle: number | undefined;
+  const probeIndexNow = () => {
+    if (probeStale) { probeStale = false; probeBuilt = probeShown.length ? { ix: buildTractIndex(probeShown.map(drawn)), shown: probeShown } : undefined; }
+    return probeBuilt;
+  };
   /** LEFT AND RIGHT IN TWO SHADES OF THE TRACT'S COLOR (the v3 mockup, "drawn in two shades of its color"; critic
    *  2026-10-15, finding 20): the left side a darker shade, so a lopsided tract can be read in the view. */
   const sideShade = (c: RGBA, side?: number): RGBA => side === -1 ? [c[0] * 0.62, c[1] * 0.62, c[2] * 0.62, c[3]] : c;
+  /** Where the last 3D redraw's time went (ms), for the timing lines. */
+  const redrawMs = { index: 0, slices: 0, field: 0 };
   function redraw3d() {
+    let t = performance.now();
+    const lap = (k: keyof typeof redrawMs) => { const now = performance.now(); redrawMs[k] = Math.round(now - t); t = now; };
+    redrawMs.index = redrawMs.slices = redrawMs.field = 0;
     const shownNow = groups.filter((g) => g.visible);
-    probeIndex = shownNow.length ? { ix: buildTractIndex(shownNow.map(drawn)), shown: shownNow } : undefined;
+    probeShown = shownNow; probeStale = true;
+    clearTimeout(probeIdle); probeIdle = setTimeout(() => { probeIndexNow(); }, 500) as unknown as number;
+    lap("index");
     const view = live.view;
     if (!view) return;
     drawSliceCrossings();
+    lap("slices");
     // SHOWING OR HIDING IS A COLOR, NOT A REBUILD (render-audit 2026-10-15, finding 5: hiding one tract built a new field
     // from every shown one -- 36 MB sent to the card, the page held 0.4 s -- and hiding the last or showing the first
     // rebuilt the 3D shader). Each group in the field has its own palette slot; when every group to be shown is already
@@ -1304,6 +1318,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     field = new FiberField(device, strands, { radius: RADIUS[drawAs], bundleColors: pal });
     view.setField(FIELD_KEY, field);
     old?.destroy?.();
+    lap("field");
   }
   /** The groups in the tract field and their palette slots (null: the next change rebuilds it), and the look it was made in. */
   let fieldSlots: Map<TractGroup, { id: number; n: number; color: RGBA }> | null = null;
@@ -1394,6 +1409,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
   let wantOutline = false;
   const boxes = new Map<string, string>(), boxLines = new Map<string, string>();
   let boxQueued = false;
+  const lastBox = new Map<string, string>();
   /** THROUGH A STRUCTURE (Ron, 2026-10-20, on the cingulum: "the box is not a good way to capture it"): per scan the
    *  segments whose lines are shown, each its own row, made again whenever its voxels change (Draw, Paint, Undo). */
   const throughs = new Map<string, Set<string>>(), throughLines = new Map<string, string>();
@@ -1499,12 +1515,17 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     // THE BOX DELETED (in Markups): its lines and its words go too (finding 10).
     if (!n || !n.center || !n.size) {
       for (let i = groups.length - 1; i >= 0; i--) if (groups[i].scan === scan.browserId && groups[i].by === "box") groups.splice(i, 1);
-      boxes.delete(scan.browserId); boxLines.delete(scan.browserId); redraw3d(); render(); return;
+      boxes.delete(scan.browserId); boxLines.delete(scan.browserId); lastBox.delete(scan.browserId); redraw3d(); render(); return;
     }
     const t0 = performance.now();
     const w = await ensureWholeBrain(scan).catch((e) => { say(`Tracts could not be shown: ${(e as Error).message}`); return undefined; }).finally(() => render());
     if (!w) return;
     const box = { center: n.center as number[], size: n.size as number[], orientation: n.orientation as number[] | undefined };
+    // THE SAME BOX TWICE IS ONE PASS: putting it writes the node, and the node's change came back a quarter second later
+    // and redid everything (Ron, 2026-10-20: "when I initiate a box there is a pause").
+    const boxKey = JSON.stringify([box, w.sl.length]);
+    if (lastBox.get(scan.browserId) === boxKey && groups.some((g) => g.scan === scan.browserId && g.by === "box")) return;
+    lastBox.set(scan.browserId, boxKey);
     const idx = throughBox(w.sl, box);
     // THE ROW'S OWN CHOICES STAY WHEN THE BOX MOVES (Ron, 2026-10-20: "I selected a custom color. Everytime I move the
     // box, the color gets reset"): the lines are made again; the color and the eye are carried over from the row before.
@@ -1513,8 +1534,9 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     for (let i = groups.length - 1; i >= 0; i--) if (groups[i].scan === scan.browserId && groups[i].by === "box") groups.splice(i, 1);
     if (idx.length) groups.push({ id: ++groupSeq, name: "Through the box", scan: scan.browserId, strands: idx.map((i) => w.sl[i]), method, unnamed: true, by: "box", ...styleFor(styleKey) });
     boxLines.set(scan.browserId, await linesSaid("the box", w, idx));
-    console.info(`diffusion box: ${idx.length} lines in ${Math.round(performance.now() - t0)} ms`);
+    const tSel = Math.round(performance.now() - t0);
     redraw3d(); render();
+    console.info(`diffusion box: ${idx.length} lines; chosen in ${tSel} ms, drawn in ${Math.round(performance.now() - t0) - tSel} ms (probe index ${redrawMs.index}, slices ${redrawMs.slices}, 3D ${redrawMs.field})`);
   }
   /** The line under a place: how many lines pass through it, and the named tract with the most of them. */
   async function linesSaid(what: string, w: Whole, idx: number[]): Promise<string> {
@@ -2184,6 +2206,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
   // THE TUBES IN FRONT, for the 3D probe (critic, 2026-10-01, finding 4): where along the mouse ray the first shown tube
   // is -- the first step that comes within a tube's radius (plus half a millimeter) of a drawn streamline point.
   registerRayHits((o, d) => {
+    const probeIndex = probeIndexNow();
     if (!probeIndex) return null;
     const r = (drawAs === "tubes" ? RADIUS.tubes : RADIUS.lines) + 0.5;
     // Only the stretch of the ray inside the box around the shown streamlines (the slab method).
@@ -2208,6 +2231,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
   // THE TRACTS IN THE DATA PROBE (Ron, 2026-10-01: "the tracts are not in the data probe"): every tract shown that passes
   // within 2 mm of the point under the pointer, with its color, how many of its fibers, and how close.
   registerProbeRows((ras) => {
+    const probeIndex = probeIndexNow();
     if (!probeIndex) return [];
     return tractsNear(probeIndex.ix, ras, 2).slice(0, 6).map((h) => {
       const g = probeIndex!.shown[h.set];
