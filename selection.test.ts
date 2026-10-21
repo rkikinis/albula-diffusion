@@ -71,3 +71,57 @@ Deno.test("through a structure: a line crossing a one-voxel-thick region counts,
 Deno.test("through a structure: an empty segment passes nothing", () => {
   assertEquals(throughVoxels([new Float32Array([1, 1, 1, 2, 2, 2])], { dims: [4, 4, 4], ijkToRAS: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], inside: () => false }), []);
 });
+
+Deno.test("through a structure: every line crossing a one-voxel layer drawn on a slice tilted 10-40 degrees counts (critic 2026-10-20, finding 1)", () => {
+  // A 64^3 grid of 2 mm voxels, not at the origin. The region is a disk of radius 15 voxels filled the way the Draw tool
+  // fills (core logic/fill-polygon.ts, copied, not imported): a voxel is in when its center lies within half a voxel of
+  // the plane along the grid axis most aligned with the plane's normal -- one voxel per column, a staircase whose steps
+  // touch only along an edge. The half-voxel samples missed 1-17% of these lines.
+  const dims = [64, 64, 64], h = 2, ijk = [h, 0, 0, -61, 0, h, 0, -67, 0, 0, h, -59, 0, 0, 0, 1];
+  const toRAS = (i: number, j: number, k: number) => [h * i - 61, h * j - 67, h * k - 59];
+  let seed = 7; const rnd = () => ((seed = (seed * 1103515245 + 12345) >>> 0) / 4294967296);
+  const dot = (a: number[], b: number[]) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  const unit = (a: number[]) => { const l = Math.hypot(a[0], a[1], a[2]); return a.map((x) => x / l); };
+  const cross = (a: number[], b: number[]) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+  const c = toRAS(31.3, 32.2, 30.7);   // the disk's center, off the voxel centers (no exact ties)
+  for (const deg of [10, 20, 30, 40]) {
+    // The plane's normal: tilted `deg` from the j axis (a coronal slice) about an oblique axis, so it steps in i and k.
+    const t = deg * Math.PI / 180, n = unit([Math.sin(t) * 0.8, Math.cos(t), Math.sin(t) * 0.6]);
+    let halfThick = 0;
+    for (let a = 0; a < 3; a++) halfThick = Math.max(halfThick, Math.abs(ijk[a] * n[0] + ijk[4 + a] * n[1] + ijk[8 + a] * n[2]));
+    halfThick *= 0.5;
+    const d0 = dot(c, n), lab = new Uint8Array(64 * 64 * 64);
+    let filled = 0;
+    for (let k = 0; k < 64; k++) for (let j = 0; j < 64; j++) for (let i = 0; i < 64; i++) {
+      const p = toRAS(i, j, k), off = [p[0] - c[0], p[1] - c[1], p[2] - c[2]], along = dot(off, n);
+      if (Math.abs(dot(p, n) - d0) > halfThick) continue;
+      if (Math.hypot(off[0] - along * n[0], off[1] - along * n[1], off[2] - along * n[2]) > 15 * h) continue;
+      lab[(k * 64 + j) * 64 + i] = 1; filled++;
+    }
+    assert(filled > 500, `${deg}: ${filled} voxels`);
+    // 2,000 straight lines crossing the disk within its inner 10 voxels, nearly along its normal, points 3 mm apart
+    // (more than a voxel); and 200 crossing the plane 20-25 voxels out, beside the disk.
+    const e1 = unit(cross(n, [1, 0, 0])), e2 = cross(n, e1);
+    const lines: Float32Array[] = [], across = 2000;
+    for (let s = 0; s < across + 200; s++) {
+      const r = (s < across ? 10 * Math.sqrt(rnd()) : 20 + 5 * rnd()) * h, a = 2 * Math.PI * rnd();
+      const at = [0, 1, 2].map((q) => c[q] + r * (Math.cos(a) * e1[q] + Math.sin(a) * e2[q]));
+      const dir = unit([0, 1, 2].map((q) => n[q] + 0.3 * (rnd() - 0.5) * e1[q] + 0.3 * (rnd() - 0.5) * e2[q]));
+      const start = -10 * h - 3 * rnd(), pts: number[] = [];
+      for (let u = start; u < 10 * h; u += 3) pts.push(at[0] + u * dir[0], at[1] + u * dir[1], at[2] + u * dir[2]);
+      lines.push(Float32Array.from(pts));
+    }
+    const got = throughVoxels(lines, { dims, ijkToRAS: ijk, inside: (v) => lab[v] === 1 });
+    assertEquals(got.filter((x) => x < across).length, across, `${deg} degrees: lines crossing the disk`);
+    assertEquals(got.filter((x) => x >= across).length, 0, `${deg} degrees: lines beside it`);
+  }
+});
+
+Deno.test("through a structure: a line through only the corner of a voxel counts; one missing it by a hair does not", () => {
+  const dims = [10, 10, 10], ijk = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+  const inside = (v: number) => v === (5 * 10 + 5) * 10 + 5;   // voxel (5, 5, 5): [4.5, 5.5) on each axis
+  // Two diagonal pieces whose ends lie in the neighbors (4, 5, 5) and (5, 4, 5): x + y = 9.02 cuts the voxel's corner
+  // (x and y from 4.5 to 4.52); x + y = 8.98 passes just beside it.
+  const clip = new Float32Array([4, 5.02, 5, 5.02, 4, 5]), miss = new Float32Array([4, 4.98, 5, 4.98, 4, 5]);
+  assertEquals(throughVoxels([clip, miss], { dims, ijkToRAS: ijk, inside }), [0]);
+});

@@ -56,33 +56,70 @@ export function throughBox(sl: Float32Array[], box: Box): number[] {
 export interface Voxels { dims: number[]; ijkToRAS: number[]; inside: (index: number) => boolean }
 
 /**
- * The streamlines that pass through a segment: a point of the line, or of the line between two of its points sampled
- * every half voxel, falls in a voxel of it. The half-voxel sampling matters for a region drawn on one slice -- one
- * voxel thick -- which a line stepping more than a voxel at a time would otherwise jump over.
+ * The streamlines that pass through a segment: the line between two consecutive points (or a single point) passes
+ * through a voxel of it. Every voxel each piece of the line passes through is visited, exactly, by walking the grid
+ * from face to face (Amanatides and Woo 1987, "A fast voxel traversal algorithm for ray tracing") -- not by samples
+ * rounded to the nearest voxel center. A region drawn on a slice tilted against the grid is one voxel thick and steps
+ * from one layer to the next where its voxels touch only along an edge; samples slipped through those steps and missed
+ * up to 17% of the lines crossing it at 40 degrees (qa/2026-10-20-night-sweep-editor-colors.md, finding 1).
+ * A voxel is the cube of the points that round to it (as voxelsOf reads a point). Each piece is first cut to the
+ * segment's box, so a piece that misses the box costs six divisions and no lookup.
  */
 export function throughVoxels(sl: Float32Array[], v: Voxels): number[] {
-  const [nx, ny, nz] = v.dims, m = v.ijkToRAS, inv = inverse(m);
-  // The segment's box in voxels: a point outside it is not looked up.
+  const [nx, ny, nz] = v.dims, inv = inverse(v.ijkToRAS), inside = v.inside;
+  // The segment's box in voxels: a piece of line outside it is not walked.
   const lo = [nx, ny, nz], hi = [-1, -1, -1];
   for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
-    if (!v.inside((k * ny + j) * nx + i)) continue;
+    if (!inside((k * ny + j) * nx + i)) continue;
     if (i < lo[0]) lo[0] = i; if (j < lo[1]) lo[1] = j; if (k < lo[2]) lo[2] = k;
     if (i > hi[0]) hi[0] = i; if (j > hi[1]) hi[1] = j; if (k > hi[2]) hi[2] = k;
   }
   if (hi[0] < 0) return [];
-  const step = 0.5 * Math.min(...[0, 1, 2].map((c) => Math.hypot(m[c], m[4 + c], m[8 + c])));
-  const at = (x: number, y: number, z: number) => {
-    const i = Math.round(inv[0] * x + inv[1] * y + inv[2] * z + inv[3]), j = Math.round(inv[4] * x + inv[5] * y + inv[6] * z + inv[7]), k = Math.round(inv[8] * x + inv[9] * y + inv[10] * z + inv[11]);
-    return i >= lo[0] && i <= hi[0] && j >= lo[1] && j <= hi[1] && k >= lo[2] && k <= hi[2] && v.inside((k * ny + j) * nx + i);
+  const [i0, j0, k0] = lo, [i1, j1, k1] = hi;
+  // In cell coordinates (voxel index + 0.5) voxel i is [i, i + 1), so the box is [lo, hi + 1] on each axis.
+  const X0 = i0, X1 = i1 + 1, Y0 = j0, Y1 = j1 + 1, Z0 = k0, Z1 = k1 + 1;
+  const cell = (x: number, y: number, z: number) => {
+    const i = Math.floor(x), j = Math.floor(y), k = Math.floor(z);
+    return i >= i0 && i <= i1 && j >= j0 && j <= j1 && k >= k0 && k <= k1 && inside((k * ny + j) * nx + i);
+  };
+  // One piece of line, a -> b in cell coordinates: cut to the box (slabs), then walked voxel by voxel.
+  const piece = (ax: number, ay: number, az: number, bx: number, by: number, bz: number): boolean => {
+    const dx = bx - ax, dy = by - ay, dz = bz - az;
+    let t0 = 0, t1 = 1;
+    if (dx === 0) { if (ax < X0 || ax > X1) return false; }
+    else { let ta = (X0 - ax) / dx, tb = (X1 - ax) / dx; if (ta > tb) { const s = ta; ta = tb; tb = s; } if (ta > t0) t0 = ta; if (tb < t1) t1 = tb; if (t0 > t1) return false; }
+    if (dy === 0) { if (ay < Y0 || ay > Y1) return false; }
+    else { let ta = (Y0 - ay) / dy, tb = (Y1 - ay) / dy; if (ta > tb) { const s = ta; ta = tb; tb = s; } if (ta > t0) t0 = ta; if (tb < t1) t1 = tb; if (t0 > t1) return false; }
+    if (dz === 0) { if (az < Z0 || az > Z1) return false; }
+    else { let ta = (Z0 - az) / dz, tb = (Z1 - az) / dz; if (ta > tb) { const s = ta; ta = tb; tb = s; } if (ta > t0) t0 = ta; if (tb < t1) t1 = tb; if (t0 > t1) return false; }
+    // The voxel where the piece enters the box (held inside it against rounding on the box's faces).
+    let i = Math.floor(ax + t0 * dx), j = Math.floor(ay + t0 * dy), k = Math.floor(az + t0 * dz);
+    i = i < i0 ? i0 : i > i1 ? i1 : i; j = j < j0 ? j0 : j > j1 ? j1 : j; k = k < k0 ? k0 : k > k1 ? k1 : k;
+    const si = dx > 0 ? 1 : dx < 0 ? -1 : 0, sj = dy > 0 ? 1 : dy < 0 ? -1 : 0, sk = dz > 0 ? 1 : dz < 0 ? -1 : 0;
+    // The line's t at the next face on each axis, and t across one voxel.
+    let mx = si > 0 ? (i + 1 - ax) / dx : si < 0 ? (i - ax) / dx : Infinity;
+    let my = sj > 0 ? (j + 1 - ay) / dy : sj < 0 ? (j - ay) / dy : Infinity;
+    let mz = sk > 0 ? (k + 1 - az) / dz : sk < 0 ? (k - az) / dz : Infinity;
+    const ex = si ? si / dx : Infinity, ey = sj ? sj / dy : Infinity, ez = sk ? sk / dz : Infinity;
+    for (;;) {
+      if (inside((k * ny + j) * nx + i)) return true;
+      if (mx <= my && mx <= mz) { if (mx > t1) return false; i += si; mx += ex; if (i < i0 || i > i1) return false; }
+      else if (my <= mz) { if (my > t1) return false; j += sj; my += ey; if (j < j0 || j > j1) return false; }
+      else { if (mz > t1) return false; k += sk; mz += ez; if (k < k0 || k > k1) return false; }
+    }
   };
   const out: number[] = [];
+  const m0 = inv[0], m1 = inv[1], m2 = inv[2], m3 = inv[3] + 0.5, m4 = inv[4], m5 = inv[5], m6 = inv[6], m7 = inv[7] + 0.5, m8 = inv[8], m9 = inv[9], m10 = inv[10], m11 = inv[11] + 0.5;
   for (let n = 0; n < sl.length; n++) {
     const p = sl[n];
-    let hit = p.length >= 3 && at(p[0], p[1], p[2]);
-    for (let q = 3; !hit && q < p.length; q += 3) {
-      const dx = p[q] - p[q - 3], dy = p[q + 1] - p[q - 2], dz = p[q + 2] - p[q - 1];
-      const parts = Math.max(1, Math.ceil(Math.hypot(dx, dy, dz) / step));
-      for (let s = 1; s <= parts && !hit; s++) hit = at(p[q - 3] + dx * s / parts, p[q - 2] + dy * s / parts, p[q - 1] + dz * s / parts);
+    if (p.length < 3) continue;
+    let ax = m0 * p[0] + m1 * p[1] + m2 * p[2] + m3, ay = m4 * p[0] + m5 * p[1] + m6 * p[2] + m7, az = m8 * p[0] + m9 * p[1] + m10 * p[2] + m11;
+    let hit = p.length < 6 && cell(ax, ay, az);
+    for (let q = 3; !hit && q + 2 < p.length; q += 3) {
+      const x = p[q], y = p[q + 1], z = p[q + 2];
+      const bx = m0 * x + m1 * y + m2 * z + m3, by = m4 * x + m5 * y + m6 * z + m7, bz = m8 * x + m9 * y + m10 * z + m11;
+      hit = piece(ax, ay, az, bx, by, bz);
+      ax = bx; ay = by; az = bz;
     }
     if (hit) out.push(n);
   }
