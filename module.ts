@@ -28,7 +28,7 @@
 // This file belongs to the diffusion extension and registers through core's queue (render/demos/extension-modules.ts);
 // core never imports it. Critic round 2026-09-29 (qa/2026-09-29-diffusion-module.md) answered in this version.
 import type { ModuleContext } from "albula";
-import { MAJOR_TRACTS, queueModule, registerAfterLoad } from "albula";
+import { MAJOR_TRACTS, queueModule, registerAfterLoad, registerSceneState } from "albula";
 import type { MrsonNode } from "albula";
 import { fetchZarrVolumeNative, type ZarrDesc } from "albula";
 import { packRGB24 } from "albula";
@@ -1497,6 +1497,105 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       }
     }
     return shown;
+  });
+
+  // ── WHAT THIS MODULE SHOWS, IN A SAVED SCENE (core's logic/scene/extensions.ts, SDK 18; Ron, 2026-10-21: "yes, build
+  // the scene state for extensions", after a scene of Steve's Prisma scan came back without its tracts). Per diffusion
+  // scan, by its series UID: how tracts are chosen, the tracts ticked by name and the tracts near a structure (the
+  // structure by its segmentation's series UID and label value, and the distance), each row's eye, color and name by
+  // tract (the atlas's abbreviation) and side, and the map over the T1; for the module, lines or tubes and the coloring.
+  // A scene without this block (saved before it, or by a window without this extension) gets what a load of the scan
+  // shows: the major tracts and the Color FA. NOT KEPT in version 1, and said when there was one: the lines through a
+  // box or a structure, tracts made here from hand-placed seeds, "Add lines".
+  const SCENE_STATE_VERSION = 1;
+  interface RowState { tract: string; side: number; visible: boolean; color?: RGBA | "direction"; label?: string }
+  interface ScanState { series: string; way?: Way; map?: Show | null; byName: string[]; near?: { segmentation: string; labelValue: number; withinMm: number }; rows: RowState[]; notKept?: string[] }
+  const seriesOfScan = (s: Scan) => ((live.nodes.get(s.frameIds[0])?.origin as Record<string, unknown> | undefined)?.seriesInstanceUID as string | undefined);
+  const segSeries = (seg: MrsonNode) => { const o = (seg.origin as Record<string, unknown> | undefined) ?? {}; return (o.savedSeriesInstanceUID ?? o.seriesInstanceUID) as string | undefined; };
+  /** Which of the scan's maps the slice views show now: Color FA or FA over the T1, the corrected b0 under it, or none. */
+  const mapShown = (s: Scan): Show | null => {
+    const c = computed.get(s.browserId), m = storedMaps.get(s.browserId);
+    const ids: [Show, string | undefined][] = [["colorfa", m?.colorfa], ["colorfa", c?.colorFaId], ["fa", m?.fa], ["fa", c?.faId], ["b0", m?.b0], ["b0", c?.b0Id]];
+    const cmp = [...live.nodes.values()].find((n) => n.type === "sliceComposite");
+    const refs = (cmp?.refs as Record<string, string[]> | undefined) ?? {};
+    const on = new Set([...(refs.foreground ?? []), ...(refs.background ?? [])]);
+    return ids.find(([, id]) => id && on.has(id))?.[0] ?? null;
+  };
+  const waitIdle = async (ms = 60_000) => { const t = performance.now(); while (busy && performance.now() - t < ms) await new Promise((r) => setTimeout(r, 100)); };
+  registerSceneState({
+    name: "albula-diffusion", version: SCENE_STATE_VERSION,
+    save: () => {
+      const model = tractCountModel;
+      const abbr = (t: number) => (model?.json.tracts[t] as { abbr?: string } | undefined)?.abbr;
+      const out: ScanState[] = [];
+      for (const s of scans()) {
+        const series = seriesOfScan(s);
+        if (!series) continue;
+        const mine = groups.filter((g) => g.scan === s.browserId);
+        const rowsOf = (gs: TractGroup[]) => gs.flatMap((g) => { const a = g.tract !== undefined ? abbr(g.tract) : undefined; return a ? [{ tract: a, side: g.side ?? 0, visible: g.visible, ...(g.color !== undefined ? { color: g.color } : {}), ...(g.label !== undefined ? { label: g.label } : {}) }] : []; });
+        const named = mine.filter((g) => g.by === "name");
+        const runs = mine.filter((g) => g.run);
+        const target = runs.length && chosen === s.browserId ? segmentChoices(s).find((c) => c.key === near) : undefined;
+        const targetSeries = target ? segSeries(target.seg) : undefined;
+        const notKept = [...new Set(mine.filter((g) => g.by === "box" || g.by === "through" || (!g.run && g.by !== "name") || g.more).map((g) => g.by === "box" ? "the lines through the box" : g.by === "through" ? "the lines through a structure" : g.more ? "lines added to a tract" : "tracts made from seeds placed here"))];
+        out.push({
+          series, way: wayBy.get(s.browserId)?.way, map: mapShown(s),
+          byName: [...new Set(named.map((g) => g.tract !== undefined ? abbr(g.tract) : undefined).filter((x): x is string => !!x))],
+          ...(target && targetSeries ? { near: { segmentation: targetSeries, labelValue: target.labelValue, withinMm } } : {}),
+          rows: rowsOf([...named, ...(target ? runs : [])]),
+          ...(notKept.length ? { notKept } : {}),
+        });
+      }
+      return out.length ? { scans: out, drawAs, colorBy } : undefined;
+    },
+    restore: async (state, version) => {
+      const applied: string[] = [], missing: string[] = [];
+      // The scene's series are in; this module's scans may still be reading their stored tracts.
+      const t0 = performance.now();
+      while (!scans().length && performance.now() - t0 < 10_000) await new Promise((r) => setTimeout(r, 100));
+      if (!scans().length) return state ? { missing: ["no diffusion scan of the scene is loaded"] } : {};
+      const model = await tractCloud(); tractCountModel = model;
+      const indexOf = (a: string) => model.json.tracts.findIndex((t: { abbr?: string }) => t.abbr === a);
+      const showNamed = async (s: Scan, list: readonly string[]) => { let n = 0; for (const a of list) { const i = indexOf(a); if (i < 0) continue; await waitIdle(); await showByName(s, i, true); n++; } return n; };
+      const showMapNow = async (s: Scan, m: Show) => { await waitIdle(); chosen = s.browserId; await showMap(s, m); };
+      if (state === undefined) {
+        // A SCENE WITHOUT THIS MODULE'S BLOCK: what a load of the scan shows (registerAfterLoad above, and the Color FA).
+        let n = 0;
+        for (const s of scans()) { if (!(await findStored(s))) continue; n++; await showNamed(s, MAJOR_TRACTS); await showMapNow(s, "colorfa"); }
+        redraw3d(); render();
+        return n ? { applied: [`the major tracts and the Color FA (${n === 1 ? "the scene kept no tract choice" : `${n} scans; the scene kept no tract choice`})`] } : {};
+      }
+      if (version !== SCENE_STATE_VERSION) return { missing: [`its saved state is version ${version}; this build reads version ${SCENE_STATE_VERSION}`] };
+      const st = state as { scans?: ScanState[]; drawAs?: typeof drawAs; colorBy?: typeof colorBy };
+      if (st.drawAs === "tubes" || st.drawAs === "lines") drawAs = st.drawAs;
+      if (st.colorBy === "tract" || st.colorBy === "direction") colorBy = st.colorBy;
+      for (const e of st.scans ?? []) {
+        const s = scans().find((x) => seriesOfScan(x) === e.series);
+        if (!s) { missing.push("a diffusion scan the scene names is not loaded"); continue; }
+        await findStored(s).catch(() => null);
+        if (e.way) wayBy.set(s.browserId, { way: e.way, touched: true });
+        const n = await showNamed(s, e.byName ?? []);
+        if (n) applied.push(`${n} tract${n === 1 ? "" : "s"} by name`);
+        if (e.near) {
+          const c = segmentChoices(s).find((x) => segSeries(x.seg) === e.near!.segmentation && x.labelValue === e.near!.labelValue);
+          if (!c) missing.push("the structure the tracts were near is not loaded");
+          else { chosen = s.browserId; near = c.key; withinMm = e.near.withinMm; await waitIdle(); await makeTracts(); await waitIdle(); applied.push(`the tracts within ${withinMm} mm of ${c.label}`); }
+        }
+        // Each row's eye, color and name, by tract and side.
+        for (const r of e.rows ?? []) {
+          const i = indexOf(r.tract);
+          for (const g of groups.filter((x) => x.scan === s.browserId && x.tract === i && (x.side ?? 0) === r.side && (x.by === "name" || x.run))) {
+            g.visible = r.visible;
+            if (r.color !== undefined) g.color = r.color; else delete g.color;
+            if (r.label !== undefined) g.label = r.label;
+          }
+        }
+        if (e.map) { await showMapNow(s, e.map); applied.push(e.map === "colorfa" ? "the Color FA" : e.map === "fa" ? "the FA" : "the corrected b0"); }
+        for (const k of e.notKept ?? []) missing.push(`${k} (not kept in a scene yet)`);
+      }
+      redraw3d(); render();
+      return { applied, missing };
+    },
   });
 
   /** THROUGH A PLACE: one box (a Markups box), put at the slice views' crossing; the streamlines through it follow it as
