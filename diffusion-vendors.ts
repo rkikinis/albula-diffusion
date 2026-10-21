@@ -187,7 +187,7 @@ const unitDir = (g: unknown): [number, number, number] | undefined => {
  * (0077,xx02) under "SlicerAlbula provenance 1"), whose PhaseEncodingDirection ("j-") is read when present. Returned:
  * the signed BIDS form when known ("j-"), else "ROW" / "COL", else undefined.
  */
-export function phaseEncodingOf(standard: unknown, raw?: Raw): string | undefined {
+export function phaseEncodingOf(standard: unknown, raw?: Raw, positive?: 0 | 1): string | undefined {
   if (raw) {
     const tag = privateTag(raw, "0077", "SlicerAlbula provenance 1", "02");
     const text = tag ? raw[tag]?.Value?.[0] : undefined;
@@ -195,9 +195,48 @@ export function phaseEncodingOf(standard: unknown, raw?: Raw): string | undefine
       try { const pe = (JSON.parse(text) as { PhaseEncodingDirection?: unknown }).PhaseEncodingDirection; if (typeof pe === "string" && /^[ijk]-?$/.test(pe)) return pe; } catch { /* not JSON: the standard attribute */ }
     }
   }
-  // ROW, or the column: COL in a single-frame image, COLUMN in an enhanced one.
+  // ROW, or the column: COL in a single-frame image, COLUMN in an enhanced one. With Siemens' sign (siemensPhasePositive),
+  // the signed voxel axis: "i"/"j" along the image's own row/column direction when positive, "i-"/"j-" when not.
   const s = String(standard ?? "").trim().toUpperCase();
-  return s === "ROW" ? "ROW" : s === "COL" || s === "COLUMN" ? "COL" : undefined;
+  const axis = s === "ROW" ? "i" : s === "COL" || s === "COLUMN" ? "j" : undefined;
+  if (axis && positive !== undefined) return positive ? axis : `${axis}-`;
+  return s === "ROW" ? "ROW" : axis ? "COL" : undefined;
+}
+
+/**
+ * SIEMENS' SIGN OF THE PHASE ENCODING (2026-10-21, Steve's Prisma scan): the standard gives the axis only, and on
+ * this XA30 scan both "AP" and "PA" said COLUMN, so the reversed partner could not be told from a same-direction scan
+ * and a computed map was taken as the partner. Siemens records PhaseEncodingDirectionPositive (1 or 0), which dcm2niix
+ * reads for its PhaseEncodingDirection: in XA software as (0021,xx1C) under "SIEMENS MR SDI 02" -- at the top level of
+ * a single-frame image, in each frame's (0021,xxFE) item (or the shared one) of an enhanced one; in VB/VE software in
+ * the CSA image header. CHECKED on that scan against dcm2niix's sidecars: dMRI_dir98_AP 1 / "j-", dMRI_dir98_PA 0 / "j",
+ * dMRI_dir99_AP 1 / "j-", dMRI_dir99_PA 1 / "j-" (that "PA" was not reversed). Only the RELATIVE sign is relied on
+ * (planning.ts correctWithReversed: reversed or not); dcm2niix's "j-" for 1 is the same sign after its flip of the rows.
+ */
+const siemensSign = new WeakMap<object, 0 | 1 | null>();
+export function siemensPhasePositive(raw?: Raw): 0 | 1 | undefined {
+  if (!raw) return undefined;
+  const known = siemensSign.get(raw);
+  if (known !== undefined) return known ?? undefined;
+  const CREATOR = "SIEMENS MR SDI 02";
+  const flag = (item: Raw | undefined): 0 | 1 | undefined => {
+    if (!item) return undefined;
+    const t = privateTag(item, "0021", CREATOR, "1C");
+    const v = t ? privateNumbers(item, t, "IS")[0] : undefined;
+    return v === 0 || v === 1 ? v : undefined;
+  };
+  const firstItem = (item: Raw | undefined, tag: string | undefined) => (tag && item ? ((item as Record<string, { Value?: unknown[] }>)[tag]?.Value?.[0] as Raw | undefined) : undefined);
+  const inGroup = (fg: Raw | undefined) => fg ? flag(firstItem(fg, privateTag(fg, "0021", CREATOR, "FE"))) ?? flag(fg) : undefined;
+  let v = flag(raw)
+    ?? inGroup(firstItem(raw, "52009230"))          // PerFrameFunctionalGroupsSequence, its first frame
+    ?? inGroup(firstItem(raw, "52009229"));         // SharedFunctionalGroupsSequence
+  if (v === undefined) {
+    const csa = bytesOf(raw, at(raw, "0029", "SIEMENS CSA HEADER", "10"));
+    const p = csa ? Number(parseCsa(csa).get("PhaseEncodingDirectionPositive")?.[0]) : NaN;
+    if (p === 0 || p === 1) v = p;
+  }
+  siemensSign.set(raw, v ?? null);
+  return v;
 }
 
 function diffusionKey(b: number, dir: [number, number, number] | undefined, source?: string, weak?: boolean, phaseEncoding?: string): VolumeKey {
@@ -223,7 +262,7 @@ export const diffusionInterpreter: VolumeInterpreter = {
   code: `rule${VENDOR_RULE}-${INTERPRETER_CODE}`,
   instance(ds, raw) {
     const d = diffusionOf(ds, raw as Raw);
-    return d ? diffusionKey(d.bValue, d.direction, d.source, d.weak, phaseEncodingOf(ds.InPlanePhaseEncodingDirection, raw as Raw)) : undefined;
+    return d ? diffusionKey(d.bValue, d.direction, d.source, d.weak, phaseEncodingOf(ds.InPlanePhaseEncodingDirection, raw as Raw, siemensPhasePositive(raw as Raw))) : undefined;
   },
   frame(group, top) {
     const diff = group("MRDiffusionSequence");
@@ -231,7 +270,7 @@ export const diffusionInterpreter: VolumeInterpreter = {
     if (b === undefined) return undefined;
     const seq = diff?.DiffusionGradientDirectionSequence;
     const item = (Array.isArray(seq) ? seq[0] : seq) as Record<string, unknown> | undefined;
-    return diffusionKey(b, unitDir(item?.DiffusionGradientOrientation), undefined, undefined, phaseEncodingOf(group("MRFOVGeometrySequence")?.InPlanePhaseEncodingDirection, top?.raw as Raw | undefined));
+    return diffusionKey(b, unitDir(item?.DiffusionGradientOrientation), undefined, undefined, phaseEncodingOf(group("MRFOVGeometrySequence")?.InPlanePhaseEncodingDirection, top?.raw as Raw | undefined, siemensPhasePositive(top?.raw as Raw | undefined)));
   },
   finish(images) {
     const series = new Set(images.filter((i) => ((i.volumeKeys?.diffusion?.meta.bValue as number | undefined) ?? 0) > 0).map((i) => i.seriesInstanceUID));

@@ -102,7 +102,9 @@ function recordedReversed(a?: string, b?: string): boolean | undefined {
  * b = 0-only series; then a smaller diffusion series with b = 0 images. One the record calls NOT reversed is skipped.
  */
 export function partnerOf(dwi: SeriesFacts, all: SeriesFacts[]): SeriesFacts | undefined {
-  const c = all.filter((s) => s.uid !== dwi.uid && s.studyUID === dwi.studyUID && hasB0(s) && s.volumes < dwi.volumes && samePlacement(s.ijkToRAS, dwi.ijkToRAS)
+  // Never a computed map (Siemens' TENSOR_B0 is a b = 0 image the scanner computed from the scan itself: on Steve's
+  // Prisma scan, 2026-10-21, it was taken as the partner of both scans).
+  const c = all.filter((s) => s.uid !== dwi.uid && s.studyUID === dwi.studyUID && !s.derived && hasB0(s) && s.volumes < dwi.volumes && samePlacement(s.ijkToRAS, dwi.ijkToRAS)
     && recordedReversed(dwi.phaseEncoding, s.phaseEncoding) !== false);
   return c.find((s) => recordedReversed(dwi.phaseEncoding, s.phaseEncoding) === true) ?? c.find(isB0Only) ?? c[0];
 }
@@ -162,7 +164,7 @@ export async function readSeries(dbDir: string, row: IndexSeries): Promise<ReadS
   const maker = String(header["00080070"]?.Value?.[0] ?? "");
   // A computed map by its ImageType values (ADC, trace, FA, exponential ADC), or an image Albula made. Not "DERIVED" alone:
   // a scan converted to DICOM (the BIDS import, other converters) says DERIVED and is still the scan.
-  const derived = (header["00080008"]?.Value ?? []).map((x) => String(x).toUpperCase()).some((v) => ["ADC", "TRACE", "TRACEW", "FA", "EXP", "EADC", "CALC_BV", "COLFA"].includes(v)) || maker === "SlicerAlbula";
+  const derived = (header["00080008"]?.Value ?? []).map((x) => String(x).toUpperCase()).some((v) => ["ADC", "TRACE", "TRACEW", "FA", "EXP", "EADC", "CALC_BV", "COLFA", "TENSOR", "TENSOR_B0"].includes(v)) || maker === "SlicerAlbula";
   return { facts: { uid: row.seriesUID, studyUID: row.studyUID, patientUID: row.patientUID, description: row.description, volumes: frames.length, bValues, directions: dirs.size,
     ...(frames[0] && diffusionOf(frames[0])?.phaseEncoding ? { phaseEncoding: diffusionOf(frames[0])!.phaseEncoding } : {}), ijkToRAS: frames[0]?.ijkToRAS ?? [], derived }, frames, header, instances: refs };
 }

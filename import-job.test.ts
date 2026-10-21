@@ -30,6 +30,12 @@ Deno.test("the reversed partner: the record's reversed pair first, then b = 0 on
   const wrongAxis = S("lr", "LR", [0, 0], { phaseEncoding: "i-" });
   assertEquals(partnerOf(scan, [scan, b0, recorded])?.uid, "rec");
   assertEquals(partnerOf(scan, [scan, b0])?.uid, "b0");
+  // A computed map is never the partner (Siemens' TENSOR_B0 on Steve's Prisma scan), and a "PA" the record says is NOT
+  // reversed is skipped for one that is (that scan's dMRI_dir99_PA was taken in the AP direction).
+  const tensorB0 = S("tb0", "dMRI_dir99_AP_TENSOR_B0", [0], { phaseEncoding: "j-", derived: true });
+  const notReversed = S("pa99", "dMRI_dir99_PA", [0, 0, 0], { phaseEncoding: "j-" });
+  assertEquals(partnerOf(scan, [scan, tensorB0, notReversed, recorded])?.uid, "rec");
+  assertEquals(partnerOf(scan, [scan, tensorB0, notReversed]), undefined);
   assertEquals(partnerOf(scan, [scan, wrongAxis]), undefined);
   // A short diffusion scan with its own b = 0 (PA, 7 volumes) is a partner, not a scan of its own (finding 7).
   const shortPA = dwi("pa7", 7, { phaseEncoding: "j" });

@@ -260,3 +260,21 @@ Deno.test("private elements are found in the block their creator reserved", asyn
   const bytes = new TextEncoder().encode("GEMS_PARM_01").buffer;                                                                 // implicit VR: creator as bytes
   assertEquals(privateTag({ "00430010": { Value: [bytes] } }, "0043", "GEMS_PARM_01", "39"), "00431039");
 });
+
+// Steve's Prisma scan (XA30, 2026-10-21): both "AP" and "PA" said COLUMN; the sign is Siemens' (0021,xx1C) under
+// "SIEMENS MR SDI 02", in each frame's (0021,xxFE) item of an enhanced file. The values below are that file's layout.
+Deno.test("Siemens' phase-encoding sign: XA enhanced (per frame), XA single-frame (top level), none without it", async () => {
+  const { phaseEncodingOf, siemensPhasePositive } = await import("./diffusion-vendors.ts");
+  const sdi = (v: number) => ({ "00210011": { vr: "LO", Value: ["SIEMENS MR SDI 02"] }, "0021111C": { vr: "IS", Value: [v] } });
+  const enhanced = (v: number) => ({ "52009230": { vr: "SQ", Value: [{ "00210011": { vr: "LO", Value: ["SIEMENS MR SDI 02"] }, "002111FE": { vr: "SQ", Value: [sdi(v)] } }] } });
+  assertEquals(siemensPhasePositive(enhanced(1)), 1);
+  assertEquals(siemensPhasePositive(enhanced(0)), 0);
+  assertEquals(siemensPhasePositive(sdi(0)), 0);
+  assertEquals(siemensPhasePositive({ "00210010": { vr: "LO", Value: ["SIEMENS MR SDS 01"] }, "0021101C": { vr: "IS", Value: [1] } }), undefined, "another creator's block");
+  assertEquals(siemensPhasePositive({}), undefined);
+  // The signed axis: along the image's own column when positive; the bare axis when the sign is unknown.
+  assertEquals(phaseEncodingOf("COLUMN", enhanced(1), 1), "j");
+  assertEquals(phaseEncodingOf("COLUMN", enhanced(0), 0), "j-");
+  assertEquals(phaseEncodingOf("ROW", {}, 1), "i");
+  assertEquals(phaseEncodingOf("COL", {}), "COL");
+});
