@@ -1559,31 +1559,58 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     return `Through ${what}: ${idx.length.toLocaleString()} lines${topName ? `; the named tract with the most of them: ${topName} (${Math.round(100 * top[1] / idx.length)}%)` : ", none of them named"}`;
   }
   /** THROUGH A STRUCTURE: the whole brain's lines that pass through a segment's voxels, as one row named after it. */
+  // THE NEWEST PASS WINS (critic 2026-10-20, finding 9; CONSTRAINTS: work that takes seconds checks, before publishing,
+  // that the result is still wanted): each pass takes a number per row; one that finds a newer number when its labels
+  // or its lines come back publishes nothing. throughVoxelsOf: the segmentation's stored pieces (#/zarr) the row's last
+  // pass was started on.
+  const throughGen = new Map<string, number>(), throughVoxelsOf = new Map<string, string>();
   async function throughStructure(scan: Scan, key: string) {
     const target = segmentChoices(scan).find((c) => c.key === key);
     const styleKey = `${scan.browserId}|${key}`, lineKey = styleKey;
-    keepStyle(styleKey, groups.find((g) => g.scan === scan.browserId && g.by === "through" && g.throughKey === key));
-    const drop = () => { for (let i = groups.length - 1; i >= 0; i--) if (groups[i].scan === scan.browserId && groups[i].by === "through" && groups[i].throughKey === key) groups.splice(i, 1); };
-    if (!target?.seg.zarr) { drop(); throughs.get(scan.browserId)?.delete(key); throughLines.delete(lineKey); redraw3d(); render(); return; }
+    const gen = (throughGen.get(lineKey) ?? 0) + 1;
+    throughGen.set(lineKey, gen);
+    const stale = () => throughGen.get(lineKey) !== gen;
+    const rowAt = () => groups.findIndex((g) => g.scan === scan.browserId && g.by === "through" && g.throughKey === key);
+    keepStyle(styleKey, groups[rowAt()]);
+    if (!target?.seg.zarr) {
+      const at = rowAt(); if (at >= 0) groups.splice(at, 1);
+      throughs.get(scan.browserId)?.delete(key); throughLines.delete(lineKey); throughVoxelsOf.delete(lineKey); redraw3d(); render(); return;
+    }
+    throughVoxelsOf.set(lineKey, JSON.stringify(target.seg.zarr));
     const t0 = performance.now();
     const w = await ensureWholeBrain(scan).catch((e) => { say(`Tracts could not be shown: ${(e as Error).message}`); return undefined; }).finally(() => render());
-    if (!w) return;
+    if (!w || stale()) return;
     const lab = (await fetchZarrVolumeNative(live.blobBase(), target.seg.zarr as ZarrDesc)).data;
+    if (stale()) return;
     const idx = throughVoxels(w.sl, { dims: target.seg.dims as number[], ijkToRAS: target.seg.ijkToRAS as number[], inside: (v) => Number(lab[v]) === target.labelValue });
-    drop();
-    if (idx.length) groups.push({ id: ++groupSeq, name: `Through ${target.label}`, scan: scan.browserId, strands: idx.map((i) => w.sl[i]), method, unnamed: true, by: "through", throughKey: key, ...styleFor(styleKey) });
-    throughLines.set(lineKey, await linesSaid(target.label, w, idx));
+    const said = await linesSaid(target.label, w, idx);
+    if (stale()) return;
+    // THE ROW KEEPS ITS PLACE in the list (finding 9): replaced where it is, added at the end only the first time.
+    const at = rowAt();
+    if (idx.length) {
+      const row: TractGroup = { id: ++groupSeq, name: `Through ${target.label}`, scan: scan.browserId, strands: idx.map((i) => w.sl[i]), method, unnamed: true, by: "through", throughKey: key, ...styleFor(styleKey) };
+      if (at >= 0) groups.splice(at, 1, row); else groups.push(row);
+    } else if (at >= 0) groups.splice(at, 1);
+    throughLines.set(lineKey, said);
     console.info(`diffusion through ${target.label}: ${idx.length} lines in ${Math.round(performance.now() - t0)} ms`);
     redraw3d(); render();
   }
-  // A segment shown through changes (Draw on the next slice, Paint, Undo): its lines are made again, a third of a second
-  // after the last change.
+  // A segment shown through is EDITED (Draw on the next slice, Paint, Undo -- its stored pieces, #/zarr, change): its
+  // lines are made again, a third of a second after the last change. Any other change to the segmentation -- a
+  // segment's eye or color, a rename, the colors followed after a load -- makes nothing again (finding 9: each had cost
+  // a whole pass); a rename only renames the row. A segmentation or segment that went drops its row.
   const throughQueued = new Map<string, number>();
   live.subscribe((c) => {
     if (!c.id) return;
     for (const [scanId, keys] of throughs) for (const key of keys) {
       if (!key.startsWith(`${c.id}#`)) continue;
-      const q = `${scanId}|${key}`;
+      const q = `${scanId}|${key}`, s = scans().find((x) => x.browserId === scanId);
+      const target = s ? segmentChoices(s).find((x) => x.key === key) : undefined;
+      if (target?.seg.zarr && JSON.stringify(target.seg.zarr) === throughVoxelsOf.get(q)) {
+        const g = groups.find((x) => x.scan === scanId && x.by === "through" && x.throughKey === key), name = `Through ${target.label}`;
+        if (g && g.name !== name) { g.name = name; render(); }
+        continue;
+      }
       clearTimeout(throughQueued.get(q));
       throughQueued.set(q, setTimeout(() => { throughQueued.delete(q); const s = scans().find((x) => x.browserId === scanId); if (s) void throughStructure(s, key); }, 300) as unknown as number);
     }
@@ -2094,7 +2121,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
         addRowMenu(row, () => {
           const acts: RowAction[] = [
             { label: "Rename", run: () => startEditing(nm, base, (v) => { for (const g of all) g.label = v; render(); }) },
-            { label: "Remove", run: () => { for (const g of all) { groups.splice(groups.indexOf(g), 1); if (g.throughKey) { throughs.get(g.scan)?.delete(g.throughKey); throughLines.delete(`${g.scan}|${g.throughKey}`); } } redraw3d(); render(); } },
+            { label: "Remove", run: () => { for (const g of all) { groups.splice(groups.indexOf(g), 1); if (g.throughKey) { const q = `${g.scan}|${g.throughKey}`; throughs.get(g.scan)?.delete(g.throughKey); throughLines.delete(q); throughVoxelsOf.delete(q); throughGen.set(q, (throughGen.get(q) ?? 0) + 1); } } redraw3d(); render(); } },
             { label: "Remove stray lines…", title: "Drag a rectangle around lines to take them out of this tract, in the 3D view or a slice; each removal can be undone.", run: () => { void removeStray(all, base); } },
           ];
           if (undoStack.some((u) => all.includes(u.g))) acts.push({ label: "Undo the last removal", title: "Puts back the lines the last rectangle took out of this tract.", run: () => undoRemoval(all) });
