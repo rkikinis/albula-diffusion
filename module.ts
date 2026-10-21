@@ -1685,6 +1685,27 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
   const pruneUndo = () => { for (let i = undoStack.length - 1; i >= 0; i--) if (!groups.includes(undoStack[i].g)) undoStack.splice(i, 1); };
   /** What each row showed when the header's eye turned everything off, per scan: turned on, exactly that comes back. */
   const allOffMemory = new Map<string, Map<TractGroup, boolean>>();
+  /**
+   * ONE "ALL ON OR OFF", USED BY BOTH LISTS (Ron, 2026-10-21: "I like the eye icon. Its compact and intuitive. In
+   * diffusion it is available at the botom list, but not on the top list. When I loaded, it came up with a bunch visible
+   * and I had to unclick them one by one"): the eye at the head of the Shown list and of the By name list is this one
+   * control. Off remembers what was shown; on puts back exactly that (or, with nothing remembered, the listed tracts --
+   * not the gray ones, the comparison sides or "Rest of the brain", which start hidden).
+   */
+  function allEye(scan: Scan): HTMLButtonElement {
+    const mineAll = groups.filter((g) => g.scan === scan.browserId);
+    const allOn = mineAll.some((g) => g.visible);
+    const he = document.createElement("button"); he.textContent = allOn ? "👁" : "🚫";
+    he.style.cssText = "background:none;border:none;padding:0;cursor:pointer;color:inherit;font-size:14px;min-width:0;width:18px;height:18px";
+    he.title = allOn ? "Hide every tract" : "Show the tracts again"; he.setAttribute("aria-label", he.title);
+    he.disabled = !mineAll.length;
+    he.onclick = () => {
+      if (allOn) { allOffMemory.set(scan.browserId, new Map(mineAll.map((g) => [g, g.visible]))); for (const g of mineAll) g.visible = false; }
+      else { const m = allOffMemory.get(scan.browserId); for (const g of mineAll) g.visible = m?.has(g) ? m.get(g)! : !g.faint && !g.compare && !(g.run && g.name === "Rest of the brain"); allOffMemory.delete(scan.browserId); }
+      redraw3d(); render();
+    };
+    return he;
+  }
   let undoBatch = 0, strayActive = false, strayStop: AbortController | null = null;
   function undoRemoval(gs: TractGroup[]): number {
     const last = [...undoStack].reverse().find((u) => gs.includes(u.g));
@@ -1933,7 +1954,10 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
           const find = document.createElement("input"); find.type = "search"; find.placeholder = "Find a tract, e.g. \"uncinate\" or \"UF\""; find.value = tractSearch; find.className = "sl-tract-find"; find.style.cssText = "width:100%;margin:2px 0 4px";
           find.title = "Shows only the tracts whose name, abbreviation or anatomical term contains this.";
           find.oninput = () => { tractSearch = find.value; const at = find.selectionStart; render(); const f2 = root?.querySelector<HTMLInputElement>(".sl-tract-find"); f2?.focus(); if (at !== null) f2?.setSelectionRange(at, at); };
-          ch.append(find);
+          // The eye at the head of the list: the same "all on or off" as the Shown list's (allEye).
+          const top = document.createElement("div"); top.style.cssText = "display:flex;align-items:center;gap:6px;margin:0 0 4px";
+          top.append(allEye(scan), find); find.style.flex = "1"; find.style.width = "auto"; find.style.minWidth = "0";
+          ch.append(top);
           const OTHER = model.json.tracts.length - 1;
           const shownT = new Set(groups.filter((g) => g.scan === scan.browserId && g.visible && g.tract !== undefined).map((g) => g.tract!));
           const box = document.createElement("div"); box.style.cssText = "border:1px solid var(--sl-border);border-radius:var(--sl-radius);padding:2px 6px";
@@ -2036,18 +2060,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       // so it never scrolls away. Off: every row hidden; on: the listed rows shown again (not the gray ones or the
       // comparison sides, which stay as the person left them hidden).
       {
-        const allOn = mineAll.some((g) => g.visible);
-        const he = document.createElement("button"); he.textContent = allOn ? "👁" : "🚫";
-        he.style.cssText = "background:none;border:none;padding:0;cursor:pointer;color:inherit;font-size:14px;min-width:0;width:18px;height:18px";
-        he.title = allOn ? "Hide every tract in the list" : "Show every listed tract"; he.setAttribute("aria-label", he.title);
-        // Off remembers what was shown; on puts back exactly that (or, with nothing remembered, the listed tracts -- not
-        // the gray ones, the comparison sides or "Rest of the brain", which start hidden).
-        he.onclick = () => {
-          if (allOn) { allOffMemory.set(scan.browserId, new Map(mineAll.map((g) => [g, g.visible]))); for (const g of mineAll) g.visible = false; }
-          else { const m = allOffMemory.get(scan.browserId); for (const g of mineAll) g.visible = m?.has(g) ? m.get(g)! : !g.faint && !g.compare && !(g.run && g.name === "Rest of the brain"); allOffMemory.delete(scan.browserId); }
-          redraw3d(); render();
-        };
-        head.firstElementChild?.replaceWith(he);
+        head.firstElementChild?.replaceWith(allEye(scan));
       }
       sh.append(head);
       const box = document.createElement("div");
