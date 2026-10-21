@@ -410,8 +410,10 @@ export function ukfLengths(voxel: ArrayLike<number>, opts: Pick<UkfOptions, "ste
  * Interp3Signal weighs the 27 neighbors by exp(-d² / σ), d in mm and σ the voxel in mm (sigmaSignal's default), so the
  * weight of a neighbor n voxels away is exp(-n² · v) with v the voxel's number of mm -- exp(-2n²) on a 2 mm grid. Kept
  * EXACTLY on grids of 0.6 to 6 mm (the step's range above; every clinical result as before), and held to the kernel of
- * the nearest end outside it: at 1 nm voxels every neighbor weighed alike (a plain 3×3×3 mean), at 1 pc none but the
- * center voxel -- and that only when the point is exactly on it, so every fiber stopped at its seed.
+ * the nearest end outside it: exp(-0.6 n²) on any finer grid (σ = v² / 0.6), exp(-6 n²) on any coarser one (σ = v² / 6).
+ * The original's rule unchanged (σ the voxel) is what failed outside the range: at 1 nm voxels it weighed every neighbor
+ * alike (a plain 3×3×3 mean), at 1 pc none but the center voxel -- and that only when the point is exactly on it, so
+ * every fiber stopped at its seed.
  */
 export function ukfSigma(voxel: ArrayLike<number>, opts: Pick<UkfOptions, "sigmaSignal">): number {
   if (opts.sigmaSignal !== undefined) return opts.sigmaSignal;
