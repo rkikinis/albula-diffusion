@@ -26,7 +26,8 @@ import "./hooks.ts";
 import { CLUSTERS_NAME, loadTable, TABLE_NAME, type TableJson } from "./naming/table.ts";
 import { codeFingerprint } from "./code-fingerprint.ts";
 import { loadRapidParc } from "./rapidparc/rapidparc.ts";
-import { importGraph, makeMaps, makeTracts, MAP_PATHS, planStudy, studiesOf, synthstripVersion } from "./import-job.ts";
+import { importGraph, jobRules, makeMaps, makeTracts, MAP_PATHS, planStudy, studiesOf, synthstripVersion } from "./import-job.ts";
+import { appendRunLog } from "./run-log.ts";
 import { dicomToTracts } from "./tracts-dicom.ts";
 import { indexSeries, provenanceEdges, provenancePathFor, seriesFilePaths } from "albula/server";
 
@@ -104,6 +105,11 @@ try {
 
   // FIRST THE CASES, THEN THE MACHINERY (finding 13): nothing is started -- no segmentation server, no graphics card, no
   // networks -- until a case needs making.
+  // THE RUN LOG (run-log.ts): what this run tries, with what, and how each scan ends -- for people outside the project.
+  const run = `${new Date().toISOString().replace(/[-:]/g, "").slice(0, 15)}-${crypto.randomUUID().slice(0, 6)}`;
+  const log = (event: "run" | "versions" | "case", fields: Record<string, unknown>) => appendRunLog(db.path, event, { run, ...fields }).then((ok) => { if (!ok) say({ event: "progress", said: "the run log could not be written" }); });
+  await log("run", { database: db.id, how: { onlyMissing: !!args["only-missing"], dryRun: !!args["dry-run"], force: !!args.force, series: args.series ?? null },
+    extension: await gitState(new URL("./", import.meta.url).pathname), core: args["core-version"] ?? "unknown" });
   const { rows, studies } = await studiesOf(db.path, args.series);
   if (args.series && !studies.length) { say({ event: "error", stopped: "no such series", said: `series ${args.series} is not an MR series in this database's index` }); exitCode = 2; }
   say({ event: "plan", studies: studies.length, said: `${studies.length} stud${studies.length === 1 ? "y" : "ies"} with MR series to look at` });
@@ -142,10 +148,16 @@ try {
     const device = await adapter.requestDevice({ requiredLimits: { maxStorageBuffersPerShaderStage: L.maxStorageBuffersPerShaderStage, maxComputeWorkgroupStorageSize: L.maxComputeWorkgroupStorageSize, maxBufferSize: L.maxBufferSize, maxStorageBufferBindingSize: L.maxStorageBufferBindingSize } });
     machinery = { device, model, labeler, versions, template };
     say({ event: "progress", said: "ready", versions });
+    await log("versions", { versions, rules: jobRules(versions) });
     return machinery;
   };
 
   const n = { made: 0, wouldBeMade: 0, current: 0, kept: 0, waiting: 0, cannot: 0, failed: 0 };
+  type Plan = Awaited<ReturnType<typeof planStudy>>[number];
+  const who = (s: Plan["dwi"] | undefined) => s ? { uid: s.facts.uid, description: s.facts.description } : null;
+  const logCase = (plan: Plan, fields: Record<string, unknown>) => log("case", {
+    scan: { ...who(plan.dwi), patient: String(plan.dwi.header["00100020"]?.Value?.[0] ?? ""), study: plan.dwi.facts.studyUID },
+    reversedScan: who(plan.partner), ...(plan.partnerRefusals ? { reversedScanRefused: plan.partnerRefusals } : {}), t1: who(plan.t1), ...fields });
   let rowsOnce: Promise<{ seriesUID: string; seriesNumber: string }[]> | undefined;
   let k = 0;
   // A STUDY AT A TIME: its series read, its cases made, then let go (finding 3).
@@ -169,9 +181,21 @@ try {
           if (maps) {
             n.kept++;
             say({ event: "case", case: k, series: plan.dwi.facts.uid, state: "kept", said: "fiber tracts and maps are there, made from the inputs the database holds; kept" });
+            await logCase(plan, { state: "kept", result: s.seriesUID, said: "made earlier from the same scans; kept" });
             continue;
           }
           mapsFor = s.seriesUID;
+        }
+        // NEVER REPLACED BY ONE MADE FROM LESS (critic 2026-10-22, reversed-scan regression, finding 7): the newest set was
+        // made with a reversed scan or a T1 this run does not find. Making a new set without it would hide the loss behind
+        // a newer, worse result -- as it did on 2026-10-21 for 37 scans. Refused, said, and logged; a person decides.
+        const lost = s?.inputs ? [s.inputs.partner && !plan.partner ? "the reversed scan" : "", s.inputs.t1 && !plan.t1 ? "the MRI of the anatomy (T1)" : ""].filter(Boolean) : [];
+        if (lost.length) {
+          n.failed++; exitCode = 1;
+          const said = `not made: the newest fiber tracts were made with ${lost.join(" and ")}, which this run does not find; a set made without it would replace a better one`;
+          say({ event: "case", case: k, series: plan.dwi.facts.uid, state: "failed", said });
+          await logCase(plan, { state: "refused", newest: s!.seriesUID, newestInputs: s!.inputs, said });
+          continue;
         }
       }
       try {
@@ -182,6 +206,7 @@ try {
           : await makeTracts(db.path, db.id, server, plan, m.device, m.model, m.labeler, m.versions, progress, { force: args.force, dryRun: args["dry-run"], template: m.template });
         if (out.state === "made") n.made++; else if (out.state === "would be made") n.wouldBeMade++; else if (out.state === "current") n.current++; else n[out.state]++;
         if (out.state === "failed") exitCode = 1;
+        await logCase(plan, { ...out, wall: +((performance.now() - t0) / 1000).toFixed(1) });
         say({ event: "case", case: k, series: plan.dwi.facts.uid, study, t1: plan.t1?.facts.uid ?? null, partner: plan.partner?.facts.uid ?? null, ...out,
           wall: +((performance.now() - t0) / 1000).toFixed(1),
           said: "said" in out ? `fiber tracts ${out.state}: ${out.said}${plan.t1 ? `; MRI of the anatomy: ${plan.t1.facts.description}` : ""}` : out.state === "current" ? "fiber tracts already made by the same code, rules and scans" : out.why });
@@ -190,6 +215,7 @@ try {
         if (word) { stop(word, (e as Error).message); break studies; }   // nothing more can be made in this run
         n.failed++; exitCode = 1;
         say({ event: "case", case: k, series: plan.dwi.facts.uid, state: "failed", said: `fiber tracts could not be made: ${(e as Error).message}` });
+        await logCase(plan, { state: "failed", said: `fiber tracts could not be made: ${(e as Error).message}` });
       }
     }
   }

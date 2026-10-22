@@ -1,6 +1,8 @@
-// THE CODE THAT SHAPES THE TRACTS, FINGERPRINTED BY WHAT IT DOES (Ron, 2026-10-22: "Yes, as proposed" -- the tract job's
-// staleness had been tripped by every commit, comments included, and remade whole databases of tract sets in the
-// background; 34 of the test cases' 88 sets on 2026-10-21 alone).
+// THE CODE THAT SHAPES THE TRACTS, FINGERPRINTED BY WHAT IT DOES (Ron, 2026-10-22: "Yes, as proposed"). Used where the
+// job compares code: a run started by hand without --only-missing. The server's own runs (--only-missing, since
+// 2026-10-14) never remake a set because the code changed; they compare only the scans a set was made from. (The reason
+// first given for this file -- that commits had made the server remake whole databases -- was wrong: the critic,
+// 2026-10-22, reversed-scan regression; the remake of 2026-10-21 came from a lost reversed scan.)
 //
 // The files the job reaches (import-job.ts importGraph), each with its comments and type annotations removed and its
 // whitespace reduced (esbuild's transform, pinned in core's deno.jsonc), hashed WITHOUT their file names and in an order

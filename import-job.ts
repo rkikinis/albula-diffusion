@@ -47,9 +47,10 @@ const MAX_SERIES_FILES = 4000;
  * (Ron, 2026-10-05: "remake automatically, versioned").
  *
  * NOT IN IT, since 2026-10-22 (Ron: "Yes, as proposed"): the commits of Albula's core and of this extension. They are in
- * the record (`madeWith`, below) to say what made the tracts, but compared they made EVERY commit -- a comment, a renderer
- * fix -- remake every tract set of a database at its next import (34 of the test cases' 88 on 2026-10-21). A change in the
- * core that changes the tracts is announced by raising the rule of the step it changes.
+ * the record (`madeWith`, below) to say what made the tracts. Compared, every commit made every set out of date for a run
+ * started by hand without --only-missing. (The server's own runs use --only-missing and compare only the scans a set
+ * was made from, so commits never remade anything there -- the critic, 2026-10-22, corrected a claim made here that they
+ * had.) A change in the core that changes the tracts is announced by raising the rule of the step it changes.
  */
 export function jobRules(versions: { code: string; labeler: string; synthstrip: string; headTemplate?: string }): Record<string, string | number> {
   return { directions: DIRECTION_CHECK_RULE, distortion: DISTORTION_RULE, motion: MOTION_RULE, registration: REGISTRATION_RULE, tracking: TRACKING_RULE,
@@ -143,6 +144,17 @@ function recordedReversed(a?: string, b?: string): boolean | undefined {
  * b = 0 images, and not itself a bigger diffusion scan. First choice: one the scanner's record calls reversed; then a
  * b = 0-only series; then a smaller diffusion series with b = 0 images. One the record calls NOT reversed is skipped.
  */
+/** ImageType values that mark a series as a map computed from a scan, never a scan itself. */
+export const COMPUTED_IMAGE_TYPES = new Set(["ADC", "TRACE", "TRACEW", "FA", "EXP", "EADC", "CALC_BV", "COLFA", "TENSOR", "TENSOR_B0"]);
+/** WHY EACH SERIES OF THE STUDY WAS NOT TAKEN as the reversed scan -- the same tests as partnerOf, said one by one, for
+ *  the run log (run-log.ts). A series that passes all of them is listed with why: "" (a candidate). */
+export function partnerRefusals(dwi: SeriesFacts, all: SeriesFacts[]): { uid: string; description: string; why: string }[] {
+  return all.filter((s) => s.uid !== dwi.uid && s.studyUID === dwi.studyUID).map((s) => {
+    const why = s.derived ? "a computed map (its image type)" : !hasB0(s) ? "no b = 0 image" : !(s.volumes < dwi.volumes) ? "not fewer volumes than the scan"
+      : !samePlacement(s.ijkToRAS, dwi.ijkToRAS) ? "placed differently from the scan" : recordedReversed(dwi.phaseEncoding, s.phaseEncoding) === false ? `recorded as not reversed (${s.phaseEncoding ?? "?"} against ${dwi.phaseEncoding ?? "?"})` : "";
+    return { uid: s.uid, description: s.description, why };
+  });
+}
 export function partnerOf(dwi: SeriesFacts, all: SeriesFacts[]): SeriesFacts | undefined {
   // Never a computed map (Siemens' TENSOR_B0 is a b = 0 image the scanner computed from the scan itself: on Steve's
   // Prisma scan, 2026-10-21, it was taken as the partner of both scans).
@@ -162,14 +174,15 @@ export function anatomyOf(dwi: SeriesFacts, all: SeriesFacts[]): SeriesFacts | u
   return all.find((s) => ok(s) && s.studyUID === dwi.studyUID) ?? all.find((s) => ok(s) && !!dwi.patientUID && s.patientUID === dwi.patientUID);
 }
 /** The cases of a set of series: every diffusion scan that is not itself another scan's partner. */
-export function planCases(all: SeriesFacts[]): { dwi: SeriesFacts; partner?: SeriesFacts; t1?: SeriesFacts }[] {
+export function planCases(all: SeriesFacts[]): { dwi: SeriesFacts; partner?: SeriesFacts; t1?: SeriesFacts; partnerRefusals?: { uid: string; description: string; why: string }[] }[] {
   const scans = all.filter(isDiffusionScan).sort((a, b) => b.volumes - a.volumes);
-  const used = new Set<string>(), out: { dwi: SeriesFacts; partner?: SeriesFacts; t1?: SeriesFacts }[] = [];
+  const used = new Set<string>(), out: { dwi: SeriesFacts; partner?: SeriesFacts; t1?: SeriesFacts; partnerRefusals?: { uid: string; description: string; why: string }[] }[] = [];
   for (const dwi of scans) {
     if (used.has(dwi.uid)) continue;
     const partner = partnerOf(dwi, all), t1 = anatomyOf(dwi, all);
     if (partner) used.add(partner.uid);
-    out.push({ dwi, ...(partner ? { partner } : {}), ...(t1 ? { t1 } : {}) });
+    // No reversed scan: why each series of the study was not one, for the run log.
+    out.push({ dwi, ...(partner ? { partner } : { partnerRefusals: partnerRefusals(dwi, all) }), ...(t1 ? { t1 } : {}) });
   }
   return out;
 }
@@ -194,6 +207,11 @@ export async function readSeries(dbDir: string, row: IndexSeries): Promise<ReadS
   const buffers = await Promise.all(paths.map(async (p) => { const b = await Deno.readFile(p); return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) as ArrayBuffer; }));
   const instances = await parseInstances(buffers, { headers: true });
   if (!instances.length) throw new Error(`none of its ${paths.length} files could be read as images`);
+  return seriesFromInstances(row, instances);
+}
+/** A series' facts from its parsed images (the half of readSeries after the files are read; a test feeds it images
+ *  straight from a writer, so the facts are computed from real headers -- critic 2026-10-22, finding 6). */
+export function seriesFromInstances(row: Pick<IndexSeries, "seriesUID" | "studyUID" | "patientUID" | "description">, instances: Awaited<ReturnType<typeof parseInstances>>): ReadSeries {
   const { frames } = volumesOfSeries(instances);
   const header = (instances[0].header?.json ?? {}) as ReadSeries["header"];
   const seen = new Set<string>(), refs: ReadSeries["instances"] = [];
@@ -203,10 +221,14 @@ export async function readSeries(dbDir: string, row: IndexSeries): Promise<ReadS
   }
   const bValues = frames.map((v) => Number(diffusionOf(v)?.bValue ?? NaN));
   const dirs = new Set(frames.filter((v) => Number(diffusionOf(v)?.bValue ?? 0) > 50).map((v) => (diffusionOf(v)?.gradient ?? []).map((x) => Math.round(Number(x) * 100) / 100).join(",")));
-  const maker = String(header["00080070"]?.Value?.[0] ?? "");
-  // A computed map by its ImageType values (ADC, trace, FA, exponential ADC), or an image Albula made. Not "DERIVED" alone:
-  // a scan converted to DICOM (the BIDS import, other converters) says DERIVED and is still the scan.
-  const derived = (header["00080008"]?.Value ?? []).map((x) => String(x).toUpperCase()).some((v) => ["ADC", "TRACE", "TRACEW", "FA", "EXP", "EADC", "CALC_BV", "COLFA", "TENSOR", "TENSOR_B0"].includes(v)) || maker === "SlicerAlbula";
+  // A COMPUTED MAP, by its ImageType values only (ADC, trace, FA, exponential ADC, Siemens' tensor maps). Not "DERIVED"
+  // alone: a scan converted to DICOM (the BIDS import, other converters) says DERIVED and is still the scan. And NOT BY
+  // WHO WROTE THE FILE (critic 2026-10-22, reversed-scan regression, findings 1 and 5): "Manufacturer is SlicerAlbula"
+  // was here, and Albula's own diffusion writer stamps that on every scan it converts -- so from 2026-10-21, when the
+  // reversed-scan choice began to skip derived series (b795b3e), the reversed scans of 37 converted cases were refused and
+  // their tracts made uncorrected. Core's image writer copies the source's Manufacturer, so the clause did not even
+  // catch what Albula derives.
+  const derived = (header["00080008"]?.Value ?? []).map((x) => String(x).toUpperCase()).some((v) => COMPUTED_IMAGE_TYPES.has(v));
   return { facts: { uid: row.seriesUID, studyUID: row.studyUID, patientUID: row.patientUID, description: row.description, volumes: frames.length, bValues, directions: dirs.size,
     ...(frames[0] && diffusionOf(frames[0])?.phaseEncoding ? { phaseEncoding: diffusionOf(frames[0])!.phaseEncoding } : {}), ijkToRAS: frames[0]?.ijkToRAS ?? [], derived }, frames, header, instances: refs };
 }
@@ -224,7 +246,7 @@ export async function studiesOf(dbDir: string, only?: string): Promise<{ rows: I
  * ONE STUDY'S CASES, read when its turn comes and let go after it (finding 3): every MR series of the study, and of the
  * patient's other studies when the study has no T1 (the module takes an image of the same patient too).
  */
-export async function planStudy(dbDir: string, rows: IndexSeries[], study: string, onLine?: (line: string, why?: string) => void): Promise<{ dwi: ReadSeries; partner?: ReadSeries; t1?: ReadSeries }[]> {
+export async function planStudy(dbDir: string, rows: IndexSeries[], study: string, onLine?: (line: string, why?: string) => void): Promise<{ dwi: ReadSeries; partner?: ReadSeries; t1?: ReadSeries; partnerRefusals?: { uid: string; description: string; why: string }[] }[]> {
   const mr = (r: IndexSeries) => r.modality === "MR" && r.description !== TRACTS_DESCRIPTION;
   const own = rows.filter((r) => mr(r) && r.studyUID === study);
   const read = new Map<string, ReadSeries>();
@@ -243,7 +265,7 @@ export async function planStudy(dbDir: string, rows: IndexSeries[], study: strin
     const patient = own[0]?.patientUID;
     if (patient) { await readAll(rows.filter((r) => mr(r) && r.studyUID !== study && r.patientUID === patient)); cases = planCases([...read.values()].map((s) => s.facts)).filter((c) => c.dwi.studyUID === study); }
   }
-  return cases.map((c) => ({ dwi: read.get(c.dwi.uid)!, ...(c.partner ? { partner: read.get(c.partner.uid)! } : {}), ...(c.t1 ? { t1: read.get(c.t1.uid)! } : {}) }));
+  return cases.map((c) => ({ dwi: read.get(c.dwi.uid)!, ...(c.partner ? { partner: read.get(c.partner.uid)! } : {}), ...(c.t1 ? { t1: read.get(c.t1.uid)! } : {}), ...(c.partnerRefusals ? { partnerRefusals: c.partnerRefusals } : {}) }));
 }
 
 /** The stored tracts objects of a diffusion series, with what made them (from the index as it is NOW: finding 8). */

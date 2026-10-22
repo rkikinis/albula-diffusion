@@ -54,10 +54,17 @@ only where the network and the table are the same; `core` and `extension` were t
 
 ## When stored tracts count as out of date
 
-The job remakes a scan's tracts when anything that shapes them differs: a rule number, the code without comments, the
-naming network or table, the head template, SynthStrip's version, or the scans it was made from (`isCurrent`,
-`import-job.ts`). A comment, a moved file or a commit elsewhere does not. A code fingerprint that changed without a change
-in the tracts is carried over only by an entry in `code-equivalences.json`, which says how the sameness was shown.
+THE SERVER'S RUNS (`--only-missing`, how Albula runs the job, since Ron's decision of 2026-10-14: "for reproducibility
+scientists would like to run a specific version of a pipeline on data"): a set is kept, whatever version made it, as long
+as it was made from the scans the database holds now -- the reversed scan and the T1. A new set is made beside it only
+when those differ; nothing is replaced or deleted. Since 2026-10-22 a set made WITH a reversed scan or T1 the job no
+longer finds is not followed by one made without it: that case is refused and said ("NEVER REPLACED BY ONE MADE FROM
+LESS", `import-job-main.ts`).
+
+A RUN STARTED BY HAND without `--only-missing` compares everything that shapes the tracts: a rule number, the code
+without comments, the naming network or table, the head template, SynthStrip's version, and the scans (`isCurrent`,
+`import-job.ts`). A comment, a moved file or a commit elsewhere does not count. A code fingerprint that changed without a
+change in the tracts is carried over only by an entry in `code-equivalences.json`, which says how the sameness was shown.
 
 ## What others use
 
@@ -76,8 +83,11 @@ in the tracts is carried over only by an entry in `code-equivalences.json`, whic
 4. The side decision's use of TractCloud's training data's average position was stated nowhere outside the code. Stated
    here and in `naming/table.ts`.
 
-On the way it turned out that the job compared the commits of the core and of the extension, so every commit -- a
-comment included -- remade every tract set of a database at its next import (34 of the test cases' 88 on 2026-10-21).
-Ron, 2026-10-22: "Yes, as proposed": see "When stored tracts count as out of date" above.
+On the way the job's comparison of the commits of the core and of the extension was taken out (Ron, 2026-10-22: "Yes, as
+proposed"). The reason given then -- that every commit had made the server remake every tract set of a database, 34 of
+the test cases' 88 on 2026-10-21 -- WAS WRONG (the critic, 2026-10-22, `qa/2026-10-22-reversed-scan-regression.md` in
+the workspace): the server's runs never compare commits or code; the remake of 2026-10-21 happened because the job no
+longer found the reversed scan of converted cases (a bug of 2026-10-21, fixed the next day). The change matters only for
+runs started by hand.
 
 *Drafted with Claude (Anthropic) for Ron Kikinis.*
