@@ -28,7 +28,7 @@
 // This file belongs to the diffusion extension and registers through core's queue (render/demos/extension-modules.ts);
 // core never imports it. Critic round 2026-09-29 (qa/2026-09-29-diffusion-module.md) answered in this version.
 import type { ModuleContext } from "albula";
-import { askDerived, askedDerived, MAJOR_TRACTS, queueModule, registerAfterLoad, registerSceneState } from "albula";
+import { askDerived, askedDerived, forgetAskedDerivedFor, onAskedDerived, MAJOR_TRACTS, queueModule, registerAfterLoad, registerSceneState } from "albula";
 import type { MrsonNode } from "albula";
 import { fetchZarrVolumeNative, type ZarrDesc } from "albula";
 import { packRGB24 } from "albula";
@@ -118,6 +118,8 @@ interface TractGroup {
 /** The last whole-brain run for a scan, kept so "Add lines" can name new streamlines in its context and measure them
  *  against the same structure. */
 interface Run { sl: Float32Array[]; named: Named; sorted: Sorted; structure: Structure; label: string; withinMm: number; method: Method;
+  /** The segment the run was near (its segmentation's series UID, absent when not saved), for a saved scene; absent for a run near a tract. */
+  from?: { segmentation?: string; labelValue: number };
   /** The tracking rule the whole-brain run was made under, and its brain in words (BrainState.note). */ rule?: TrackingRuleId; brain?: string;
   /** gradient-check.ts, in words, when the directions were not confirmed as recorded: kept with the tracts it shaped (critic, finding 6). */ directions?: string;
   /** The tracts ("tract:side") Add lines has already added to: a second press would start from the same points and
@@ -209,6 +211,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
   const groups: TractGroup[] = [];
   const runs = new Map<string, Run>();
   const seenScans = new Set<string>();
+  const scanUid = new Map<string, string>();   // scan -> its series UID, kept for when the scan's nodes are gone
   let groupSeq = 0;
   let drawAs: "tubes" | "lines" = "tubes";
   let colorBy: "tract" | "direction" = "tract";
@@ -784,10 +787,45 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     const want = askedDerived("tracts", uid);
     const chosen = want && kids.some((k) => k.child === want) ? want : kids[0].child;
     const before = storedState.get(scan.browserId)?.seriesUID;
-    if (before && before !== chosen) { whole.delete(scan.browserId); storedMaps.delete(scan.browserId); mapsKept.delete(scan.browserId); }
+    if (before && before !== chosen) {
+      whole.delete(scan.browserId); storedMaps.delete(scan.browserId); mapsKept.delete(scan.browserId);
+      // THE ROWS DRAWN FROM THE OLD SET go too (critic 2026-10-21, finding 3): left, they would keep its streamlines under
+      // the new set's name (showByName only makes an existing row visible). Tracts seeded by hand are the scan's own and
+      // stay. What was shown by name is remembered for switchedSet to show again from the new set.
+      const again = new Set<number>();
+      for (let i = groups.length - 1; i >= 0; i--) {
+        const g = groups[i];
+        if (g.scan !== scan.browserId || !(g.by === "name" || g.run || g.by === "box" || g.by === "through")) continue;
+        if (g.by === "name" && g.visible && g.tract !== undefined) again.add(g.tract);
+        groups.splice(i, 1);
+      }
+      reshowAfterSwitch.set(scan.browserId, { tracts: [...again] });
+      redraw3d();
+    }
     storedState.set(scan.browserId, { state: "stored", seriesUID: chosen });
     return { seriesUID: chosen };
   }
+  /** What a set switch (findStored) took off the screen, for switchedSet to put back from the new set. */
+  const reshowAfterSwitch = new Map<string, { tracts: number[] }>();
+  let restoring = false;   // a scene's restore asks for its sets itself and shows what the scene says
+  /** A SET ASKED FOR A SCAN ALREADY ON SCREEN (the DICOM browser's tick; core's onAskedDerived): the module shows it --
+   *  the tracts shown by name again from it, and the near-a-structure run again when one was shown. */
+  async function switchedSet(scan: Scan) {
+    const hadRun = groups.some((g) => g.scan === scan.browserId && g.run);
+    await findStored(scan).catch(() => null);
+    const back = reshowAfterSwitch.get(scan.browserId);
+    if (!back) { render(); return; }
+    reshowAfterSwitch.delete(scan.browserId);
+    void prefetchStored(scan).catch(() => {});
+    for (const t of back.tracts) { await waitIdle(); await showByName(scan, t, true); }
+    if (hadRun && chosen === scan.browserId && near) { await waitIdle(); await makeTracts(); }
+    redraw3d(); render();
+  }
+  onAskedDerived((kind, parent) => {
+    if (kind !== "tracts") return;
+    const s = scans().find((x) => seenScans.has(x.browserId) && dwiUidOf(x) === parent);
+    if (s && !restoring && storedState.get(s.browserId)?.seriesUID !== askedDerived("tracts", parent)) void switchedSet(s);
+  });
   /** The stored whole-brain tracts as the module's own run would have made them: the streamlines and their names. */
   async function loadStored(scan: Scan, model: TractCloudModel): Promise<{ sl: Float32Array[]; named: Named; made?: string } | null> {
     const at = await findStored(scan);
@@ -986,7 +1024,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
   /** TRACTS NEAR A SEGMENT: its voxels as the structure (the near-the-tumor list, and any segment). */
   async function makeNamedTracts(scan: Scan, target: { seg: MrsonNode; labelValue: number; label: string }) {
     const z = await fetchZarrVolumeNative(live.blobBase(), target.seg.zarr as ZarrDesc), lab = z.data;
-    await measureNear(scan, { dims: target.seg.dims as number[], ijkToRAS: target.seg.ijkToRAS as number[], inside: (v) => Number(lab[v]) === target.labelValue }, target.label);
+    await measureNear(scan, { dims: target.seg.dims as number[], ijkToRAS: target.seg.ijkToRAS as number[], inside: (v) => Number(lab[v]) === target.labelValue }, target.label, { seg: target.seg, labelValue: target.labelValue });
   }
   /** TRACTS NEAR A TRACT (v3's "Tracts near this one…"; Ron, 2026-10-14: "could mean: near the uncinate fasciculus"): the
    *  voxels its streamlines pass through, on the scan's maps' grid, as the structure. */
@@ -1003,7 +1041,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
    * would lose. Unnamed streamlines that pass that close are shown too, in gray; everything else is kept, hidden, as
    * "Rest of the brain".
    */
-  async function measureNear(scan: Scan, structure: Structure, label: string) {
+  async function measureNear(scan: Scan, structure: Structure, label: string, from?: { seg: MrsonNode; labelValue: number }) {
     try {
       const t0 = performance.now();
       busy = busy || "Making tracts…"; render();
@@ -1028,7 +1066,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       const carried = new Map(groups.filter((g) => g.scan === scan.browserId && g.run && g.tract !== undefined).map((g) => [`${g.tract}:${g.side ?? 0}`, { color: g.color, visible: g.visible }]));
       groups.splice(0, groups.length, ...withoutLastRun(groups, scan.browserId));   // face.ts
       const pick = (idx: number[]) => idx.map((i) => sl[i]);
-      runs.set(scan.browserId, { sl, named, sorted, structure, label, withinMm, method, added: new Set(), dist, stored: w.stored, storedInputs: w.storedInputs, maxB: c?.maxB ?? 0, partnerId: c?.partnerId ?? "", anatomyId: c?.anatomyId ?? "", rule: method === "ukf" && c ? c.rule : undefined, brain: method === "ukf" && c ? c.brain.note : "", ...(c?.directions ? { directions: c.directions } : {}) });
+      runs.set(scan.browserId, { sl, named, sorted, structure, label, withinMm, method, added: new Set(), ...(from ? { from: { segmentation: segSeries(from.seg), labelValue: from.labelValue } } : {}), dist, stored: w.stored, storedInputs: w.storedInputs, maxB: c?.maxB ?? 0, partnerId: c?.partnerId ?? "", anatomyId: c?.anatomyId ?? "", rule: method === "ukf" && c ? c.rule : undefined, brain: method === "ukf" && c ? c.brain.note : "", ...(c?.directions ? { directions: c.directions } : {}) });
       // The anatomy behind the slices, where the tracts' crossings are drawn (Yogesh Rathi via Ron, 2026-10-01), and over
       // it this scan's own map -- never another patient's left from before (critic, 2026-10-01, finding 3).
       const anat = anatomyFor(scan);
@@ -1408,7 +1446,9 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     for (const id of [...wayBy.keys()]) if (!ids.has(id)) wayBy.delete(id);
     for (const id of [...exportedFor.keys()]) if (!ids.has(id)) exportedFor.delete(id);
     for (let i = groups.length - 1; i >= 0; i--) if (!ids.has(groups[i].scan)) { groups.splice(i, 1); changed = true; }
-    for (const id of [...seenScans]) if (!ids.has(id)) seenScans.delete(id);
+    // An ask for a scan's tract set lasts while the scan is here (critic 2026-10-21, finding 10): loaded again alone, it
+    // shows the newest.
+    for (const id of [...seenScans]) if (!ids.has(id)) { const u = scanUid.get(id); if (u) forgetAskedDerivedFor(u); scanUid.delete(id); seenScans.delete(id); }
     if (changed) redraw3d();
     return changed;
   }
@@ -1534,7 +1574,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
   registerSceneState({
     name: "albula-diffusion", version: SCENE_STATE_VERSION,
     save: () => {
-      const model = tractCountModel;
+      const model = tractCountModel, runs_ = runs;
       const abbr = (t: number) => (model?.json.tracts[t] as { abbr?: string } | undefined)?.abbr;
       const out: ScanState[] = [];
       for (const s of scans()) {
@@ -1544,14 +1584,17 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
         const rowsOf = (gs: TractGroup[]) => gs.flatMap((g) => { const a = g.tract !== undefined ? abbr(g.tract) : undefined; return a ? [{ tract: a, side: g.side ?? 0, visible: g.visible, ...(g.color !== undefined ? { color: g.color } : {}), ...(g.label !== undefined ? { label: g.label } : {}) }] : []; });
         const named = mine.filter((g) => g.by === "name");
         const runs = mine.filter((g) => g.run);
-        const target = runs.length && chosen === s.browserId ? segmentChoices(s).find((c) => c.key === near) : undefined;
-        const targetSeries = target ? segSeries(target.seg) : undefined;
-        const notKept = [...new Set(mine.filter((g) => g.by === "box" || g.by === "through" || (!g.run && g.by !== "name") || g.more).map((g) => g.by === "box" ? "the lines through the box" : g.by === "through" ? "the lines through a structure" : g.more ? "lines added to a tract" : "tracts made from seeds placed here"))];
+        // TRACTS NEAR A STRUCTURE, PER SCAN (critic 2026-10-21, finding 6): each scan's own last run, not the panel's
+        // current choice; a run near a segmentation that was never saved, or near a tract, is named as not kept.
+        const run = runs.length ? runs_.get(s.browserId) : undefined;
+        const target = run?.from?.segmentation ? { segmentation: run.from.segmentation, labelValue: run.from.labelValue, withinMm: run.withinMm } : undefined;
+        const runNotKept = run && !target ? [run.from ? `the tracts near ${run.label} (its segmentation is not saved)` : `the tracts near ${run.label}`] : [];
+        const notKept = [...new Set([...runNotKept, ...mine.filter((g) => g.by === "box" || g.by === "through" || (!g.run && g.by !== "name") || g.more).map((g) => g.by === "box" ? "the lines through the box" : g.by === "through" ? "the lines through a structure" : g.more ? "lines added to a tract" : "tracts made from seeds placed here")])];
         const tracts = storedState.get(s.browserId)?.seriesUID;
         out.push({
           series, ...(tracts ? { tracts } : {}), way: wayBy.get(s.browserId)?.way, map: mapShown(s),
           byName: [...new Set(named.map((g) => g.tract !== undefined ? abbr(g.tract) : undefined).filter((x): x is string => !!x))],
-          ...(target && targetSeries ? { near: { segmentation: targetSeries, labelValue: target.labelValue, withinMm } } : {}),
+          ...(target ? { near: target } : {}),
           rows: rowsOf([...named, ...(target ? runs : [])]),
           ...(notKept.length ? { notKept } : {}),
         });
@@ -1562,7 +1605,10 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       const applied: string[] = [], missing: string[] = [];
       // The scene's series are in; this module's scans may still be reading their stored tracts.
       const t0 = performance.now();
-      while (!scans().length && performance.now() - t0 < 10_000) await new Promise((r) => setTimeout(r, 100));
+      // Every scan the scene names, not just the first (critic 2026-10-21, finding 10): they register one after another.
+      const named = ((state as { scans?: { series?: string }[] } | undefined)?.scans ?? []).map((x) => x.series).filter((x): x is string => !!x);
+      const allHere = () => scans().length > 0 && named.every((u) => scans().some((x) => seriesOfScan(x) === u));
+      while (!allHere() && performance.now() - t0 < 10_000) await new Promise((r) => setTimeout(r, 100));
       if (!scans().length) return state ? { missing: ["no diffusion scan of the scene is loaded"] } : {};
       const model = await tractCloud(); tractCountModel = model;
       const indexOf = (a: string) => model.json.tracts.findIndex((t: { abbr?: string }) => t.abbr === a);
@@ -1583,8 +1629,9 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
         const s = scans().find((x) => seriesOfScan(x) === e.series);
         if (!s) { missing.push("a diffusion scan the scene names is not loaded"); continue; }
         // The tract set the scene showed, not the newest the database holds now.
-        if (e.tracts) askDerived("tracts", e.series, e.tracts);
-        await findStored(s).catch(() => null);
+        restoring = true;
+        try { if (e.tracts) askDerived("tracts", e.series, e.tracts); await findStored(s).catch(() => null); }
+        finally { restoring = false; reshowAfterSwitch.delete(s.browserId); }
         if (e.tracts && storedState.get(s.browserId)?.seriesUID !== e.tracts) missing.push("the tract set the scene showed is no longer in the database; the newest is shown");
         if (e.way) wayBy.set(s.browserId, { way: e.way, touched: true });
         const n = await showNamed(s, e.byName ?? []);
@@ -2460,6 +2507,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     for (const s of scans()) {
       if (seenScans.has(s.browserId)) continue;
       seenScans.add(s.browserId);
+      const u = dwiUidOf(s); if (u) scanUid.set(s.browserId, u);
       // THE PLAYER IN THE TOP BAR stays hidden for a diffusion scan (Ron, 2026-10-15: its volumes are directions, not
       // moments; "probably hide with the ability to bring it up under advanced"): Advanced › Maps › Volumes brings it back.
       arrivedAt.set(s.browserId, performance.now());

@@ -62,3 +62,28 @@ Deno.test("rule 2: each test, in order -- thalamus, lentiform, crus, the end's p
   assertEquals(cstFails(line(12, 3), noCrus, at, tc), "end", "ends in another gyrus");
   assertEquals(CST_RULE_2.id, 2);
 });
+
+import { CST_RULE_3, gateCorticospinal2 } from "./cst-gate.ts";
+Deno.test("rule 3: the end's parcel by majority, not by axis order; the crus test only where the plane is in the ventral diencephalon", () => {
+  // An end in white matter at (10, 10, 15): one voxel of gyrus 21 at +i (rule 2's first neighbor), nine of gyrus 20 at -i.
+  const L = new Uint8Array(N * N * N), at3 = (i: number, j: number, k: number) => (k * N + j) * N + i;
+  L[at3(11, 10, 15)] = 21;
+  for (let k = 14; k <= 16; k++) for (let j = 9; j <= 11; j++) L[at3(9, j, k)] = 20;
+  for (let k = 0; k <= 2; k++) for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) L[at3(i, j, k)] = 9;   // brainstem low down
+  const g = { dims: [N, N, N] as const, ijkToRAS: brain.ijkToRAS, lab: L };
+  const short = () => { const f = new Float32Array(3 * 16); for (let z = 0; z <= 15; z++) f.set([10, 10, z], 3 * z); return f; };
+  const A = { brain: g, thalamus: new Set<number>(), lentiform: new Set<number>(), cortex: new Set([20, 21]), allowedEnd: new Set([20]) };
+  const at = voxelIndexer(g), tc = core2(g, new Set());
+  assertEquals(cstFails(short(), A, at, tc, CST_RULE_2), "end", "rule 2: the +i neighbor decides");
+  assertEquals(cstFails(short(), A, at, tc, CST_RULE_3), undefined, "rule 3: the majority decides");
+  // The crus plane at z = 1.5 crosses the brainstem label: with no ventral diencephalon there, the test is skipped and said.
+  const crus = { origin: [0, 0, 1.5] as [number, number, number], normal: [0, 0, 1] as [number, number, number], errant: new Set([9]) };
+  const sets = [{ label: "corticospinal tract", side: 1, streamlines: [short()] }];
+  const skipped = gateCorticospinal2(sets, { ...A, crus: { ...crus, ventral: new Set([30]) } }, unnamed, CST_RULE_3);
+  assertEquals(skipped.crus, { ventralVoxels: 0, brainstemVoxels: 800, ventralShareOfCrossings: 0, tested: false }, "the plane at z = 1.5 cuts two 20 x 20 layers of brainstem");
+  assertEquals(skipped.moved[0].kept, 1);
+  const tested = gateCorticospinal2(sets, { ...A, crus: { ...crus, ventral: new Set([9]) } }, unnamed, CST_RULE_3);
+  assertEquals(tested.crus?.tested, true);
+  assertEquals(tested.moved[0].crus, 1);
+  assertEquals(gateCorticospinal2(sets, { ...A, crus }, unnamed, CST_RULE_2).crus, undefined, "rule 2 does not check the plane");
+});

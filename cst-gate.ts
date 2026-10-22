@@ -86,18 +86,78 @@ export function gateCorticospinal<S extends { label: string; side: number; strea
 //     area in this parcellation, only when asked).
 // A streamline that fails any test is moved to the unnamed ones; the first test it failed is counted.
 export const CST_RULE_2 = { id: 2, lentiformMinPoints: 2, endReachMm: 6 } as const;
-export const CODES = { precentral: "465006", paracentral: "9898001", brainstem: "15926001", hippocampus: "5366008", putamen: "89278009", pallidum: "14738005" } as const;
+// ── RULE 3 (the critic, 2026-10-21, finding 9): rule 2 with two classification choices made sturdier.
+//   THE END'S PARCEL by majority: the cortical labels of the point and its 26 neighbors are counted and the most frequent
+//     wins (a tie goes to the nearer voxel). Rule 2 took the point's own label, else the first cortical neighbor in the
+//     axis order +i, -i, +j, -j, +k, -k -- at the central sulcus that let the grid's orientation decide precentral or
+//     postcentral.
+//   THE CRUS TEST ONLY WHERE THE PLANE IS IN THE VENTRAL DIENCEPHALON: FastSurfer's ventral diencephalon ends in the upper
+//     midbrain and the peduncles below it are labeled brainstem. The plane's own cut is measured: when it passes through
+//     fewer than `crusMinVentralVoxels` voxels of the ventral diencephalon (both sides, within half a voxel of the plane),
+//     the plane is below it and every true crus crossing would read "brainstem": the crus test is skipped and the result
+//     says so. (The share of the tract's own crossings was tried first and is no measure: the false positives the test is
+//     for pull it down -- 34% on the Prisma scan, whose plane does cut the ventral diencephalon.)
+export const CST_RULE_3 = { id: 3, lentiformMinPoints: 2, endReachMm: 6, endBy: "majority", crusMinVentralVoxels: 50 } as const;
+export type CstRule = typeof CST_RULE_2 | typeof CST_RULE_3;
+export const CODES = { precentral: "465006", paracentral: "9898001", brainstem: "15926001", hippocampus: "5366008", putamen: "89278009", pallidum: "14738005", ventralDC: "110700" } as const;
 export type Failed = "thalamus" | "lentiform" | "crus" | "end";
 export interface CstAnatomy {
   brain: LabelGrid; thalamus: ReadonlySet<number>; lentiform: ReadonlySet<number>;
   /** Every cortical parcel's label value, and those an end may be in. */
   cortex: ReadonlySet<number>; allowedEnd: ReadonlySet<number>;
   /** The crus plane and the labels a crossing of it may not be in; absent: the crus is not tested. */
-  crus?: { origin: [number, number, number]; normal: [number, number, number]; errant: ReadonlySet<number> };
+  crus?: { origin: [number, number, number]; normal: [number, number, number]; errant: ReadonlySet<number>;
+    /** Rule 3: the ventral diencephalon's labels, for the check that the plane lies in it. */ ventral?: ReadonlySet<number> };
+}
+/** The label values where a streamline crosses the crus plane (every crossing). */
+function crusCrossings(f: Float32Array, crus: NonNullable<CstAnatomy["crus"]>, lab: ArrayLike<number>, at: (x: number, y: number, z: number) => number): number[] {
+  const { origin: o, normal: m } = crus, out: number[] = [];
+  for (let k = 1; k < f.length / 3; k++) {
+    const a = 3 * (k - 1), b = 3 * k;
+    const da = (f[a] - o[0]) * m[0] + (f[a + 1] - o[1]) * m[1] + (f[a + 2] - o[2]) * m[2], db = (f[b] - o[0]) * m[0] + (f[b + 1] - o[1]) * m[1] + (f[b + 2] - o[2]) * m[2];
+    if (da === db || (da > 0) === (db > 0)) continue;
+    const s = da / (da - db), v = at(f[a] + s * (f[b] - f[a]), f[a + 1] + s * (f[b + 1] - f[a + 1]), f[a + 2] + s * (f[b + 2] - f[a + 2]));
+    if (v >= 0) out.push(lab[v]);
+  }
+  return out;
+}
+/** The labels the plane passes through: voxels whose center lies within half a voxel of it, counted by label. */
+function planeCut(g: LabelGrid, o: readonly number[], m: readonly number[]): Map<number, number> {
+  const [nx, ny, nz] = g.dims as number[], M = g.ijkToRAS, out = new Map<number, number>();
+  // The plane's distance per step along i, j, k, and half a voxel along the normal.
+  const di = M[0] * m[0] + M[4] * m[1] + M[8] * m[2], dj = M[1] * m[0] + M[5] * m[1] + M[9] * m[2], dk = M[2] * m[0] + M[6] * m[1] + M[10] * m[2];
+  const half = 0.5 * Math.max(Math.abs(di), Math.abs(dj), Math.abs(dk));
+  const d0 = (M[3] - o[0]) * m[0] + (M[7] - o[1]) * m[1] + (M[11] - o[2]) * m[2];
+  for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) {
+    const base = d0 + j * dj + k * dk;
+    for (let i = 0; i < nx; i++) {
+      if (Math.abs(base + i * di) > half) continue;
+      const l = g.lab[(k * ny + j) * nx + i];
+      if (l) out.set(l, (out.get(l) ?? 0) + 1);
+    }
+  }
+  return out;
+}
+/** Rule 3's end parcel: the most frequent cortical label in the point's 3 x 3 x 3 block; a tie goes to the nearer voxel. */
+function majorityCortex(v: number, lab: ArrayLike<number>, cortex: ReadonlySet<number>, nx: number, ny: number, nz: number): number {
+  const i = v % nx, j = Math.floor(v / nx) % ny, k = Math.floor(v / (nx * ny));
+  const count = new Map<number, number>(), nearest = new Map<number, number>();
+  for (let dk = -1; dk <= 1; dk++) for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) {
+    const a = i + di, b = j + dj, c = k + dk;
+    if (a < 0 || b < 0 || c < 0 || a >= nx || b >= ny || c >= nz) continue;
+    const l = lab[(c * ny + b) * nx + a];
+    if (!cortex.has(l)) continue;
+    const d = di * di + dj * dj + dk * dk;
+    count.set(l, (count.get(l) ?? 0) + 1);
+    nearest.set(l, Math.min(nearest.get(l) ?? 9, d));
+  }
+  let best = 0, bc = 0, bd = 9;
+  for (const [l, c] of count) { const d = nearest.get(l)!; if (c > bc || (c === bc && d < bd)) { best = l; bc = c; bd = d; } }
+  return best;
 }
 /** The first test a streamline fails, or undefined when it passes all. */
-export function cstFails(f: Float32Array, A: CstAnatomy, at: (x: number, y: number, z: number) => number, thalCore: Uint8Array, rule = CST_RULE_2): Failed | undefined {
-  const lab = A.brain.lab, [nx, ny] = A.brain.dims as number[], n = f.length / 3;
+export function cstFails(f: Float32Array, A: CstAnatomy, at: (x: number, y: number, z: number) => number, thalCore: Uint8Array, rule: CstRule = CST_RULE_2): Failed | undefined {
+  const lab = A.brain.lab, [nx, ny, nz] = A.brain.dims as number[], n = f.length / 3;
   let t = 0, l = 0;
   for (let q = 0; q < f.length; q += 3) { const v = at(f[q], f[q + 1], f[q + 2]); if (v < 0) continue; if (thalCore[v]) t++; if (A.lentiform.has(lab[v])) l++; }
   if (t >= 2) return "thalamus";
@@ -112,7 +172,7 @@ export function cstFails(f: Float32Array, A: CstAnatomy, at: (x: number, y: numb
       if (v >= 0 && errant.has(lab[v])) return "crus";
     }
   }
-  const upFirst = f[2] > f[3 * (n - 1) + 2], near = (v: number) => { if (A.cortex.has(lab[v])) return lab[v]; for (const d of [1, -1, nx, -nx, nx * ny, -nx * ny]) { const w = v + d; if (w >= 0 && w < lab.length && A.cortex.has(lab[w])) return lab[w]; } return 0; };
+  const upFirst = f[2] > f[3 * (n - 1) + 2], near = "endBy" in rule ? (v: number) => majorityCortex(v, lab, A.cortex, nx, ny, nz) : (v: number) => { if (A.cortex.has(lab[v])) return lab[v]; for (const d of [1, -1, nx, -nx, nx * ny, -nx * ny]) { const w = v + d; if (w >= 0 && w < lab.length && A.cortex.has(lab[w])) return lab[w]; } return 0; };
   let walked = 0, hit = 0;
   for (let k = 0; k < n && walked <= rule.endReachMm; k++) {
     const p = 3 * (upFirst ? k : n - 1 - k);
@@ -121,10 +181,24 @@ export function cstFails(f: Float32Array, A: CstAnatomy, at: (x: number, y: numb
   }
   return hit && A.allowedEnd.has(hit) ? undefined : "end";
 }
-export interface GateResult2<S> { sets: S[]; moved: ({ label: string; side: number; of: number; kept: number } & Record<Failed, number>)[] }
+export interface GateResult2<S> { sets: S[]; moved: ({ label: string; side: number; of: number; kept: number } & Record<Failed, number>)[];
+  /** Rule 3: the crus plane's check -- the share of corticospinal crossings in the ventral diencephalon, and whether the test ran. */
+  crus?: { ventralVoxels: number; brainstemVoxels: number; ventralShareOfCrossings: number; tested: boolean } }
 /** Rule 2 over a run's tract sets, as gateCorticospinal does for rule 1. */
-export function gateCorticospinal2<S extends { label: string; side: number; streamlines: Float32Array[] }>(sets: S[], A: CstAnatomy, unnamed: (moved: Float32Array[]) => S, rule = CST_RULE_2): GateResult2<S> {
+export function gateCorticospinal2<S extends { label: string; side: number; streamlines: Float32Array[] }>(sets: S[], A: CstAnatomy, unnamed: (moved: Float32Array[]) => S, rule: CstRule = CST_RULE_2): GateResult2<S> {
   const at = voxelIndexer(A.brain), thalCore = coreOf(A.brain, A.thalamus);
+  let crusCheck: GateResult2<S>["crus"];
+  if ("crusMinVentralVoxels" in rule && A.crus) {
+    const ventral = A.crus.ventral ?? new Set<number>();
+    const cut = planeCut(A.brain, A.crus.origin, A.crus.normal);
+    let vv = 0, bv = 0;
+    for (const [l, c] of cut) { if (ventral.has(l)) vv += c; else if (A.crus.errant.has(l)) bv += c; }
+    let all = 0, inVentral = 0;
+    for (const s of sets) if (isCorticospinal(s.label)) for (const f of s.streamlines) for (const l of crusCrossings(f, A.crus, A.brain.lab, at)) { all++; if (ventral.has(l)) inVentral++; }
+    const tested = vv >= rule.crusMinVentralVoxels;
+    crusCheck = { ventralVoxels: vv, brainstemVoxels: bv, ventralShareOfCrossings: all ? +(inVentral / all).toFixed(3) : 0, tested };
+    if (!tested) A = { ...A, crus: undefined };
+  }
   const moved: GateResult2<S>["moved"] = [], out: S[] = [], taken: Float32Array[] = [];
   for (const s of sets) {
     if (!isCorticospinal(s.label)) { out.push(s); continue; }
@@ -137,5 +211,5 @@ export function gateCorticospinal2<S extends { label: string; side: number; stre
     const u = out.findIndex((s) => s.label === unnamed([]).label);
     if (u >= 0) out[u] = { ...out[u], streamlines: [...out[u].streamlines, ...taken] }; else out.push(unnamed(taken));
   }
-  return { sets: out, moved };
+  return { sets: out, moved, ...(crusCheck ? { crus: crusCheck } : {}) };
 }
