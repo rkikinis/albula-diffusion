@@ -1803,8 +1803,10 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     const name = `${(patientOf(scan.name) || "scan").replace(/[^\w.-]+/g, "_")} fiber tract numbers ${stamp}.csv`;
     const r = await saveToDownloads(name, toCsv(rows));
     if (!r.ok) throw new Error(r.why ?? "the file could not be written");
-    exportedFor.set(scan.browserId, name);
-    say(`Saved ${rows.length} rows to Downloads: ${name}`);
+    // The name written (" 2" added by the server when one of that name was there already).
+    const written = r.path?.split("/").pop() ?? name;
+    exportedFor.set(scan.browserId, written);
+    say(`Saved ${rows.length} rows to Downloads: ${written}`);
     render();
   }
 
