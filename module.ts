@@ -21,7 +21,7 @@
 // 2026-10-04: Mike Halle's tractline -- plain two-tensor, the shell nearest b = 3000, every brain voxel a seed -- inside the
 // brain SynthStrip finds on the MRI of the anatomy, asked of the segmentation server, brainFor), or one
 // tensor (tracking.ts). Names: RapidParc
-// (rapidparc/; TractCloud's tractcloud/ until 2026-10-03, its table still shared), from whole-brain tracking; the named tracts near the chosen structure are shown whole (makeNamedTracts).
+// (rapidparc/; TractCloud's network until 2026-10-03; TractCloud's 42-tract table in naming/; NAMING.md), from whole-brain tracking; the named tracts near the chosen structure are shown whole (makeNamedTracts).
 // NOT YET: the tract groups are the module's, not scene nodes -- Scene does not list them and a saved scene does not keep
 // them (the mockup's "in Scene under the diffusion scan" is still to build).
 //
@@ -61,11 +61,11 @@ import { buildTractIndex, firstAlongRay, tractsNear, type TractIndex } from "./t
 import { sliceCrossings, trimEnds } from "./tract-slice.ts";
 import { readMore, tnaLine, tractInfo, tractLabel, tractNote } from "./tract-info.ts";
 import { faceNear as nearOnFace, isTumorName, matchesSearch, patientOf, pickAnatomy, tractGroupKey, TRACT_GROUPS, withoutLastRun } from "./face.ts";
-import { loadModel, type ModelJson, type TractCloudModel } from "./tractcloud/tractcloud.ts";
-import { nameAgainst, nameTracts, type Named } from "./tractcloud/name-tracts.ts";
+import { loadTable, type TableJson, type TractTable } from "./naming/table.ts";
+import { nameAgainst, nameTracts, type Named } from "./naming/name-tracts.ts";
 import { loadRapidParc, type RapidParcModel } from "./rapidparc/rapidparc.ts";
 import { correctWithReversed, denseSeeds, MIN_NEAR_STREAMLINES, NEAR_MM, GRAY_BAND_MM, otherSide, sortByDistance, stageText, streamlineDistances, tractName, trackUkfSeeds, wholeBrainSeeds, type Sorted, type StageTimes, type Structure, type TrackTiming } from "./planning.ts";
-import { tractColor, UNNAMED } from "./tractcloud/tract-colors.ts";
+import { tractColor, UNNAMED } from "./naming/tract-colors.ts";
 import { seedsInSphere, trackFromSeeds, type Streamline, type TrackingOptions } from "./tracking.ts";
 import { DIFFUSION_REFERENCES } from "./references.ts";
 import { estimateResponses, kernelFromResponses } from "./responses.ts";
@@ -215,12 +215,13 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
   let groupSeq = 0;
   let drawAs: "tubes" | "lines" = "tubes";
   let colorBy: "tract" | "direction" = "tract";
-  /** TractCloud's network, loaded once from the files beside the bundle (vendor/diffusion/tractcloud/, model/README.md). */
-  let tcModel: Promise<TractCloudModel> | undefined;
-  const tractCloud = () => tcModel ??= (async () => {
-    const get = async (f: string) => { const r = await fetch(assetUrl("diffusion", `tractcloud/${f}`)); if (!r.ok) throw new Error(`the tract-naming model is missing (${f}: ${r.status})`); return r; };
-    const [w, j] = await Promise.all([get("weights.f32").then((r) => r.arrayBuffer()), get("model.json").then((r) => r.json())]);
-    return loadModel(w, j as ModelJson);
+  /** TractCloud's 42-tract table on the ORG-800FC-100HCP clusters (naming/tractcloud-42.json; NAMING.md), loaded once
+   *  from beside the bundle (vendor/diffusion/naming/). TractCloud's network is not loaded: RapidParc names. */
+  let tcModel: Promise<TractTable> | undefined;
+  const tractTable = () => tcModel ??= (async () => {
+    const r = await fetch(assetUrl("diffusion", "naming/tractcloud-42.json"));
+    if (!r.ok) throw new Error(`the tract table is missing (tractcloud-42.json: ${r.status})`);
+    return loadTable(await r.json() as TableJson);
   })().catch((e) => { tcModel = undefined; throw e; });
   /** RapidParc's network, the namer since 2026-10-03 (Ron: "2 yes"; rapidparc/, model/README.md); TractCloud's model.json
    *  stays as the table of clusters, tracts and names both share. */
@@ -827,7 +828,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     if (s && !restoring && storedState.get(s.browserId)?.seriesUID !== askedDerived("tracts", parent)) void switchedSet(s);
   });
   /** The stored whole-brain tracts as the module's own run would have made them: the streamlines and their names. */
-  async function loadStored(scan: Scan, model: TractCloudModel): Promise<{ sl: Float32Array[]; named: Named; made?: string } | null> {
+  async function loadStored(scan: Scan, model: TractTable): Promise<{ sl: Float32Array[]; named: Named; made?: string } | null> {
     const at = await findStored(scan);
     if (!at) return null;
     const files = await seriesDicomFiles(at.seriesUID);
@@ -929,7 +930,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
 
   /**
    * TRACTS NEAR A STRUCTURE, NAMED (Ron, 2026-09-30: whole brain first, then keep what is near the tumor, whole): UKF
-   * through the whole brain, RapidParc names every streamline (NAMING.md; the code is in tractcloud/), and each named tract that comes within
+   * through the whole brain, RapidParc names every streamline (naming/; NAMING.md), and each named tract that comes within
    * `withinMm` of the structure is shown -- all of it, since planning asks what a connection would lose. Unnamed
    * streamlines that pass that close are shown too, in gray (hiding a real tract is worse than showing an unnamed one);
    * everything else is kept, hidden, as "Rest of the brain".
@@ -954,7 +955,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       let releaseHold: (() => void) | undefined;
       try {
         const t0 = performance.now();
-        const model = await tractCloud();
+        const model = await tractTable();
         tractCount = model.json.tracts.length;
         // THE TRACTS MADE AT IMPORT, when the database has them (UKF, the default method, is what the job runs); while the
         // server is still preparing them, wait for it and say so (Ron's "q3: A": one run, never two).
@@ -1012,7 +1013,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
   /** The stored whole-brain tracts, read once into `whole` when the scan arrives (nothing made here: no fit, no tracking). */
   async function prefetchStored(scan: Scan): Promise<void> {
     if (whole.has(scan.browserId) || !usesDefaults(scan) || storedState.get(scan.browserId)?.state !== "stored") return;
-    const model = await tractCloud();
+    const model = await tractTable();
     tractCount = model.json.tracts.length;
     const setAtStart = storedState.get(scan.browserId)?.seriesUID;
     const st = await loadStored(scan, model);
@@ -1045,7 +1046,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     try {
       const t0 = performance.now();
       busy = busy || "Making tracts…"; render();
-      const w = await ensureWholeBrain(scan), model = await tractCloud();
+      const w = await ensureWholeBrain(scan), model = await tractTable();
       const { sl, named, c } = w, times: StageTimes = { ...w.times }, before = 0;
       const tDist = performance.now();
       busy = "Measuring distances…"; render();
@@ -1174,7 +1175,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       times.track = performance.now() - tt;
       if (lastTiming) times.trackDetail = lastTiming;
       busy = "Naming tracts…"; render();
-      const model = await tractCloud();
+      const model = await tractTable();
       const rp = await rapidParc(), releaseN = holdDrawing("naming tracts");
       const r = await nameAgainst(device, model, run.sl, sl2, { rapidParc: rp }).finally(releaseN);
       const outside2 = OUTSIDE_RULE.on ? outsideBrain(sl2, c.fit, edgeFluid(c.fit)) : new Uint8Array(sl2.length);   // added lines that cross the fluid join no tract
@@ -1483,7 +1484,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
   const nameOf = (g: TractGroup) => g.label ?? g.name;
   /** A tract's name without its side, as a row shows it. */
   const tractTitle = (tract: number) => { const t = tractCountModel?.json.tracts[tract]; return t ? tractLabel(t.abbr, t.name, 0) : `Tract ${tract}`; };
-  let tractCountModel: TractCloudModel | undefined;
+  let tractCountModel: TractTable | undefined;
 
   /** The numbers of every listed tract of a scan, measured once its maps are there (each voxel once; selection.ts). */
   // ONE MEASURING AT A TIME, AND A CALLER WAITS FOR IT (finding 3: an export pressed while measuring wrote a partial file).
@@ -1516,7 +1517,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       if (!whole.get(scan.browserId)) { busy = "Getting the whole brain's tracts…"; render(); }
       const w = await ensureWholeBrain(scan);
       const idx = byName(w.named, [{ tract, side: -1 }, { tract, side: 0 }, { tract, side: 1 }]);
-      const model = await tractCloud(); tractCountModel = model;
+      const model = await tractTable(); tractCountModel = model;
       const t = model.json.tracts[tract];
       for (const side of [-1, 0, 1]) {
         const ids = idx.get(`${tract}:${side}`) ?? [];
@@ -1537,7 +1538,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     let shown = false;
     for (const s of scans().filter((x) => added.includes(x.browserId))) {
       if (!(await findStored(s))) continue;
-      const model = await tractCloud();
+      const model = await tractTable();
       for (const abbr of MAJOR_TRACTS) {
         const i = model.json.tracts.findIndex((t: { abbr?: string }) => t.abbr === abbr);
         if (i < 0) continue;
@@ -1610,7 +1611,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       const allHere = () => scans().length > 0 && named.every((u) => scans().some((x) => seriesOfScan(x) === u));
       while (!allHere() && performance.now() - t0 < 10_000) await new Promise((r) => setTimeout(r, 100));
       if (!scans().length) return state ? { missing: ["no diffusion scan of the scene is loaded"] } : {};
-      const model = await tractCloud(); tractCountModel = model;
+      const model = await tractTable(); tractCountModel = model;
       const indexOf = (a: string) => model.json.tracts.findIndex((t: { abbr?: string }) => t.abbr === a);
       const showNamed = async (s: Scan, list: readonly string[]) => { let n = 0; for (const a of list) { const i = indexOf(a); if (i < 0) continue; await waitIdle(); await showByName(s, i, true); n++; } return n; };
       const showMapNow = async (s: Scan, m: Show) => { await waitIdle(); chosen = s.browserId; await showMap(s, m); };
@@ -1710,7 +1711,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     if (!idx.length) return `No lines pass through ${what}.`;
     const count = new Map<string, number>();
     for (const i of idx) { const k = `${w.named.tract[i]}:${w.named.side[i]}`; count.set(k, (count.get(k) ?? 0) + 1); }
-    const model = await tractCloud(); tractCountModel = model;
+    const model = await tractTable(); tractCountModel = model;
     const OTHER = model.json.tracts.length - 1;
     // The commonest NAMED tract: in the deep white matter most lines through a small place have no name.
     const top = [...count.entries()].filter(([k]) => Number(k.split(":")[0]) !== OTHER).sort((a, b) => b[1] - a[1])[0];
@@ -1937,7 +1938,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     syncBanner();
     pruneUndo();
     if (!root) return;
-    if (!tractCountModel) void tractCloud().then((m) => { if (!tractCountModel) { tractCountModel = m; render(); } }).catch(() => {});
+    if (!tractCountModel) void tractTable().then((m) => { if (!tractCountModel) { tractCountModel = m; render(); } }).catch(() => {});
     const list = scans();
     if (!list.find((s) => s.browserId === chosen)) chosen = list[0]?.browserId ?? "";
     const scan = list.find((s) => s.browserId === chosen);
@@ -2110,7 +2111,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       } else if (way === "name") {
         // BY NAME: the atlas's tracts in their groups, a search, a tick each.
         const model = tractCountModel;
-        if (!model) { const p = document.createElement("p"); p.className = "sl-hint"; p.textContent = "Reading the list of tracts…"; ch.append(p); void tractCloud().then((m) => { tractCountModel = m; render(); }).catch(() => {}); }
+        if (!model) { const p = document.createElement("p"); p.className = "sl-hint"; p.textContent = "Reading the list of tracts…"; ch.append(p); void tractTable().then((m) => { tractCountModel = m; render(); }).catch(() => {}); }
         else {
           const find = document.createElement("input"); find.type = "search"; find.placeholder = "Find a tract, e.g. \"uncinate\" or \"UF\""; find.value = tractSearch; find.className = "sl-tract-find"; find.style.cssText = "width:100%;margin:2px 0 4px";
           find.title = "Shows only the tracts whose name, abbreviation or anatomical term contains this.";
@@ -2443,7 +2444,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     title: "Diffusion",
     groups: ["Display"],
     tip: "The brain's fiber tracts from a diffusion MRI: those near a tumor or any structure, by name, or through a box; their numbers, left and right.",
-    help: "<p><b>What it shows.</b> The brain's main fiber tracts, found in a diffusion MRI (often named DTI, DWI or diffusion) and lined up with the MRI of the anatomy (the T1). When a diffusion MRI comes into the database, Albula finds and names the whole brain's tracts once, in the background, so choosing them here takes about a second. The top of the module says how they were made, each step with its method; <b>Details and references</b> leads here.</p><p><b>Choose tracts</b> in one of three ways (the ▼ beside Choose). <b>Near a structure</b>: the named tracts that come within a distance (<b>Within</b>) of a tumor, any segment of the patient, or a structure you outline here (<b>Outline one here…</b>: strokes inside, strokes around, Grow, Done); each is shown whole, in its own color, with how close it comes; tracts that come within 2 mm more, or close with fewer lines, are listed in gray, hidden. A case with a tumor opens on this way. <b>By name</b>: tick a tract and both its sides are drawn; untick it and they go. Any other brain opens on this way. <b>Through a place</b>: a box put where the slice views cross; move and resize it with its handles, and the lines through it follow.</p><p><b>Shown</b> lists one row per tract with its left and right side next to each other: near a structure, how close it comes and the lines on each side; otherwise the lines and FA on each side. The row's tooltip gives MD, AD and RD, the volume, the length, and how lopsided the tract is (left against right). The left side is drawn a shade darker than the right. Click a name to rename it; the ⋯ at the end of the row (or a right-click) removes it, lists the tracts near it, adds lines to it, or opens the paper that describes it. <b>Add lines</b> (in the row's ⋯) follows many more lines in a tract listed near a structure, on both sides. <b>Export the numbers</b>, above the list, puts one table file (CSV) at the top of Downloads: a row per tract and side with lines, FA, MD, AD, RD, volume and length, and what made them. A tract that looks thin or missing on a tumor's side may be destroyed by the tumor, or still there but hidden by swelling (edema): compare it with the other side. Everything stays on this computer.</p><p><b>Advanced</b> holds the maps (<b>b0 (corrected)</b>, <b>FA</b>: how strongly water moves along one direction, and <b>Color FA</b>: that direction as a color, red left-right, green front-back, blue up-down; shown over the T1), the scan as acquired, the distortion and head-movement corrections, how tracts are drawn (lines or tubes, colored by tract or by direction, ends shortened), and, under For developers, the tracking method and its numbers.</p><p><b>Two-tensor</b> (UKF, the default) follows two fiber directions, from a starting point in every voxel of the brain, with the settings of the atlas the tract names come from (as Mike Halle's tractline does), so tracts reach into the swelling around a tumor; it runs on the graphics card and agrees with the original UKFTractography program (on a whole brain, 93% of fibers end within 0.1 mm of the original's from the same starting points). <b>Single tensor</b> follows one direction per voxel; where tracts cross, that direction is an average, and a tract may stop or turn. With <b>Two-tensor</b>, <b>Make tracts</b> follows tracts through the whole brain and names them with RapidParc (Bisten, Schultz et al., University of Bonn), a network trained on an atlas of 800 fiber clusters (Zhang, O'Donnell et al.); each named tract that comes within the distance of the chosen structure is shown whole, in its own color, with its closest distance to the structure. Streamlines no name fits and pass close are shown in gray; the rest of the brain is kept, hidden.</p><p><b>Licenses.</b> Research software: not reviewed or approved by the FDA or any other agency; clinical applications are neither recommended nor advised. The two-tensor tracking is a port of UKFTractography (authors: Yogesh Rathi, Stefan Lienhard, Yinpeng Li, Martin Styner, Ipek Oguz, Yundi Shi, Christian Baumgartner, Ryan Eckbo, Tashrif Billah and Dheshan Mohandass; github.com/pnlbwh/ukftractography). All or portions of this licensed product (such portions are the \"Software\") have been obtained under license from The Brigham and Women's Hospital, Inc. and are subject to the following terms and conditions: <a href=\"./vendor/diffusion/licenses/LICENSE-UKF.txt\" target=\"_blank\">the UKF Tractography Contribution and Software License Agreement</a> (this is a modified version: translated to TypeScript and WGSL). RapidParc's trained network is under <a href=\"./vendor/diffusion/rapidparc/LICENSE.txt\" target=\"_blank\">its BSD license</a> (University of Bonn); TractCloud's table of tract names under <a href=\"./vendor/diffusion/tractcloud/LICENSE.txt\" target=\"_blank\">3D Slicer's license</a>; dcm2niix under <a href=\"./vendor/diffusion/dcm2niix/LICENSE.txt\" target=\"_blank\">its own (BSD)</a>; the rest of this extension under the <a href=\"./vendor/diffusion/licenses/LICENSE\" target=\"_blank\">Apache License 2.0</a> (<a href=\"./vendor/diffusion/licenses/NOTICE\" target=\"_blank\">NOTICE</a>).</p>",
+    help: "<p><b>What it shows.</b> The brain's main fiber tracts, found in a diffusion MRI (often named DTI, DWI or diffusion) and lined up with the MRI of the anatomy (the T1). When a diffusion MRI comes into the database, Albula finds and names the whole brain's tracts once, in the background, so choosing them here takes about a second. The top of the module says how they were made, each step with its method; <b>Details and references</b> leads here.</p><p><b>Choose tracts</b> in one of three ways (the ▼ beside Choose). <b>Near a structure</b>: the named tracts that come within a distance (<b>Within</b>) of a tumor, any segment of the patient, or a structure you outline here (<b>Outline one here…</b>: strokes inside, strokes around, Grow, Done); each is shown whole, in its own color, with how close it comes; tracts that come within 2 mm more, or close with fewer lines, are listed in gray, hidden. A case with a tumor opens on this way. <b>By name</b>: tick a tract and both its sides are drawn; untick it and they go. Any other brain opens on this way. <b>Through a place</b>: a box put where the slice views cross; move and resize it with its handles, and the lines through it follow.</p><p><b>Shown</b> lists one row per tract with its left and right side next to each other: near a structure, how close it comes and the lines on each side; otherwise the lines and FA on each side. The row's tooltip gives MD, AD and RD, the volume, the length, and how lopsided the tract is (left against right). The left side is drawn a shade darker than the right. Click a name to rename it; the ⋯ at the end of the row (or a right-click) removes it, lists the tracts near it, adds lines to it, or opens the paper that describes it. <b>Add lines</b> (in the row's ⋯) follows many more lines in a tract listed near a structure, on both sides. <b>Export the numbers</b>, above the list, puts one table file (CSV) at the top of Downloads: a row per tract and side with lines, FA, MD, AD, RD, volume and length, and what made them. A tract that looks thin or missing on a tumor's side may be destroyed by the tumor, or still there but hidden by swelling (edema): compare it with the other side. Everything stays on this computer.</p><p><b>Advanced</b> holds the maps (<b>b0 (corrected)</b>, <b>FA</b>: how strongly water moves along one direction, and <b>Color FA</b>: that direction as a color, red left-right, green front-back, blue up-down; shown over the T1), the scan as acquired, the distortion and head-movement corrections, how tracts are drawn (lines or tubes, colored by tract or by direction, ends shortened), and, under For developers, the tracking method and its numbers.</p><p><b>Two-tensor</b> (UKF, the default) follows two fiber directions, from a starting point in every voxel of the brain, with the settings of the atlas the tract names come from (as Mike Halle's tractline does), so tracts reach into the swelling around a tumor; it runs on the graphics card and agrees with the original UKFTractography program (on a whole brain, 93% of fibers end within 0.1 mm of the original's from the same starting points). <b>Single tensor</b> follows one direction per voxel; where tracts cross, that direction is an average, and a tract may stop or turn. With <b>Two-tensor</b>, <b>Make tracts</b> follows tracts through the whole brain and names them with RapidParc (Bisten, Schultz et al., University of Bonn), a network that puts each streamline into one of the 800 fiber clusters of the ORG-800FC-100HCP atlas (Zhang, O'Donnell et al.), named by TractCloud's 42-tract table; each named tract that comes within the distance of the chosen structure is shown whole, in its own color, with its closest distance to the structure. Streamlines no name fits and pass close are shown in gray; the rest of the brain is kept, hidden.</p><p><b>Licenses.</b> Research software: not reviewed or approved by the FDA or any other agency; clinical applications are neither recommended nor advised. The two-tensor tracking is a port of UKFTractography (authors: Yogesh Rathi, Stefan Lienhard, Yinpeng Li, Martin Styner, Ipek Oguz, Yundi Shi, Christian Baumgartner, Ryan Eckbo, Tashrif Billah and Dheshan Mohandass; github.com/pnlbwh/ukftractography). All or portions of this licensed product (such portions are the \"Software\") have been obtained under license from The Brigham and Women's Hospital, Inc. and are subject to the following terms and conditions: <a href=\"./vendor/diffusion/licenses/LICENSE-UKF.txt\" target=\"_blank\">the UKF Tractography Contribution and Software License Agreement</a> (this is a modified version: translated to TypeScript and WGSL). RapidParc's trained network is under <a href=\"./vendor/diffusion/rapidparc/LICENSE.txt\" target=\"_blank\">its BSD license</a> (University of Bonn); TractCloud's 42-tract table (on the ORG-800FC-100HCP fiber clusters) under <a href=\"./vendor/diffusion/naming/LICENSE-tractcloud.txt\" target=\"_blank\">3D Slicer's license</a>; dcm2niix under <a href=\"./vendor/diffusion/dcm2niix/LICENSE.txt\" target=\"_blank\">its own (BSD)</a>; the rest of this extension under the <a href=\"./vendor/diffusion/licenses/LICENSE\" target=\"_blank\">Apache License 2.0</a> (<a href=\"./vendor/diffusion/licenses/NOTICE\" target=\"_blank\">NOTICE</a>).</p>",
     acknowledgements: DIFFUSION_REFERENCES.map((r) => `${r.cite}${r.link ? ` ${r.link}` : ""} — ${r.usedFor}${r.verified ? "" : " (citation to be checked)"}`),
     mount(el) { root = el; render(); },
     onShow() { render(); },

@@ -20,10 +20,10 @@ with RapidParc on 2026-10-03 (Ron: "2 yes").
 | what | from | used for | where in the code |
 |---|---|---|---|
 | **RapidParc's network** (Bisten, von Bornhaupt, Grün, Bauer, Rüber, Schultz; Imaging Neuroscience 2026; University of Bonn, BSD license) | `rapidparc/model/rapidparc.safetensors` (sha256 `6a158dad…`) | each streamline's fiber cluster, and how sure it is | `tractcloud/name-tracts.ts` (`nameAgainst`, the `opts.rapidParc` branch, `rapidParcGpu`) |
-| **The clusters: ORG-800FC-100HCP** (the O'Donnell group's fiber clustering atlas: 800 clusters from 100 HCP subjects; Zhang, Wu, Norton, Rigolo, Rathi, Makris, O'Donnell; NeuroImage 2018; github.com/SlicerDMRI/ORG-Atlases) | what both networks were trained to give | the class each streamline is put in | the networks' outputs |
-| **TractCloud's 42-tract table**: 1,600 classes → 42 tracts and "Other", with names, abbreviations and categories | SlicerDMRI/TractCloud `tract_mapping.py`, converted into `tractcloud/model/model.json` (`clusterToTract`, `tracts`); RapidParc's own copy (`mapping_from_800_800_to_43`, `int_to_label`) checked identical on 2026-10-03 | the tract name of each cluster | `tractcloud/tractcloud.ts` `tractsOf` |
-| **The training data's average position** (TractCloud's release, the ORG-800FC-100HCP subjects), used to center a brain | `tractcloud/model/model.json` (`massCenter`) | deciding the SIDE: after centering, a streamline's mean left-right position says left or right | `tractcloud/tractcloud.ts` `prepare`; `name-tracts.ts` after the vote ("THE SIDE") |
-| **TractCloud's network** (Xue, Chen, Zhang, Golby, Makris, Rathi, Cai, Zhang, O'Donnell; MICCAI 2023) | `tractcloud/model/weights.f32` | **nothing** in the app or the import job since 2026-10-03; only validation runs that ask for it (`case-run.ts`, `labeler: "tractcloud"`) | `name-tracts.ts`, the `else` branch |
+| **The clusters: ORG-800FC-100HCP** (the O'Donnell group's fiber clustering atlas: 800 clusters from 100 HCP subjects; Zhang, Wu, Norton, Rigolo, Rathi, Makris, O'Donnell; NeuroImage 2018; github.com/SlicerDMRI/ORG-Atlases) | what both networks were trained to give | the class each streamline is put in | the networks' outputs; the name `CLUSTERS_NAME` in `naming/table.ts` |
+| **TractCloud's 42-tract table**: 1,600 classes → 42 tracts and "Other", with names, abbreviations and categories | `naming/tractcloud-42.json`, taken unchanged from TractCloud's converted release (SlicerDMRI/TractCloud `tract_mapping.py`; `naming/tractcloud-42.test.ts` keeps them identical); RapidParc's own copy (`mapping_from_800_800_to_43`, `int_to_label`) checked identical on 2026-10-03 | the tract name of each cluster | `naming/table.ts` `tractsOf` |
+| **The training data's average position** (TractCloud's release, the ORG-800FC-100HCP subjects), used to center a brain | `naming/tractcloud-42.json` (`massCenter`) | deciding the SIDE: after centering, a streamline's mean left-right position says left or right | `naming/table.ts` `prepare`; `naming/name-tracts.ts` after the vote ("THE SIDE") |
+| **TractCloud's network** (Xue, Chen, Zhang, Golby, Makris, Rathi, Cai, Zhang, O'Donnell; MICCAI 2023) | `tractcloud/model/weights.f32` (with `model.json`) | **nothing** in the app or the import job since 2026-10-03, and since 2026-10-22 not even loaded there; only validation runs that ask for it (`case-run.ts`, `labeler: "tractcloud"`) | `naming/name-tracts.ts`, the TractCloud branch |
 
 Both networks give a cluster of the same atlas, so everything after the cluster is shared: the 40 mm cut (shorter
 streamlines are not named), the table, the side, the vote over draws, the margin.
@@ -38,15 +38,26 @@ streamlines are not named), the table, the side, the vote over draws, the margin
 
 ## Reading a tract set's record
 
-A stored tract set says, in its provenance, `rules.labeler`, for example:
-`rapidparc 6a158dad6a0b, table 75b1af321932, tractcloud 5a843c95eb60, template 1f27aabea9f7`
+Since 2026-10-22 a stored tract set's provenance says, in `rules`:
 
-- `rapidparc …` -- the network that named (its weights' fingerprint);
-- `table …` -- `model.json`: TractCloud's 42-tract table and the training data's average position;
-- `tractcloud …` -- TractCloud's weights' fingerprint. They are LOADED with the table (one model object holds both) but
-  NOT RUN. Listed because the job loads them -- misleading, and on the list below to change.
-- `template …` -- the MNI152 2009c head template of the head-frame step (`head-frame.ts`; added to this field in
-  `import-job-main.ts`). It has nothing to do with naming; it is in this field only because the field was extended.
+- `labeler`: `rapidparc 6a158dad6a0b; clusters ORG-800FC-100HCP; tract table TractCloud-42 017cd884c8b5` -- the network
+  that named (its weights' fingerprint), the clusters it gives, the table that names them (its file's fingerprint);
+- `headTemplate`: the MNI152 2009c head template of the head-frame step (`head-frame.ts`), in a field of its own;
+- `code`: the fingerprint of the code that makes the tracts, without comments and file names (`code-fingerprint.ts`).
+
+and, outside `rules`, `madeWith`: the commits of Albula's core and of this extension that ran -- said, not compared.
+
+Before 2026-10-22 the same field read `rapidparc …, table …, tractcloud …, template …`: `table` was TractCloud's
+`model.json` (the same table), `tractcloud` its network's weights -- loaded with the table but NOT run -- and `template`
+the head template. The job reads such a record through `upgradeRules` (`import-job.ts`), which accepts it as today's
+only where the network and the table are the same; `core` and `extension` were then part of `rules`.
+
+## When stored tracts count as out of date
+
+The job remakes a scan's tracts when anything that shapes them differs: a rule number, the code without comments, the
+naming network or table, the head template, SynthStrip's version, or the scans it was made from (`isCurrent`,
+`import-job.ts`). A comment, a moved file or a commit elsewhere does not. A code fingerprint that changed without a change
+in the tracts is carried over only by an entry in `code-equivalences.json`, which says how the sameness was shown.
 
 ## What others use
 
@@ -55,18 +66,18 @@ A stored tract set says, in its provenance, `rules.labeler`, for example:
 - **Lauren O'Donnell's group**: TractCloud is theirs; RapidParc is Bonn's, trained on their atlas. (Told to Lauren on
   2026-10-05, `email-odonnell-2026-10-05-pipeline-answers.md` in the workspace.)
 
-## Why it was not transparent, and what changes
+## Why it was not transparent, and what was done (2026-10-22)
 
-1. The naming code and the atlas table live in a folder named `tractcloud/`, and the table is in TractCloud's model file.
-2. The record lists TractCloud's weights, which are loaded but not run.
-3. Comments, test names and the README still say "named by TractCloud" (`module.ts`, `case-run.ts`, `tract-info.ts`,
-   `README.md`), from before 2026-10-03.
-4. The side decision's use of the average position from TractCloud's training data was stated nowhere outside
-   the code.
+1. The naming code and the table lived in `tractcloud/`, the table inside TractCloud's model file. Now: `naming/`
+   (`name-tracts.ts`, `table.ts`, `tractcloud-42.json`, `tract-colors.ts`); `tractcloud/` holds TractCloud's network only.
+2. The record listed TractCloud's weights, loaded but not run, and the head template in the naming field. Now: the
+   wording above; the app and the job load the table alone.
+3. Comments, test names and the README said "named by TractCloud". Corrected.
+4. The side decision's use of TractCloud's training data's average position was stated nowhere outside the code. Stated
+   here and in `naming/table.ts`.
 
-Fixed with this page: the comments, test names and README (3). For Ron to decide (1, 2): move the naming code and the
-atlas table out of `tractcloud/` into a folder of their own (`naming/`, with `atlas/` for the table), load the table
-without TractCloud's weights, and record `atlas <hash>` instead of `tractcloud <hash>`, with the head template in a field
-of its own (a new version of the record; older tract sets keep theirs).
+On the way it turned out that the job compared the commits of the core and of the extension, so every commit -- a
+comment included -- remade every tract set of a database at its next import (34 of the test cases' 88 on 2026-10-21).
+Ron, 2026-10-22: "Yes, as proposed": see "When stored tracts count as out of date" above.
 
 *Drafted with Claude (Anthropic) for Ron Kikinis.*

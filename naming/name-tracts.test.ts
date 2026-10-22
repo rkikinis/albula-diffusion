@@ -1,15 +1,15 @@
 // NAMING ADDED STREAMLINES AGAINST A WHOLE-BRAIN RUN (nameAgainst; Ron, 2026-10-01: "Add lines" to chosen tracts).
 // The added streamlines must be named as the whole-brain run would name them: a copy of a run's own streamline gets that
 // streamline's name, and the run's own names do not change when streamlines are added. On PAT16's reference streamlines.
-//   deno test -A --no-check --unstable-webgpu extensions/diffusion/tractcloud/name-tracts.test.ts
+//   deno test -A --no-check --unstable-webgpu extensions/diffusion/naming/name-tracts.test.ts
 import { assert, assertEquals } from "jsr:@std/assert@1";
 import { ABSENT, testData } from "albula/testing";
-import { loadModel, type ModelJson } from "./tractcloud.ts";
+import { loadModel, type ModelJson } from "../tractcloud/tractcloud.ts";
 import { nameAgainst, nameTracts } from "./name-tracts.ts";
 
 const REF = testData("tractcloud-reference") ?? ABSENT;
 const have = (() => { try { return Deno.statSync(REF + "streamlines.f32").isFile; } catch { return false; } })();
-const HERE = new URL("./model/", import.meta.url);
+const HERE = new URL("../tractcloud/model/", import.meta.url);
 
 Deno.test({ name: "added copies get their originals' names; the run's own names are unchanged (PAT16)", ignore: !have || !("gpu" in navigator), fn: async () => {
   const model = loadModel(Deno.readFileSync(new URL("weights.f32", HERE)).buffer, JSON.parse(Deno.readTextFileSync(new URL("model.json", HERE))) as ModelJson);

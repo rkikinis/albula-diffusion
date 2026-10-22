@@ -17,7 +17,7 @@ import type { Rigid } from "./registration.ts";
 import type { MotionRuleId } from "./motion.ts";
 import { OUTSIDE_RULE } from "./outside-brain.ts";
 import type { TractCloudModel } from "./tractcloud/tractcloud.ts";
-import { SHORT, type Named } from "./tractcloud/name-tracts.ts";
+import { SHORT, type Named } from "./naming/name-tracts.ts";
 import { loadRapidParc, type RapidParcModel } from "./rapidparc/rapidparc.ts";
 /** Where tracking rule 3's brain mask for a library case lives (Contents/tools/synthstrip-masks.ts writes it). */
 export const synthstripMaskPath = (ds: string, id: string) => `${ds}/derivatives/synthstrip/sub-${id}/anat/sub-${id}_ses-preop_desc-synthstrip_mask.nii.gz`;

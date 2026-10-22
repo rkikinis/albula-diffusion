@@ -6,7 +6,7 @@
 // standard deliberately does not name every structure.) So the names are the atlas's own. So this is ONE table, versioned like the other tables (CLAUDE.md, "modular and
 // versioned"), that the module reads and nothing else holds a copy of.
 //
-// VERSION 1 (2026-10-01): the names are TractCloud's own (its atlas, tractcloud/model/model.json), capitalized and
+// VERSION 1 (2026-10-01): the names are TractCloud's 42-tract table's (naming/tractcloud-42.json; NAMING.md), capitalized and
 // nothing more; the abbreviations are TractCloud's. The `function` and `reference` columns are EMPTY on purpose: they
 // are clinical claims, Ron writes or checks them, and the face shows nothing rather than an unchecked claim.
 

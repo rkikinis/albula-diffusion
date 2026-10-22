@@ -16,8 +16,9 @@ import type { FieldFit } from "./distortion.ts";
 import { prepareScan, type Prepared } from "./prepare.ts";
 import { MOTION_RULE, type MotionRuleId } from "./motion.ts";
 import { edgeFluid, outsideBrain, OUTSIDE_RULE } from "./outside-brain.ts";
+import type { TractTable } from "./naming/table.ts";
 import type { TractCloudModel } from "./tractcloud/tractcloud.ts";
-import { nameTracts, type Named } from "./tractcloud/name-tracts.ts";
+import { nameTracts, type Named } from "./naming/name-tracts.ts";
 import type { RapidParcModel } from "./rapidparc/rapidparc.ts";
 import { estimateResponses, kernelFromResponses } from "./responses.ts";
 import { csdVolume } from "./csd-volume.ts";
@@ -74,7 +75,7 @@ export interface PipelineResult {
 }
 
 /** The whole pipeline; `stages` collects the step times (planning.ts stageText). */
-export async function wholeBrainTracts(input: PipelineInput, device: GPUDevice, model: TractCloudModel, opts: PipelineOptions, stages: StageTimes = {}): Promise<PipelineResult> {
+export async function wholeBrainTracts(input: PipelineInput, device: GPUDevice, model: TractTable, opts: PipelineOptions, stages: StageTimes = {}): Promise<PipelineResult> {
   let dwi = input.dwi;
   const method = opts.method ?? "ukf";
   // THE DISTORTION FIELD from the reversed pair, kept (not applied): the movement and the T1 alignment take it into the
@@ -125,6 +126,7 @@ export async function wholeBrainTracts(input: PipelineInput, device: GPUDevice, 
   }
   const t2 = performance.now();
   stages.track = t2 - t1 - csdSeconds * 1000 - (stages.seeds ?? 0);
+  // "tractcloud": TractCloud's network, which the caller passes as the table (validation runs only; NAMING.md).
   const rapidParc = opts.labeler === "tractcloud" ? undefined : opts.labeler;
   const named = await nameTracts(device, model, sl, { ...(opts.nameSeed !== undefined ? { seed: opts.nameSeed } : {}), ...(rapidParc ? { rapidParc } : {}) });
   stages.name = named.seconds * 1000;

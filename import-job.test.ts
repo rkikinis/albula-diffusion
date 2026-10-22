@@ -3,11 +3,11 @@
 // (critic, 2026-10-05, qa/2026-10-05-dmri-import-job.md, findings 6, 7, 11, 14).
 //   deno test -A --no-check --config ../../src/SlicerLive/deno.jsonc import-job.test.ts
 import { assert, assertEquals } from "jsr:@std/assert@1";
-import { anatomyOf, b0Path, colorFaPath, importGraph, isCurrent, isDiffusionScan, jobRules, partnerOf, planCases, synthstripVersion, trackSets, measuredB0, writeB0, writeColorFA, type SeriesFacts } from "./import-job.ts";
+import { anatomyOf, b0Path, colorFaPath, importGraph, isCurrent, isDiffusionScan, jobRules, partnerOf, planCases, synthstripVersion, trackSets, measuredB0, writeB0, writeColorFA, type SeriesFacts, CODE_SAME, madeWith } from "./import-job.ts";
 import { packRGB24 } from "albula";
 import type { TensorFit } from "./tensor.ts";
 import type { DiffusionSeries } from "./dwi.ts";
-import { SHORT } from "./tractcloud/name-tracts.ts";
+import { SHORT } from "./naming/name-tracts.ts";
 import { UNNAMED } from "./tracts-dicom.ts";
 
 const AX = [-2.5, 0, 0, 120, 0, 2.5, 0, -100, 0, 0, 2.5, -60, 0, 0, 0, 1];
@@ -67,6 +67,24 @@ Deno.test("stored tracts are current only for the same code, rules and inputs", 
   assert(!isCurrent({ rules, inputs: { ...inputs, t1: "other" } }, rules, inputs));
   assert(!isCurrent({ rules: { ...rules, extra: 1 }, inputs }, rules, inputs));
   assert(!isCurrent(undefined, rules, inputs));
+});
+
+// 2026-10-22 (Ron: "Yes, as proposed"): the commits are not compared; an older record is read through upgradeRules, and
+// only the equivalences stated in CODE_SAME and the naming field's rewording carry it over -- nothing else.
+Deno.test("an older record: commits not compared, a stated code equivalence and the old naming field carry over; nothing else does", () => {
+  const now = jobRules({ code: CODE_SAME["1b13f282b7ec"].same, labeler: "rapidparc 6a158dad6a0b; clusters ORG-800FC-100HCP; tract table TractCloud-42 0123456789ab", synthstrip: "haversack 0.15.0", headTemplate: "1f27aabea9f7" });
+  const inputs = { diffusion: "d", partner: "p", t1: "t" };
+  assertEquals("core" in now || "extension" in now, false, "the commits are not in the rules");
+  assertEquals(madeWith({ core: "8b53f4d", extension: "f307711" }), { core: "8b53f4d", extension: "f307711" });
+  const old = { ...now, code: "1b13f282b7ec", labeler: "rapidparc 6a158dad6a0b, table 75b1af321932, tractcloud 5a843c95eb60, template 1f27aabea9f7", core: "4d2ab4ae7387", extension: "deab2c4a0598" } as Record<string, unknown>;
+  delete old.headTemplate;
+  assert(isCurrent({ rules: old, inputs }, now, inputs), "the same code, the same naming: current");
+  assert(!isCurrent({ rules: { ...old, code: "9925e5b2db07" }, inputs }, now, inputs), "older code with real changes: stale");
+  assert(!isCurrent({ rules: { ...old, labeler: "rapidparc 999999999999, table 75b1af321932, tractcloud 5a843c95eb60, template 1f27aabea9f7" }, inputs }, now, inputs), "another network: stale");
+  assert(!isCurrent({ rules: { ...old, labeler: "rapidparc 6a158dad6a0b, table 000000000000, tractcloud 5a843c95eb60, template 1f27aabea9f7" }, inputs }, now, inputs), "another table: stale");
+  assert(!isCurrent({ rules: { ...old, labeler: "rapidparc 6a158dad6a0b, table 75b1af321932, tractcloud 5a843c95eb60, template 000000000000" }, inputs }, now, inputs), "another head template: stale");
+  assert(!isCurrent({ rules: { ...old, tracking: 7 }, inputs }, now, inputs), "another tracking rule: stale");
+  assert(isCurrent({ rules: { ...now, core: "anything", extension: "anything" }, inputs }, now, inputs), "a newer core or extension commit alone: still current");
 });
 
 Deno.test("track sets: one per named tract and side, the rest in Unnamed, last", () => {
@@ -142,12 +160,16 @@ Deno.test("the code fingerprint covers the files that make the tracts, not the r
   const here = new URL("./", import.meta.url);
   const g = await importGraph(new URL("./import-job-main.ts", here));
   const rel = g.map((u) => u.slice(here.href.length));
-  for (const f of ["tracking.ts", "prepare.ts", "csd-worker.ts", "tractcloud/tractcloud.ts", "tracts-dicom.ts", "hooks.ts", "diffusion-vendors.ts"]) assert(rel.includes(f), `${f} is in the graph`);
+  for (const f of ["tracking.ts", "prepare.ts", "csd-worker.ts", "naming/name-tracts.ts", "naming/table.ts", "tracts-dicom.ts", "hooks.ts", "diffusion-vendors.ts"]) assert(rel.includes(f), `${f} is in the graph`);
   for (const f of ["tract-slice.ts", "review.ts", "module.ts", "face.ts"]) assert(!rel.includes(f), `${f} is not`);
   // Deno's own module graph of the program, the extension's files: every one of them is in ours (workers, which Deno's
   // static graph does not follow, are in ours besides).
   // (Without core's configuration: "albula" stays unresolved, which leaves the extension's own files -- all this needs.)
   const out = await new Deno.Command(Deno.execPath(), { args: ["info", "--json", new URL("./import-job-main.ts", here).pathname], stdout: "piped", stderr: "null" }).output();
   const deno = (JSON.parse(new TextDecoder().decode(out.stdout)) as { modules: { specifier: string }[] }).modules.map((m) => m.specifier).filter((u) => u.startsWith(here.href) && !u.includes("/vendor/"));
-  for (const u of deno) assert(g.includes(u), `${u.slice(here.href.length)} is in Deno's graph but not ours`);
+  // Left out on purpose: the list of code equivalences (bookkeeping about fingerprints, not code that makes tracts; were
+  // it in, adding an equivalence would change the value it describes) and the tract table's data file (in the labeler
+  // field by its own hash).
+  const ASIDE = new Set(["code-equivalences.json", "naming/tractcloud-42.json"]);
+  for (const u of deno) if (!ASIDE.has(u.slice(here.href.length))) assert(g.includes(u), `${u.slice(here.href.length)} is in Deno's graph but not ours`);
 });

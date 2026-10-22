@@ -69,7 +69,7 @@ This extension adds diffusion MRI, from the scanner's files to the tracts near a
   other side's count.
   **Add lines** follows many more streamlines in the tracts shown, on both sides: 20 starting points in every voxel they
   pass through (O'Donnell et al. 2017 seeded tumor patients at 20 a voxel), at most 25,000 a press (`denseSeeds`), named
-  in the whole-brain run's context (`tractcloud/name-tracts.ts` `nameAgainst`; a copy of a run's streamline gets that
+  in the whole-brain run's context (`naming/name-tracts.ts` `nameAgainst`; a copy of a run's streamline gets that
   streamline's name, 932 of 932 on PAT16). PAT16's right uncinate: 2 lines to 5, 23.1 s.
 - **The module, for a neurosurgery resident** (`module.ts`): 1 · the patient's case — diffusion MRI, MRI of the anatomy
   and tumor outline, each ticked when it is there; scans come in through Albula's Load / Save and DICOM database; a

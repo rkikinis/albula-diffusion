@@ -1,12 +1,13 @@
 // NAMING A WHOLE-BRAIN TRACTOGRAPHY: streamlines in (RAS mm), a tract per streamline out. RAPIDPARC's network names (the
 // default since 2026-10-03, and the only namer the app and the import job use); TractCloud's only when a validation run
-// asks for it. Both give a cluster of the ORG-800FC-100HCP atlas; TractCloud's 42-tract table (tractcloud/model/model.json)
+// asks for it. Both give a cluster of the ORG-800FC-100HCP atlas; TractCloud's 42-tract table (tractcloud-42.json)
 // gives the tract, and the side is read after centering on the training data's average position. Which tool does what: ../NAMING.md.
 // Short streamlines (under 40 mm) are left out, both from naming and as context: the atlas the network learned from
 // has none (measured on PAT16: keeping them doubles the share called an outlier). Several draws of the random context
 // can vote; each draw is seeded, so the same streamlines always get the same names.
-import { draw, localNeighbors, prepare, tractsOf, type TractCloudModel } from "./tractcloud.ts";
-import { contexts, tractCloudGpu } from "./tractcloud-gpu.ts";
+import { prepare, tractsOf, type TractTable } from "./table.ts";
+import { draw, localNeighbors, type TractCloudModel } from "../tractcloud/tractcloud.ts";
+import { contexts, tractCloudGpu } from "../tractcloud/tractcloud-gpu.ts";
 import { CONTEXT, groupRows, normalizeCube, resampleByIndex, shuffle, type RapidParcModel } from "../rapidparc/rapidparc.ts";
 import { rapidParcGpu } from "../rapidparc/rapidparc-gpu.ts";
 
@@ -26,9 +27,13 @@ const lengthOf = (s: Float32Array) => { let L = 0; for (let i = 3; i < s.length;
 /** Who names: RapidParc when `rapidParc` is given (the default since 2026-10-03, Ron: "2 yes"), else TractCloud. Both name
  *  the same 1,600 clusters with the same table (`model`, TractCloud's model.json), so everything after the clusters is
  *  shared: the 40 mm cut, the side, the draws' vote, the margin. */
-export interface NameOptions { draws?: number; seed?: number; rapidParc?: RapidParcModel }
+export interface NameOptions { draws?: number; seed?: number; rapidParc?: RapidParcModel;
+  /** TractCloud's network, for a run that asks for it (validation only); when the table passed in is TractCloud's whole
+   *  model, that is used. Neither given: refused, never a silent choice. */
+  tractCloud?: TractCloudModel }
+const isTractCloud = (m: TractTable): m is TractCloudModel => "conv1" in m;
 
-export async function nameTracts(device: GPUDevice, model: TractCloudModel, streamlines: Float32Array[], opts: NameOptions = {}): Promise<Named> {
+export async function nameTracts(device: GPUDevice, model: TractTable, streamlines: Float32Array[], opts: NameOptions = {}): Promise<Named> {
   return await nameAgainst(device, model, streamlines, [], opts).then((r) => r.context);
 }
 
@@ -40,14 +45,16 @@ export async function nameTracts(device: GPUDevice, model: TractCloudModel, stre
  * draw their context from the context run only. Names for `context` come back too, and are exactly nameTracts' (the
  * draws do not depend on `added`); an added copy of a context streamline gets that streamline's name (name-tracts.test.ts).
  */
-export async function nameAgainst(device: GPUDevice, model: TractCloudModel, context: Float32Array[], added: Float32Array[], opts: NameOptions = {}): Promise<{ context: Named; added: Named }> {
+export async function nameAgainst(device: GPUDevice, model: TractTable, context: Float32Array[], added: Float32Array[], opts: NameOptions = {}): Promise<{ context: Named; added: Named }> {
+  const tc = opts.rapidParc ? undefined : opts.tractCloud ?? (isTractCloud(model) ? model : undefined);
+  if (!opts.rapidParc && !tc) throw new Error("no tract-naming network was given (RapidParc, or TractCloud for a validation run)");
   const t0 = performance.now(), draws = opts.draws ?? 1, seed = opts.seed ?? 20260930;
   const kept = (set: Float32Array[]) => set.map((s, i) => [s, i] as const).filter(([s]) => lengthOf(s) >= MIN_LENGTH_MM);
   const keepC = kept(context), keepA = kept(added), Nc = keepC.length;
   const out = (n: number): Named => ({ tract: new Int32Array(n).fill(SHORT), side: new Int8Array(n), draws, seconds: 0, margin: new Float32Array(n).fill(NaN) });
   const rc = out(context.length), ra = out(added.length);
   const done = () => { rc.seconds = ra.seconds = (performance.now() - t0) / 1000; return { context: rc, added: ra }; };
-  if (Nc === 0 || (!opts.rapidParc && Nc < model.json.settings.k + 1)) return done();   // TractCloud needs k + 1; RapidParc names any number
+  if (Nc === 0 || (tc && Nc < tc.json.settings.k + 1)) return done();   // TractCloud needs k + 1; RapidParc names any number
   // Context first, the added after it; every row's index in the result it belongs to.
   const keep = [...keepC.map(([s, i]) => [s, i, rc] as const), ...keepA.map(([s, i]) => [s, i, ra] as const)];
   const feat = prepare(keep.map(([s]) => s), model, Nc), feat32 = Float32Array.from(feat), N = keep.length;
@@ -83,11 +90,11 @@ export async function nameAgainst(device: GPUDevice, model: TractCloudModel, con
       }
     } finally { gpu.destroy(); }
   } else {
-    const gpu = tractCloudGpu(device, model);
+    const gpu = tractCloudGpu(device, tc!);
     try {
       for (let d = 0; d < draws; d++) {
-        const { ds, glob } = draw(Nc, model, seed + d);
-        const clusters = await gpu.classify(feat32, contexts(localNeighbors(feat, ds, model), ds, glob, model.json.settings.k));
+        const { ds, glob } = draw(Nc, tc!, seed + d);
+        const clusters = await gpu.classify(feat32, contexts(localNeighbors(feat, ds, tc!), ds, glob, tc!.json.settings.k));
         tally(d, clusters, gpu.margins());
       }
     } finally { gpu.destroy(); }

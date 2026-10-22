@@ -4,7 +4,7 @@ import { assertEquals } from "jsr:@std/assert";
 import { ATLAS_REFERENCE, readMore, tnaLine, TRACT_INFO, tractLabel } from "./tract-info.ts";
 import { DIFFUSION_REFERENCES } from "./references.ts";
 
-const model = JSON.parse(await Deno.readTextFile(new URL("./tractcloud/model/model.json", import.meta.url))) as { tracts: { abbr: string }[] };
+const model = JSON.parse(await Deno.readTextFile(new URL("./naming/tractcloud-42.json", import.meta.url))) as { tracts: { abbr: string }[] };
 
 Deno.test("every tract of the 42-tract table has one row, and only those", () => {
   const named = model.tracts.map((t) => t.abbr).filter((a) => a !== "Other");

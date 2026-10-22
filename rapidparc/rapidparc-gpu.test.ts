@@ -17,7 +17,7 @@ const device = adapter && L ? await adapter.requestDevice({ requiredLimits: { ma
 
 Deno.test({ name: "RapidParc on the card: the processor's clusters and margins, RapidParc's clusters, and the time (PAT16)", ignore: !device || !have, fn: async () => {
   const model = loadRapidParc(Deno.readFileSync(new URL("./model/rapidparc.safetensors", import.meta.url)).buffer);
-  const json = JSON.parse(Deno.readTextFileSync(new URL("../tractcloud/model/model.json", import.meta.url))) as { clusterToTract: number[] };
+  const json = JSON.parse(Deno.readTextFileSync(new URL("../naming/tractcloud-42.json", import.meta.url))) as { clusterToTract: number[] };
   const lut = Int32Array.from(json.clusterToTract);
   const raw = new Float32Array(Deno.readFileSync(TC + "streamlines.f32").buffer), all: Float32Array[] = []; let o = 1;
   for (let i = 0; i < raw[0]; i++) { const n = raw[o]; all.push(raw.slice(o + 1, o + 1 + 3 * n)); o += 1 + 3 * n; }

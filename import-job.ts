@@ -22,9 +22,10 @@ import { TRACKING_RULE } from "./tracking-rules.ts";
 import { OUTSIDE_RULE } from "./outside-brain.ts";
 import { stageText, type StageTimes } from "./planning.ts";
 import { colorFA, type TensorFit } from "./tensor.ts";
-import { SHORT } from "./tractcloud/name-tracts.ts";
-import { tractColor, TRACT_COLORS_VERSION } from "./tractcloud/tract-colors.ts";
-import type { TractCloudModel } from "./tractcloud/tractcloud.ts";
+import { SHORT } from "./naming/name-tracts.ts";
+import { tractColor, TRACT_COLORS_VERSION } from "./naming/tract-colors.ts";
+import type { TractTable } from "./naming/table.ts";
+import CODE_EQUIVALENCES from "./code-equivalences.json" with { type: "json" };
 import type { RapidParcModel } from "./rapidparc/rapidparc.ts";
 import { adPath, b0Path, colorFaBrainstemPath, colorFaPath, colorFaTalairachPath, dicomToTracts, faPath, mdPath, rdPath, tractsToDicom, UNNAMED, type TractSetData } from "./tracts-dicom.ts";
 import { alignTemplate, frames, HEAD_FRAME_RULE, TALAIRACH_RISE_DEG, type M4 } from "./head-frame.ts";
@@ -38,24 +39,65 @@ const MAX_SERIES_FILES = 4000;
 // ── What decides whether stored tracts are current ───────────────────────────────────────────────────────────────
 
 /**
- * EVERYTHING THAT MADE THE TRACTS: the rule of each step, a fingerprint of the code (`code`: the extension's modules that
- * shape the result, hashed by the program; critic finding 1 -- a fix that moves the results without a new rule number
- * must still make stored tracts stale), the naming network's weights and table, and SynthStrip's version. Stored tracts
- * are current only when all of it AND the inputs are the same (Ron, 2026-10-05: "remake automatically, versioned").
+ * WHAT DECIDES WHETHER STORED TRACTS ARE CURRENT: the rule of each step, a fingerprint of the code that shapes the result
+ * (`code`: code-fingerprint.ts -- the extension's files the job reaches, WITHOUT comments and file names, so a comment or
+ * a moved file changes nothing; critic finding 1: a fix that moves the results without a new rule number must still make
+ * stored tracts stale), the naming (`labeler`: RapidParc's weights, the clusters, TractCloud's 42-tract table; NAMING.md),
+ * the head template, and SynthStrip's version. Stored tracts are current only when all of it AND the inputs are the same
+ * (Ron, 2026-10-05: "remake automatically, versioned").
+ *
+ * NOT IN IT, since 2026-10-22 (Ron: "Yes, as proposed"): the commits of Albula's core and of this extension. They are in
+ * the record (`madeWith`, below) to say what made the tracts, but compared they made EVERY commit -- a comment, a renderer
+ * fix -- remake every tract set of a database at its next import (34 of the test cases' 88 on 2026-10-21). A change in the
+ * core that changes the tracts is announced by raising the rule of the step it changes.
  */
-export function jobRules(versions: { code: string; labeler: string; synthstrip: string; core?: string; extension?: string }): Record<string, string | number> {
+export function jobRules(versions: { code: string; labeler: string; synthstrip: string; headTemplate?: string }): Record<string, string | number> {
   return { directions: DIRECTION_CHECK_RULE, distortion: DISTORTION_RULE, motion: MOTION_RULE, registration: REGISTRATION_RULE, tracking: TRACKING_RULE,
     outside: OUTSIDE_RULE.on ? OUTSIDE_RULE.id : 0, maxB: PIPELINE_MAX_B, tractColors: TRACT_COLORS_VERSION,
     headFrame: HEAD_FRAME_RULE, code: versions.code, labeler: versions.labeler, synthstrip: versions.synthstrip,
-    // THE COMMITS of Albula's core and of this extension that ran ("+changes" when their folders differed), so the record
-    // names the code beyond this extension's own files (critic 2026-10-14, import-time jobs, finding 6).
-    ...(versions.core ? { core: versions.core } : {}), ...(versions.extension ? { extension: versions.extension } : {}) };
+    ...(versions.headTemplate ? { headTemplate: versions.headTemplate } : {}) };
+}
+/** WHAT MADE THEM, for the record only (critic 2026-10-14, import-time jobs, finding 6): the commits of Albula's core and
+ *  of this extension that ran ("+changes" when their folders differed). Never compared. */
+export function madeWith(versions: { core?: string; extension?: string }): Record<string, string> {
+  return { ...(versions.core ? { core: versions.core } : {}), ...(versions.extension ? { extension: versions.extension } : {}) };
+}
+
+/**
+ * ONE STEP FROM AN OLDER RECORD TO TODAY'S (2026-10-22), each equivalence stated and measured, nothing assumed:
+ * - `core` and `extension` leave the comparison (they are kept, unread, in the stored record);
+ * - the code fingerprint: version 1 (the files' full text with their names) of a code that, without comments, is the
+ *   code of a version-2 value -- CODE_SAME below, measured by running code-fingerprint.ts on the commits that made stored
+ *   sets; a version-2 value superseded by a change that does not alter the tracts -- CODE_SAME too, with how it was shown;
+ * - the naming field before 2026-10-22, "rapidparc A, table B, tractcloud C, template D", where B is TractCloud's
+ *   model.json, whose table naming/tractcloud-42.json holds unchanged (naming/tractcloud-42.test.ts): the same network A
+ *   and the same table, written as today's labeler; D, the head template, in its own field.
+ */
+// The list lives in code-equivalences.json: a data file the fingerprint does not read (code-fingerprint.ts follows .ts
+// and .wgsl), so adding an equivalence does not change the value it describes. Each entry says how it was shown.
+export const CODE_SAME: Record<string, { same: string; why: string }> = CODE_EQUIVALENCES as Record<string, { same: string; why: string }>;
+const OLD_TABLE = "75b1af321932";   // hash of tractcloud/model/model.json, the table's file until 2026-10-22
+export function upgradeRules(stored: Record<string, unknown>, current: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...stored };
+  delete out.core; delete out.extension;
+  // The code: follow the stated equivalences (a chain, each step measured or shown) to the current value if it leads there.
+  let code = String(out.code ?? ""), steps = 0;
+  while (code !== String(current.code) && CODE_SAME[code] && steps++ < 8) code = CODE_SAME[code].same;
+  if (code === String(current.code)) out.code = current.code;
+  // The naming field before 2026-10-22.
+  const old = /^rapidparc (\w+), table (\w+), tractcloud \w+(?:, template (\w+))?$/.exec(String(out.labeler ?? ""));
+  const now = /^rapidparc (\w+); clusters ORG-800FC-100HCP; tract table TractCloud-42 \w+$/.exec(String(current.labeler ?? ""));
+  if (old && now && old[1] === now[1] && old[2] === OLD_TABLE) {
+    out.labeler = current.labeler;
+    if (old[3] && out.headTemplate === undefined) out.headTemplate = old[3];
+  }
+  return out;
 }
 /** The inputs a case was made from: a reversed scan or a T1 that arrives later makes the case stale (finding 11). */
 export interface CaseInputs { diffusion: string; partner: string | null; t1: string | null }
-/** Same rules (every key, both ways) and same inputs. */
+/** Same rules (every key, both ways, an older record read through upgradeRules) and same inputs. */
 export function isCurrent(stored: { rules?: Record<string, unknown>; inputs?: Partial<CaseInputs> } | undefined, rules: Record<string, unknown>, inputs: CaseInputs): boolean {
-  const a = stored?.rules;
+  const a = stored?.rules ? upgradeRules(stored.rules, rules) : undefined;
   if (!a || Object.keys(a).length !== Object.keys(rules).length || !Object.keys(rules).every((k) => String(a[k]) === String(rules[k]))) return false;
   const i = stored?.inputs ?? {};
   return i.diffusion === inputs.diffusion && (i.partner ?? null) === inputs.partner && (i.t1 ?? null) === inputs.t1;
@@ -342,8 +384,8 @@ export function trackSets(sl: Float32Array[], tract: Int32Array, side: Int8Array
  * ONE CASE: the pipeline on the planned scan, its tracts written and indexed through the server -- unless tracts made
  * by the same code, rules and inputs are already stored.
  */
-export async function makeTracts(dbDir: string, dbId: string, server: string, plan: { dwi: ReadSeries; partner?: ReadSeries; t1?: ReadSeries }, device: GPUDevice, model: TractCloudModel,
-  labeler: RapidParcModel, versions: { code: string; labeler: string; synthstrip: string }, onProgress?: (line: string) => void, opts: { force?: boolean; dryRun?: boolean; template?: { t1: Grid3; brain: Uint8Array } } = {}): Promise<CaseOutcome> {
+export async function makeTracts(dbDir: string, dbId: string, server: string, plan: { dwi: ReadSeries; partner?: ReadSeries; t1?: ReadSeries }, device: GPUDevice, model: TractTable,
+  labeler: RapidParcModel, versions: { code: string; labeler: string; synthstrip: string; headTemplate?: string; core?: string; extension?: string }, onProgress?: (line: string) => void, opts: { force?: boolean; dryRun?: boolean; template?: { t1: Grid3; brain: Uint8Array } } = {}): Promise<CaseOutcome> {
   let rules = jobRules(versions);
   const inputs: CaseInputs = { diffusion: plan.dwi.facts.uid, partner: plan.partner?.facts.uid ?? null, t1: plan.t1?.facts.uid ?? null };
   const stored = await storedTracts(dbDir, plan.dwi.facts.uid);
@@ -400,7 +442,7 @@ export async function makeTracts(dbDir: string, dbId: string, server: string, pl
   } else if (opts.template) frameNote = "; no head frame (the scan is not on the T1's axes)";
   // The case's time includes the frame (critic 2026-10-07, finding 9).
   const seconds = (performance.now() - t0) / 1000;
-  const provenance = { rules, inputs, made: new Date().toISOString(), seconds: +seconds.toFixed(1), stages: stageText(stages), ...(headFrame ? { headFrame } : {}),
+  const provenance = { rules, madeWith: madeWith(versions), inputs, made: new Date().toISOString(), seconds: +seconds.toFixed(1), stages: stageText(stages), ...(headFrame ? { headFrame } : {}),
     streamlines: r.sl.length, onePointLeftOut: r.sl.filter((p) => p.length < 6).length, corrected: r.corrected, alignedToT1: aligned,
     trackingRuleApplied: r.rule.id, motionRuleApplied: r.prep.motionRule, ...(r.prep.directions ? { directions: { rule: r.prep.directions.rule, verdict: r.prep.directions.verdict, used: r.prep.directions.best.label, Q: r.prep.directions.best.Q, recordOverBest: r.prep.directions.recordOverBest } } : {}), ...(r.alignment ? { alignment: r.alignment } : {}), brain: r.fit.seedMaskRule ?? r.fit.maskRule };
   // Several objects can follow each other under one scan (remade after a change): numbered from 900 by their time -- one
@@ -446,7 +488,7 @@ export async function makeTracts(dbDir: string, dbId: string, server: string, pl
  * tracking again): the case corrected, aligned and fitted as its tracts were (the same pipeline, `fitOnly`), and the
  * missing maps written beside the existing set. The tracts and their record stay as they are.
  */
-export async function makeMaps(dbDir: string, server: string, plan: { dwi: ReadSeries; partner?: ReadSeries; t1?: ReadSeries }, tractsUID: string, device: GPUDevice, model: TractCloudModel,
+export async function makeMaps(dbDir: string, server: string, plan: { dwi: ReadSeries; partner?: ReadSeries; t1?: ReadSeries }, tractsUID: string, device: GPUDevice, model: TractTable,
   labeler: RapidParcModel, onProgress?: (line: string) => void): Promise<CaseOutcome> {
   const exists = (p: string) => Deno.stat(`${dbDir}/${p}`).then(() => true, () => false);
   const missing = (await Promise.all(MAP_PATHS.map(async (p) => (await exists(p(tractsUID))) ? undefined : p))).filter((p): p is (typeof MAP_PATHS)[number] => !!p);

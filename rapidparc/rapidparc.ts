@@ -14,7 +14,7 @@
 // across all 2,000 streamlines of the group, feed-forward 256, normalization after each step, as PyTorch's default);
 // a classifier 128 → 256 → 1,600. The 1,600 are the O'Donnell-Zhang atlas's 800 clusters and their 800 outlier twins —
 // the same classes, the same cluster → tract table and the same 43 tract names as TractCloud's (checked identical,
-// 2026-10-03), so tractcloud/model/model.json's table serves both.
+// 2026-10-03), so TractCloud's 42-tract table (../naming/tractcloud-42.json) serves both.
 //
 // This file is the PROCESSOR version, the reference the graphics-card version is checked against; itself checked layer
 // by layer against RapidParc's network in PyTorch (rapidparc.test.ts; Contents/tools/rapidparc-reference.py).

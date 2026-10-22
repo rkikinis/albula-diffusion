@@ -11,10 +11,9 @@
   },
   "jobLabel": "Preparing fiber tracts",
   "assets": {
-    "tractcloud": [
-      "tractcloud/model/weights.f32",
-      "tractcloud/model/model.json",
-      "tractcloud/model/LICENSE.txt"
+    "naming": [
+      "naming/tractcloud-42.json",
+      "naming/LICENSE-tractcloud.txt"
     ],
     "dcm2niix": [
       "vendor/dcm2niix/index.js",

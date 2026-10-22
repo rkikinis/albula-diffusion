@@ -8,7 +8,7 @@
   (the same values RapidParc's package and Mike Halle's tractline check). Read by `../rapidparc.ts` (`readSafetensors`).
 - The settings (`rapidparc_args.yaml` in the release): 15 points a streamline, groups of 2,000, 8 encoder layers,
   d_model 128, 1 head, feed-forward 256, classifier 256, 1,600 classes.
-- The classes, the cluster → tract table and the tract names are TractCloud's (`../../tractcloud/model/model.json`):
+- The classes, the cluster → tract table and the tract names are TractCloud's 42-tract table (`../../naming/tractcloud-42.json`, taken from TractCloud's `model.json`):
   RapidParc's `mapping_from_800_800_to_43` and `int_to_label` were checked identical to it on 2026-10-03.
 
 License: BSD 3-Clause, Copyright (c) 2026, Visualization and Medical Image Analysis Group, University of Bonn

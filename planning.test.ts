@@ -1,8 +1,8 @@
 import { assert, assertEquals } from "jsr:@std/assert@1";
 import { correctWithReversed, denseSeeds, otherSide, sortByDistance, wholeBrainSeeds } from "./planning.ts";
 import type { DiffusionSeries } from "./dwi.ts";
-import type { TractCloudModel } from "./tractcloud/tractcloud.ts";
-import { SHORT, type Named } from "./tractcloud/name-tracts.ts";
+import type { TractTable } from "./naming/table.ts";
+import { SHORT, type Named } from "./naming/name-tracts.ts";
 import type { TensorFit } from "./tensor.ts";
 
 Deno.test("whole-brain seeds do not depend on the order the slices are stored in", () => {
@@ -45,7 +45,7 @@ Deno.test("dense seeds: past the cap, fewer per voxel; past that, a sample of th
 });
 
 Deno.test("faint tracts: within reach with fewer than the minimum; every side's total for comparing", () => {
-  const model = { json: { tracts: [{}, {}, {}] } } as unknown as TractCloudModel;   // tracts 0, 1; 2 is Other
+  const model = { json: { tracts: [{}, {}, {}] } } as unknown as TractTable;   // tracts 0, 1; 2 is Other
   // Tract 0 right: 6 streamlines, 5 near (near). Tract 1 right: 4, 3 near (faint). Tract 1 left: 30, none near (far).
   const spec: [number, number, number][] = [...Array(5).fill([0, 1, 2]), [0, 1, 50], ...Array(3).fill([1, 1, 4]), [1, 1, 40], ...Array(30).fill([1, -1, 30]), [SHORT, 0, 1], [2, 0, 60]];
   const named = { tract: Int32Array.from(spec.map((x) => x[0])), side: Int8Array.from(spec.map((x) => x[1])), draws: 1, seconds: 0 } as Named;
@@ -58,7 +58,7 @@ Deno.test("faint tracts: within reach with fewer than the minimum; every side's 
 });
 
 Deno.test("the gray band: at 6 mm, a tract whose closest streamline is at 7 mm is listed gray; one at 9 mm is not", () => {
-  const model = { json: { tracts: [{}, {}, {}, {}] } } as unknown as TractCloudModel;
+  const model = { json: { tracts: [{}, {}, {}, {}] } } as unknown as TractTable;
   // Tract 0: 6 streamlines at 3 mm (near). Tract 1: 10 at 7 mm (the band). Tract 2: 10 at 9 mm (beyond it).
   const spec: [number, number, number][] = [...Array(6).fill([0, 1, 3]), ...Array(10).fill([1, 1, 7]), ...Array(10).fill([2, 1, 9])];
   const named = { tract: Int32Array.from(spec.map((x) => x[0])), side: Int8Array.from(spec.map((x) => x[1])), draws: 1, seconds: 0 } as Named;

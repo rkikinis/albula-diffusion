@@ -13,8 +13,8 @@
 // (outside the head, where a magnitude image is pure noise: Rayleigh, median = σ·√(2 ln 2)), and each voxel becomes
 // |s + n₁ + i·n₂| with n₁, n₂ ~ N(0, σ²) -- a second acquisition's worth of noise on top of the first.
 import type { DiffusionSeries } from "./dwi.ts";
-import type { Named } from "./tractcloud/name-tracts.ts";
-import { rng } from "./tractcloud/tractcloud.ts";
+import type { Named } from "./naming/name-tracts.ts";
+import { rng } from "./random.ts";
 
 export const MIN_FOR_CENTER = 10;
 

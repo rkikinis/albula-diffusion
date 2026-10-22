@@ -1,7 +1,7 @@
 // DIPY's median_otsu, written from its source (median-otsu.ts): the fast filter against the plain one; the threshold; the mask.
 import { assert, assertEquals } from "jsr:@std/assert@1";
 import { medianFilter, medianFilterPasses, otsuThreshold } from "./median-otsu.ts";
-import { rng } from "./tractcloud/tractcloud.ts";
+import { rng } from "./random.ts";
 
 Deno.test("the sliding-histogram filter gives exactly the plain filter's answer, pass after pass, edges mirrored", () => {
   const r = rng(7), dims = [13, 11, 9], n = 13 * 11 * 9;

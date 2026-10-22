@@ -18,7 +18,11 @@
 // run to run (measured on PAT16: 79% of streamlines keep their tract between draws). Here they come from a seeded
 // generator, so the same streamlines always get the same names.
 
-export interface TractInfo { abbr: string; name: string; category: string }
+import { prepare, resample, tractsOf, type TractInfo, type TractTable } from "../naming/table.ts";
+import { rng } from "../random.ts";
+// Re-exported for TractCloud's own tests and the reference tool, which check the network with them.
+export { prepare, resample, rng, tractsOf };
+
 export interface ModelJson {
   settings: { points: number; k: number; kGlobal: number; kPoint: number; kSampleRate: number; embDims: number; classes: number; bnEps: number; leak: number };
   massCenter: number[][];
@@ -31,7 +35,8 @@ export interface ModelJson {
 /** A point-wise layer with its batch norm folded in: y = s * (W x) + t, then the leaky ReLU. W is [out][in]. */
 interface Layer { out: number; inp: number; W: Float64Array; s: Float64Array; t: Float64Array; bias?: Float64Array }
 
-export interface TractCloudModel {
+/** TractCloud's network: its table and average position (as every TractTable) and its layers. */
+export interface TractCloudModel extends TractTable {
   json: ModelJson;
   P: number;
   conv1: Layer; conv2: Layer; conv3: Layer; conv4: Layer; conv5: Layer;
@@ -66,43 +71,6 @@ export function loadModel(weights: ArrayBuffer, json: ModelJson): TractCloudMode
     lin1: layer("linear1.weight", "bn6", null), lin2: layer("linear2.weight", "bn7", "linear2.bias"),
     lin3: layer("linear3.weight", null, "linear3.bias"),
   };
-}
-
-/** One streamline (x,y,z,… RAS mm) at `n` points of equal arc length along it -- the original's extract_ras_features. */
-export function resample(pts: Float32Array | number[], n = 15): Float64Array {
-  const m = pts.length / 3, out = new Float64Array(3 * n);
-  if (m < 2) { for (let i = 0; i < n; i++) for (let c = 0; c < 3; c++) out[3 * i + c] = pts[c] ?? 0; return out; }
-  const cum = new Float64Array(m);
-  for (let i = 1; i < m; i++) cum[i] = cum[i - 1] + Math.hypot(pts[3 * i] - pts[3 * i - 3], pts[3 * i + 1] - pts[3 * i - 2], pts[3 * i + 2] - pts[3 * i - 1]);
-  const total = cum[m - 1];
-  if (total < 1e-12) { for (let i = 0; i < n; i++) for (let c = 0; c < 3; c++) out[3 * i + c] = pts[c]; return out; }
-  let seg = 0;
-  for (let i = 0; i < n; i++) {
-    const t = (i / (n - 1)) * total;
-    while (seg < m - 2 && cum[seg + 1] <= t) seg++;             // searchsorted(side="right") - 1, clipped to [0, m-2]
-    const len = cum[seg + 1] - cum[seg], f = (t - cum[seg]) / (len < 1e-12 ? 1 : len);
-    for (let c = 0; c < 3; c++) out[3 * i + c] = pts[3 * seg + c] + f * (pts[3 * seg + 3 + c] - pts[3 * seg + c]);
-  }
-  return out;
-}
-
-/** All streamlines resampled and moved so their mean (per point) is the atlas's: feat, (N, P, 3) row-major. */
-/** `centerOn`: the brain's center is the mean of the first `centerOn` streamlines only (default all) -- so streamlines
- *  added to a whole-brain run are placed where the whole brain puts them (nameAgainst, name-tracts.ts). */
-export function prepare(streamlines: (Float32Array | number[])[], model: TractCloudModel, centerOn = streamlines.length): Float64Array {
-  const P = model.P, N = streamlines.length, feat = new Float64Array(N * P * 3);
-  streamlines.forEach((s, i) => feat.set(resample(s, P), i * P * 3));
-  const mean = new Float64Array(P * 3);
-  for (let i = 0; i < centerOn; i++) for (let j = 0; j < P * 3; j++) mean[j] += feat[i * P * 3 + j] / centerOn;
-  const mc = model.json.massCenter;
-  for (let i = 0; i < N; i++) for (let p = 0; p < P; p++) for (let c = 0; c < 3; c++) feat[(i * P + p) * 3 + c] += mc[p][c] - mean[p * 3 + c];
-  return feat;
-}
-
-/** A small seeded generator (mulberry32), so the same streamlines always get the same draws. */
-export function rng(seed: number): () => number {
-  let a = seed >>> 0;
-  return () => { a = (a + 0x6d2b79f5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
 }
 
 /** The random choices: the sample searched for local neighbors (sorted) and the global streamlines (with repeats). */
@@ -244,10 +212,4 @@ export function classifyCpu(model: TractCloudModel, feat: Float64Array, ds: Int3
     }
   }
   return out;
-}
-
-/** The tract (index into model.json.tracts) of each cluster. */
-export function tractsOf(model: TractCloudModel, clusters: Int32Array): Int32Array {
-  const lut = model.json.clusterToTract;
-  return clusters.map((c) => lut[Math.max(0, Math.min(lut.length - 1, c))]);
 }

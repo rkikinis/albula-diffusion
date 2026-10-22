@@ -1,7 +1,7 @@
 // The agreement measures (agreement.ts): tract mix r, center shift, label agreement; the scan's noise level and added noise.
 import { assert, assertAlmostEquals, assertEquals } from "jsr:@std/assert@1";
 import { addScanNoise, agreement, noiseSigma } from "./agreement.ts";
-import type { Named } from "./tractcloud/name-tracts.ts";
+import type { Named } from "./naming/name-tracts.ts";
 import type { DiffusionSeries } from "./dwi.ts";
 
 const line = (x: number, y: number) => Float32Array.from([x, y, 0, x, y, 10, x, y, 20]);

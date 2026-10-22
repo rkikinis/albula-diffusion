@@ -1,0 +1,10 @@
+{
+ "1b13f282b7ec": {
+  "same": "df3a48d8f0fd",
+  "why": "2026-10-22: version 1 -> version 2 of the same code. code-fingerprint.ts on albula-diffusion deab2c4, 5fab115 and f307711 gives df3a48d8f0fd for all three: they differ in comments only. (5c597d4, v1 9925e5b2db07, gives c39a1ae91f11: real changes since, so its sets stay stale.)"
+ },
+ "df3a48d8f0fd": {
+  "same": "3aea33bc12ec",
+  "why": "2026-10-22: the naming moved into naming/ (the table loaded alone, TractCloud's network only when asked), the record's naming field reworded, staleness without the commits. The same tracts: PAT16 run through the case runner at f307711 and after the change gave identical results -- every one of the 38 tracts' counts on each side, the streamline totals, named and unnamed, the corrections and the alignment (compared byte for byte, timings left out)."
+ }
+}

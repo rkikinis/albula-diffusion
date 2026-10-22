@@ -4,8 +4,9 @@
 import type { DiffusionSeries } from "./dwi.ts";
 import { applyField, estimateField, estimateFieldWithMotion, fieldAtCenters, type FieldFit } from "./distortion.ts";
 import type { TensorFit } from "./tensor.ts";
-import { rng, type TractCloudModel } from "./tractcloud/tractcloud.ts";
-import { SHORT, type Named } from "./tractcloud/name-tracts.ts";
+import { rng } from "./random.ts";
+import type { TractTable } from "./naming/table.ts";
+import { SHORT, type Named } from "./naming/name-tracts.ts";
 import { distanceMap } from "./distance.ts";
 import type { UkfData } from "./ukf.ts";
 import { trackUkfGpu } from "./ukf-gpu.ts";
@@ -292,7 +293,7 @@ export const NEAR_MM = 6, GRAY_BAND_MM = 2;
 /** Sort a named whole-brain tractography by distance to a structure: the named tracts at least `minStreamlines` of
  *  whose streamlines come within `withinMm` (closest first), the others, and the unnamed streamlines (TractCloud's
  *  Other, and those too short to name). */
-export function sortByDistance(model: TractCloudModel, named: Named, dist: Float64Array, withinMm: number, minStreamlines = MIN_NEAR_STREAMLINES, grayMm = withinMm, outside?: Uint8Array): Sorted {
+export function sortByDistance(model: TractTable, named: Named, dist: Float64Array, withinMm: number, minStreamlines = MIN_NEAR_STREAMLINES, grayMm = withinMm, outside?: Uint8Array): Sorted {
   const OTHER = model.json.tracts.length - 1, by = new Map<string, NearTract>(), unnamedNear: number[] = [], unnamedFar: number[] = [], outsideNear: number[] = [], outsideFar: number[] = [];
   for (let i = 0; i < named.tract.length; i++) {
     if (outside?.[i]) { (dist[i] <= withinMm ? outsideNear : outsideFar).push(i); continue; }
@@ -353,4 +354,4 @@ export function denseSeeds(strands: Float32Array[], grid: { dims: number[]; ijkT
 }
 
 /** A tract's name in words, with its side. */
-export const tractName = (model: TractCloudModel, tract: number, side: number) => `${model.json.tracts[tract].name}${side > 0 ? ", right" : side < 0 ? ", left" : ""}`;
+export const tractName = (model: TractTable, tract: number, side: number) => `${model.json.tracts[tract].name}${side > 0 ? ", right" : side < 0 ? ", left" : ""}`;

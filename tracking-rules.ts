@@ -32,7 +32,7 @@ import type { DiffusionSeries } from "./dwi.ts";
 import type { TensorFit } from "./tensor.ts";
 import { prepareUkfData, type UkfData, type UkfOptions } from "./ukf.ts";
 import { wholeBrainSeeds } from "./planning.ts";
-import { rng } from "./tractcloud/tractcloud.ts";
+import { rng } from "./random.ts";
 
 export interface TrackingRule {
   id: 1 | 2 | 3;

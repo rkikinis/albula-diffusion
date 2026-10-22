@@ -23,7 +23,8 @@ import { parseArgs } from "jsr:@std/cli@1/parse-args";
 import { setDicomLibrary, dcmjs } from "albula/server";
 import { parseNiftiVolumes } from "albula";
 import "./hooks.ts";
-import { loadModel, type ModelJson } from "./tractcloud/tractcloud.ts";
+import { CLUSTERS_NAME, loadTable, TABLE_NAME, type TableJson } from "./naming/table.ts";
+import { codeFingerprint } from "./code-fingerprint.ts";
 import { loadRapidParc } from "./rapidparc/rapidparc.ts";
 import { importGraph, makeMaps, makeTracts, MAP_PATHS, planStudy, studiesOf, synthstripVersion } from "./import-job.ts";
 import { dicomToTracts } from "./tracts-dicom.ts";
@@ -42,14 +43,6 @@ const server = args.server.replace(/\/+$/, "");
 
 /** THE CODE THAT SHAPES THE RESULT, hashed (critic, finding 1): every module of the extension except its tests, the
  *  person's interface (module.ts, face.ts, review.ts) and this program. A change there makes stored tracts stale. */
-async function codeFingerprint(): Promise<string> {
-  const here = new URL("./", import.meta.url), parts: Uint8Array[] = [];
-  // From the program itself (it brings hooks.ts and the vendors' readers), the program's own file left out: its
-  // arguments and messages do not shape the tracts.
-  for (const u of (await importGraph(new URL("./import-job-main.ts", here))).filter((u) => !u.endsWith("/import-job-main.ts"))) parts.push(new TextEncoder().encode(`${u.slice(here.href.length)}\n`), await Deno.readFile(new URL(u)));
-  const all = new Uint8Array(parts.reduce((n, p) => n + p.length, 0)); let o = 0; for (const p of parts) { all.set(p, o); o += p.length; }
-  return [...new Uint8Array(await crypto.subtle.digest("SHA-256", all as Uint8Array<ArrayBuffer>))].slice(0, 6).map((b) => b.toString(16).padStart(2, "0")).join("");
-}
 const hash = async (b: Uint8Array) => [...new Uint8Array(await crypto.subtle.digest("SHA-256", b as Uint8Array<ArrayBuffer>))].slice(0, 6).map((x) => x.toString(16).padStart(2, "0")).join("");
 
 /** The commit and the "changes since" of this extension's folder, for the record (finding 6); the core's version comes
@@ -115,28 +108,33 @@ try {
   if (args.series && !studies.length) { say({ event: "error", stopped: "no such series", said: `series ${args.series} is not an MR series in this database's index` }); exitCode = 2; }
   say({ event: "plan", studies: studies.length, said: `${studies.length} stud${studies.length === 1 ? "y" : "ies"} with MR series to look at` });
 
-  type Machinery = { device: GPUDevice; model: ReturnType<typeof loadModel>; labeler: ReturnType<typeof loadRapidParc>; versions: { code: string; labeler: string; synthstrip: string; core: string; extension: string }; template: { t1: { dims: [number, number, number]; ijkToRAS: number[]; data: ArrayLike<number> }; brain: Uint8Array } };
+  type Machinery = { device: GPUDevice; model: ReturnType<typeof loadTable>; labeler: ReturnType<typeof loadRapidParc>; versions: { code: string; labeler: string; synthstrip: string; core: string; extension: string; headTemplate?: string }; template: { t1: { dims: [number, number, number]; ijkToRAS: number[]; data: ArrayLike<number> }; brain: Uint8Array } };
   let machinery: Machinery | undefined;
   const ready = async (): Promise<Machinery> => {
     if (machinery) return machinery;
-    // The networks: TractCloud's table (the tract names and the 1,600 → 43 map) and RapidParc's weights, read once.
+    // THE NAMING: RapidParc's network and TractCloud's 42-tract table on the ORG-800FC-100HCP clusters (NAMING.md), read
+    // once. TractCloud's network is not loaded: it does not name here.
     const assets = args.assets ? args.assets.replace(/\/+$/, "") : undefined;
     const at = (group: string, file: string) => assets ? `${assets}/${group}/${file}` : new URL(`./${group}/model/${file}`, import.meta.url);
-    const modelJson = Deno.readFileSync(at("tractcloud", "model.json"));
-    const model = loadModel(Deno.readFileSync(at("tractcloud", "weights.f32")).buffer, JSON.parse(new TextDecoder().decode(modelJson)) as ModelJson);
+    const tableBytes = Deno.readFileSync(assets ? `${assets}/naming/tractcloud-42.json` : new URL("./naming/tractcloud-42.json", import.meta.url));
+    const model = loadTable(JSON.parse(new TextDecoder().decode(tableBytes)) as TableJson);
     const rpBytes = Deno.readFileSync(at("rapidparc", "rapidparc.safetensors"));
     const synthstrip = await synthstripVersion(server);
     if (!synthstrip) throw Object.assign(new Error("the segmentation server did not say which SynthStrip it runs (is it running?)"), { word: "no segmentation server" });
     // The naming network's weights too, not only its table (critic 2026-10-06, R3-2); and the commits of the core and of
     // the extension, with "+changes" when their folders differ from them (finding 6).
     const here = new URL("./", import.meta.url).pathname;
-    const versions = { code: await codeFingerprint(), labeler: `rapidparc ${await hash(rpBytes)}, table ${await hash(modelJson)}, tractcloud ${await hash(Deno.readFileSync(at("tractcloud", "weights.f32")))}`, synthstrip,
-      core: args["core-version"] ?? "unknown", extension: await gitState(here) };
+    // THE RECORD'S NAMING FIELD (2026-10-22, NAMING.md): the network that names, the clusters it gives, the table that
+    // names them -- each by what it is. (Until 2026-10-22: "rapidparc …, table …, tractcloud …, template …", which
+    // listed TractCloud's weights, loaded but not run, and the head template; import-job.ts upgradeRules reads it.)
+    const versions = { code: await codeFingerprint(new URL("./import-job-main.ts", import.meta.url)), labeler: `rapidparc ${await hash(rpBytes)}; clusters ${CLUSTERS_NAME}; tract table ${TABLE_NAME} ${await hash(tableBytes)}`, synthstrip,
+      core: args["core-version"] ?? "unknown", extension: await gitState(here), headTemplate: "" };
     const labeler = loadRapidParc(rpBytes.buffer);
     // The template brain for the head's own frame (head-frame.ts), from the extension's template/ folder.
     const tp = (f: string) => assets ? `${assets}/template/${f}` : new URL(`./template/${f}`, import.meta.url);
     const tv = (await parseNiftiVolumes(Deno.readFileSync(tp("mni152-2009c-asym-t1w.nii.gz"))))[0], tb = (await parseNiftiVolumes(Deno.readFileSync(tp("mni152-2009c-asym-brain-mask.nii.gz"))))[0];
-    versions.labeler += `, template ${await hash(Deno.readFileSync(tp("mni152-2009c-asym-t1w.nii.gz")))}`;
+    // The head template of the head-frame step: a field of its own (it has nothing to do with naming).
+    versions.headTemplate = await hash(Deno.readFileSync(tp("mni152-2009c-asym-t1w.nii.gz")));
     const template = { t1: { dims: tv.dims as [number, number, number], ijkToRAS: tv.ijkToRAS, data: tv.data as ArrayLike<number> }, brain: Uint8Array.from(tb.data as ArrayLike<number>, (x) => (x > 0.5 ? 1 : 0)) };
     const adapter = await navigator.gpu?.requestAdapter();
     if (!adapter) throw Object.assign(new Error("no graphics card is available to this program"), { word: "no graphics card" });
