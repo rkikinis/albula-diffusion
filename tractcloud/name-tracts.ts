@@ -1,7 +1,7 @@
 // NAMING A WHOLE-BRAIN TRACTOGRAPHY: streamlines in (RAS mm), a tract per streamline out. RAPIDPARC's network names (the
 // default since 2026-10-03, and the only namer the app and the import job use); TractCloud's only when a validation run
-// asks for it. Both give a cluster of the O'Donnell-group atlas; the atlas's table (in tractcloud/model/model.json) gives
-// the tract, and the side is read after centering on the atlas's average position. Which tool does what: ../NAMING.md.
+// asks for it. Both give a cluster of the ORG-800FC-100HCP atlas; TractCloud's 42-tract table (tractcloud/model/model.json)
+// gives the tract, and the side is read after centering on the training data's average position. Which tool does what: ../NAMING.md.
 // Short streamlines (under 40 mm) are left out, both from naming and as context: the atlas the network learned from
 // has none (measured on PAT16: keeping them doubles the share called an outlier). Several draws of the random context
 // can vote; each draw is seeded, so the same streamlines always get the same names.

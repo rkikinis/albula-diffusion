@@ -7,8 +7,11 @@ against the code on that day; the file and line are given.
 ## In one paragraph
 
 A whole-brain tractography (UKF two-tensor, `ukf.ts`) is **named by RapidParc's network**: it puts every streamline
-into one of the 1,600 fiber clusters of the **O'Donnell-group white matter atlas**; the **atlas's own table** turns a
-cluster into one of 42 tract names (or "other"); **Albula** then decides the side (left or right). **TractCloud's network is not
+into one of the fiber clusters of the O'Donnell group's atlas **ORG-800FC-100HCP** (800 clusters and an outlier twin
+of each, 1,600 classes); **TractCloud's 42-tract table** (its `tract_mapping.py`, adopted by RapidParc) turns a cluster
+into one of 42 tract names (or "Other") -- NOT the atlas's own tract list, which has 58 deep tracts and 198 superficial
+clusters; **Albula** then decides the side (left or right). (Corrected 2026-10-22 afternoon: this page and the mail to
+Steve first said "the atlas's own table".) **TractCloud's network is not
 run.** TractCloud is a second network trained on the same atlas; Albula ported it first (2026-09-30) and replaced it
 with RapidParc on 2026-10-03 (Ron: "2 yes").
 
@@ -17,8 +20,9 @@ with RapidParc on 2026-10-03 (Ron: "2 yes").
 | what | from | used for | where in the code |
 |---|---|---|---|
 | **RapidParc's network** (Bisten, von Bornhaupt, Grün, Bauer, Rüber, Schultz; Imaging Neuroscience 2026; University of Bonn, BSD license) | `rapidparc/model/rapidparc.safetensors` (sha256 `6a158dad…`) | each streamline's fiber cluster, and how sure it is | `tractcloud/name-tracts.ts` (`nameAgainst`, the `opts.rapidParc` branch, `rapidParcGpu`) |
-| **The atlas's table**: 1,600 clusters → 42 tracts and "other", with names and abbreviations (Zhang, Wu, Norton, Rigolo, Rathi, Makris, O'Donnell; NeuroImage 2018) | stored in `tractcloud/model/model.json` (`clusterToTract`, `tracts`); RapidParc's own copy (`mapping_from_800_800_to_43`, `int_to_label`) was checked identical on 2026-10-03 | the tract name of each cluster | `tractcloud/tractcloud.ts` `tractsOf` |
-| **The atlas's average position**, used to center a brain on the atlas | `tractcloud/model/model.json` (`massCenter`, from TractCloud's training data) | deciding the SIDE: after centering, a streamline's mean left-right position says left or right | `tractcloud/tractcloud.ts` `prepare`; `name-tracts.ts` after the vote ("THE SIDE") |
+| **The clusters: ORG-800FC-100HCP** (the O'Donnell group's fiber clustering atlas: 800 clusters from 100 HCP subjects; Zhang, Wu, Norton, Rigolo, Rathi, Makris, O'Donnell; NeuroImage 2018; github.com/SlicerDMRI/ORG-Atlases) | what both networks were trained to give | the class each streamline is put in | the networks' outputs |
+| **TractCloud's 42-tract table**: 1,600 classes → 42 tracts and "Other", with names, abbreviations and categories | SlicerDMRI/TractCloud `tract_mapping.py`, converted into `tractcloud/model/model.json` (`clusterToTract`, `tracts`); RapidParc's own copy (`mapping_from_800_800_to_43`, `int_to_label`) checked identical on 2026-10-03 | the tract name of each cluster | `tractcloud/tractcloud.ts` `tractsOf` |
+| **The training data's average position** (TractCloud's release, the ORG-800FC-100HCP subjects), used to center a brain | `tractcloud/model/model.json` (`massCenter`) | deciding the SIDE: after centering, a streamline's mean left-right position says left or right | `tractcloud/tractcloud.ts` `prepare`; `name-tracts.ts` after the vote ("THE SIDE") |
 | **TractCloud's network** (Xue, Chen, Zhang, Golby, Makris, Rathi, Cai, Zhang, O'Donnell; MICCAI 2023) | `tractcloud/model/weights.f32` | **nothing** in the app or the import job since 2026-10-03; only validation runs that ask for it (`case-run.ts`, `labeler: "tractcloud"`) | `name-tracts.ts`, the `else` branch |
 
 Both networks give a cluster of the same atlas, so everything after the cluster is shared: the 40 mm cut (shorter
@@ -38,7 +42,7 @@ A stored tract set says, in its provenance, `rules.labeler`, for example:
 `rapidparc 6a158dad6a0b, table 75b1af321932, tractcloud 5a843c95eb60, template 1f27aabea9f7`
 
 - `rapidparc …` -- the network that named (its weights' fingerprint);
-- `table …` -- `model.json`: the atlas's table and average position;
+- `table …` -- `model.json`: TractCloud's 42-tract table and the training data's average position;
 - `tractcloud …` -- TractCloud's weights' fingerprint. They are LOADED with the table (one model object holds both) but
   NOT RUN. Listed because the job loads them -- misleading, and on the list below to change.
 - `template …` -- the MNI152 2009c head template of the head-frame step (`head-frame.ts`; added to this field in
@@ -57,7 +61,7 @@ A stored tract set says, in its provenance, `rules.labeler`, for example:
 2. The record lists TractCloud's weights, which are loaded but not run.
 3. Comments, test names and the README still say "named by TractCloud" (`module.ts`, `case-run.ts`, `tract-info.ts`,
    `README.md`), from before 2026-10-03.
-4. The side decision's use of the atlas's average position from TractCloud's training data was stated nowhere outside
+4. The side decision's use of the average position from TractCloud's training data was stated nowhere outside
    the code.
 
 Fixed with this page: the comments, test names and README (3). For Ron to decide (1, 2): move the naming code and the

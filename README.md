@@ -36,8 +36,8 @@ This extension adds diffusion MRI, from the scanner's files to the tracts near a
   The graphics-card version, which the app runs, has the same exact projection and agrees with the original on 741 of
   838 within 0.1 mm (804 within 1 mm; it was 733 and 794): the rest is its 32-bit arithmetic. Single-tensor tracking too.
 - **Tract names**: RapidParc's network (Bisten, Schultz et al., Imaging Neuroscience 2026; University of Bonn, BSD
-  license) puts each streamline into a fiber cluster of the O'Donnell-group white matter atlas (Zhang, O'Donnell et al.,
-  NeuroImage 2018), and the atlas's table names it: 42 tracts, left and right. TractCloud (Xue … O'Donnell, MICCAI 2023),
+  license) puts each streamline into a fiber cluster of the O'Donnell group's atlas ORG-800FC-100HCP (Zhang, O'Donnell et al.,
+  NeuroImage 2018), and TractCloud's 42-tract table names it: 42 tracts, left and right. TractCloud (Xue … O'Donnell, MICCAI 2023),
   a second network trained on the same atlas, is ported too (written from the paper as a WebGPU network; on 5,120 UKF
   streamlines of PAT16 every layer agrees with the original in PyTorch within 4e-6, every cluster the same) and named the
   tracts until 2026-10-03; it now runs only in validation runs that ask for it. Which tool does what, and how to read a
@@ -83,7 +83,7 @@ This extension adds diffusion MRI, from the scanner's files to the tracts near a
   (`tract-slice.ts`), and the data probe names the tracts within 2 mm of the pointer (`tract-index.ts`). FA and Color FA
   are drawn over the anatomy at half opacity. Tracts are drawn 2 voxels shorter at each end, where fibers fan out
   (Advanced › Shorten ends; drawing only, the tracts stay whole).
-- **Tract names on the face** (`tract-info.ts`, version 1): the atlas's tract names (the O'Donnell-group atlas; which tool
+- **Tract names on the face** (`tract-info.ts`, version 1): the 42 tract names of TractCloud's table (on the ORG-800FC-100HCP clusters; which tool
   does what: `NAMING.md`) with the abbreviation ("Arcuate
   fasciculus, right (AF)"); the tooltip gives the term in Terminologia Neuroanatomica (FIPAT 2017) where there is one
   (36 of 42), and how close it is; clicking a name opens the atlas paper that defines the tract. What each tract is

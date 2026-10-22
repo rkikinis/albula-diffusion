@@ -1,4 +1,4 @@
-// The tract table the module's face reads (tract-info.ts): one row per tract of the atlas's table, and the face's label.
+// The tract table the module's face reads (tract-info.ts): one row per tract of TractCloud's 42-tract table, and the face's label.
 //   deno test -A --no-check tract-info.test.ts   (with core's config, as the rebuild runs it)
 import { assertEquals } from "jsr:@std/assert";
 import { ATLAS_REFERENCE, readMore, tnaLine, TRACT_INFO, tractLabel } from "./tract-info.ts";
@@ -6,7 +6,7 @@ import { DIFFUSION_REFERENCES } from "./references.ts";
 
 const model = JSON.parse(await Deno.readTextFile(new URL("./tractcloud/model/model.json", import.meta.url))) as { tracts: { abbr: string }[] };
 
-Deno.test("every tract of the atlas's table has one row, and only those", () => {
+Deno.test("every tract of the 42-tract table has one row, and only those", () => {
   const named = model.tracts.map((t) => t.abbr).filter((a) => a !== "Other");
   assertEquals(TRACT_INFO.map((t) => t.abbr), named);
 });

@@ -90,7 +90,7 @@ const phaseEncodingOfNode = (n: MrsonNode | undefined) => ((n?.origin as Record<
 /** A group of tracts. */
 interface TractGroup {
   id: number; name: string; scan: string; strands: Float32Array[]; visible: boolean; method: Method;
-  /** Named (RapidParc's network on the O'Donnell-group atlas; NAMING.md): the tract (index into the atlas table's list), its side (+1 right, -1 left, 0 none), and its
+  /** Named (RapidParc's network, ORG-800FC-100HCP clusters, TractCloud's 42-tract table; NAMING.md): the tract (index into that table), its side (+1 right, -1 left, 0 none), and its
    *  closest distance to the structure it was measured against, in mm. `unnamed`: TractCloud gave no name. */
   tract?: number; side?: number; distanceMm?: number; within?: number; unnamed?: boolean;
   /** Made by "Show the fiber tracts near the tumor": the next run for the same scan replaces them (critic, finding 5). */
