@@ -89,7 +89,7 @@ export const TRACT_INFO: TractInfo[] = [
 
 /**
  * "READ MORE" UNTIL A TRACT HAS ITS OWN (Ron, 2026-10-01: TractCloud's papers are "a good startpoint"): the atlas that
- * defines every tract TractCloud names, open access -- the same entry as in references.ts (checked against Crossref).
+ * defines every tract of the atlas's table (the names Albula gives; NAMING.md), open access -- the same entry as in references.ts (checked against Crossref).
  */
 export const ATLAS_REFERENCE = {
   cite: "Zhang F, Wu Y, Norton I, Rigolo L, Rathi Y, Makris N, O'Donnell LJ. An anatomically curated fiber clustering white matter atlas for consistent white matter tract parcellation across the lifespan. NeuroImage 179:429-447, 2018.",

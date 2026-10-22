@@ -5,7 +5,7 @@
 //
 // The steps, with the app's defaults: read the diffusion scan and its reversed-phase pair (NIfTI + FSL), correct the
 // distortion, fit the tensor (b up to 1500), seed the whole brain, follow tracts (UKF on the graphics card, or CSD + PTT
-// on the processor's workers), name them (TractCloud), and measure each tract's streamlines against the dataset's tumor
+// on the processor's workers), name them (RapidParc by default, TractCloud when asked; NAMING.md), and measure each tract's streamlines against the dataset's tumor
 // mask (inside at 0.5 and above).
 import { parseNiftiVolumes } from "albula";
 import { fromFsl } from "./dwi.ts";

@@ -35,9 +35,13 @@ This extension adds diffusion MRI, from the scanner's files to the tracts near a
   Simple2T — unconstrained, eigenvalue floor 100 — and matches it: 822 of 822 fibers within 0.1 mm, the worst 0.01 mm.
   The graphics-card version, which the app runs, has the same exact projection and agrees with the original on 741 of
   838 within 0.1 mm (804 within 1 mm; it was 733 and 794): the rest is its 32-bit arithmetic. Single-tensor tracking too.
-- **Tract names**: TractCloud (Xue, Zhang, O'Donnell et al., MICCAI 2023) written from the paper as a WebGPU network;
-  on the reference case (5,120 UKF streamlines of PAT16) every layer agrees with the original running in PyTorch within
-  4e-6, and all 5,120 streamlines get the same cluster as the original (the test allows 0.2%).
+- **Tract names**: RapidParc's network (Bisten, Schultz et al., Imaging Neuroscience 2026; University of Bonn, BSD
+  license) puts each streamline into a fiber cluster of the O'Donnell-group white matter atlas (Zhang, O'Donnell et al.,
+  NeuroImage 2018), and the atlas's table names it: 42 tracts, left and right. TractCloud (Xue … O'Donnell, MICCAI 2023),
+  a second network trained on the same atlas, is ported too (written from the paper as a WebGPU network; on 5,120 UKF
+  streamlines of PAT16 every layer agrees with the original in PyTorch within 4e-6, every cluster the same) and named the
+  tracts until 2026-10-03; it now runs only in validation runs that ask for it. Which tool does what, and how to read a
+  tract set's record: `NAMING.md`.
 - **Fiber distributions and parallel transport tracking** (the module's "Smooth curves" under Advanced; two-tensor
   stays the default): multi-shell multi-tissue CSD (`csd.ts`; Jeurissen et al. 2014, Tournier et al. 2007), solved
   exactly as the non-negative least squares of its dual (Lawson & Hanson) — on PAT16's 6,770 reference voxels its fit
@@ -79,7 +83,8 @@ This extension adds diffusion MRI, from the scanner's files to the tracts near a
   (`tract-slice.ts`), and the data probe names the tracts within 2 mm of the pointer (`tract-index.ts`). FA and Color FA
   are drawn over the anatomy at half opacity. Tracts are drawn 2 voxels shorter at each end, where fibers fan out
   (Advanced › Shorten ends; drawing only, the tracts stay whole).
-- **Tract names on the face** (`tract-info.ts`, version 1): TractCloud's names with the abbreviation ("Arcuate
+- **Tract names on the face** (`tract-info.ts`, version 1): the atlas's tract names (the O'Donnell-group atlas; which tool
+  does what: `NAMING.md`) with the abbreviation ("Arcuate
   fasciculus, right (AF)"); the tooltip gives the term in Terminologia Neuroanatomica (FIPAT 2017) where there is one
   (36 of 42), and how close it is; clicking a name opens the atlas paper that defines the tract. What each tract is
   for is to be written by a clinician; until then the face says nothing rather than an unchecked claim.

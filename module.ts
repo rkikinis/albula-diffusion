@@ -90,7 +90,7 @@ const phaseEncodingOfNode = (n: MrsonNode | undefined) => ((n?.origin as Record<
 /** A group of tracts. */
 interface TractGroup {
   id: number; name: string; scan: string; strands: Float32Array[]; visible: boolean; method: Method;
-  /** Named by TractCloud: the tract (index into the model's list), its side (+1 right, -1 left, 0 none), and its
+  /** Named (RapidParc's network on the O'Donnell-group atlas; NAMING.md): the tract (index into the atlas table's list), its side (+1 right, -1 left, 0 none), and its
    *  closest distance to the structure it was measured against, in mm. `unnamed`: TractCloud gave no name. */
   tract?: number; side?: number; distanceMm?: number; within?: number; unnamed?: boolean;
   /** Made by "Show the fiber tracts near the tumor": the next run for the same scan replaces them (critic, finding 5). */
@@ -929,7 +929,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
 
   /**
    * TRACTS NEAR A STRUCTURE, NAMED (Ron, 2026-09-30: whole brain first, then keep what is near the tumor, whole): UKF
-   * through the whole brain, TractCloud names every streamline (tractcloud/), and each named tract that comes within
+   * through the whole brain, RapidParc names every streamline (NAMING.md; the code is in tractcloud/), and each named tract that comes within
    * `withinMm` of the structure is shown -- all of it, since planning asks what a connection would lose. Unnamed
    * streamlines that pass that close are shown too, in gray (hiding a real tract is worse than showing an unnamed one);
    * everything else is kept, hidden, as "Rest of the brain".
