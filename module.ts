@@ -28,7 +28,7 @@
 // This file belongs to the diffusion extension and registers through core's queue (render/demos/extension-modules.ts);
 // core never imports it. Critic round 2026-09-29 (qa/2026-09-29-diffusion-module.md) answered in this version.
 import type { ModuleContext } from "albula";
-import { MAJOR_TRACTS, queueModule, registerAfterLoad, registerSceneState } from "albula";
+import { askDerived, askedDerived, MAJOR_TRACTS, queueModule, registerAfterLoad, registerSceneState } from "albula";
 import type { MrsonNode } from "albula";
 import { fetchZarrVolumeNative, type ZarrDesc } from "albula";
 import { packRGB24 } from "albula";
@@ -779,8 +779,14 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     const num = new Map(db.series.map((x) => [x.seriesInstanceUID, x.seriesNumber ?? 0]));
     const kids = db.edges.filter((e) => e.kind === "tracts" && e.parent === uid && num.has(e.child)).sort((a, b) => (num.get(b.child) ?? 0) - (num.get(a.child) ?? 0));
     if (!kids.length) { storedState.set(scan.browserId, { state: "none" }); return null; }
-    storedState.set(scan.browserId, { state: "stored", seriesUID: kids[0].child });
-    return { seriesUID: kids[0].child };
+    // THE SET ASKED FOR (the DICOM browser's tick, or a saved scene; core's logic/asked-derived.ts), when the scan has it;
+    // else the newest. A different set than the one read before: what was read from that one goes.
+    const want = askedDerived("tracts", uid);
+    const chosen = want && kids.some((k) => k.child === want) ? want : kids[0].child;
+    const before = storedState.get(scan.browserId)?.seriesUID;
+    if (before && before !== chosen) { whole.delete(scan.browserId); storedMaps.delete(scan.browserId); mapsKept.delete(scan.browserId); }
+    storedState.set(scan.browserId, { state: "stored", seriesUID: chosen });
+    return { seriesUID: chosen };
   }
   /** The stored whole-brain tracts as the module's own run would have made them: the streamlines and their names. */
   async function loadStored(scan: Scan, model: TractCloudModel): Promise<{ sl: Float32Array[]; named: Named; made?: string } | null> {
@@ -970,7 +976,10 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     if (whole.has(scan.browserId) || !usesDefaults(scan) || storedState.get(scan.browserId)?.state !== "stored") return;
     const model = await tractCloud();
     tractCount = model.json.tracts.length;
+    const setAtStart = storedState.get(scan.browserId)?.seriesUID;
     const st = await loadStored(scan, model);
+    // Another set asked for meanwhile (a scene's or the browser's choice, findStored): this read is not that set.
+    if (storedState.get(scan.browserId)?.seriesUID !== setAtStart) return;
     if (!st || whole.has(scan.browserId) || !scans().some((x) => x.browserId === scan.browserId)) return;
     whole.set(scan.browserId, { sl: st.sl, named: st.named, stored: true, storedInputs: storedState.get(scan.browserId)?.inputs, made: st.made, c: computed.get(scan.browserId), times: { track: 0, name: 0 }, key: "stored" });
   }
@@ -1509,7 +1518,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
   // box or a structure, tracts made here from hand-placed seeds, "Add lines".
   const SCENE_STATE_VERSION = 1;
   interface RowState { tract: string; side: number; visible: boolean; color?: RGBA | "direction"; label?: string }
-  interface ScanState { series: string; way?: Way; map?: Show | null; byName: string[]; near?: { segmentation: string; labelValue: number; withinMm: number }; rows: RowState[]; notKept?: string[] }
+  interface ScanState { series: string; /** The stored tract set shown (its series UID). */ tracts?: string; way?: Way; map?: Show | null; byName: string[]; near?: { segmentation: string; labelValue: number; withinMm: number }; rows: RowState[]; notKept?: string[] }
   const seriesOfScan = (s: Scan) => ((live.nodes.get(s.frameIds[0])?.origin as Record<string, unknown> | undefined)?.seriesInstanceUID as string | undefined);
   const segSeries = (seg: MrsonNode) => { const o = (seg.origin as Record<string, unknown> | undefined) ?? {}; return (o.savedSeriesInstanceUID ?? o.seriesInstanceUID) as string | undefined; };
   /** Which of the scan's maps the slice views show now: Color FA or FA over the T1, the corrected b0 under it, or none. */
@@ -1538,8 +1547,9 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
         const target = runs.length && chosen === s.browserId ? segmentChoices(s).find((c) => c.key === near) : undefined;
         const targetSeries = target ? segSeries(target.seg) : undefined;
         const notKept = [...new Set(mine.filter((g) => g.by === "box" || g.by === "through" || (!g.run && g.by !== "name") || g.more).map((g) => g.by === "box" ? "the lines through the box" : g.by === "through" ? "the lines through a structure" : g.more ? "lines added to a tract" : "tracts made from seeds placed here"))];
+        const tracts = storedState.get(s.browserId)?.seriesUID;
         out.push({
-          series, way: wayBy.get(s.browserId)?.way, map: mapShown(s),
+          series, ...(tracts ? { tracts } : {}), way: wayBy.get(s.browserId)?.way, map: mapShown(s),
           byName: [...new Set(named.map((g) => g.tract !== undefined ? abbr(g.tract) : undefined).filter((x): x is string => !!x))],
           ...(target && targetSeries ? { near: { segmentation: targetSeries, labelValue: target.labelValue, withinMm } } : {}),
           rows: rowsOf([...named, ...(target ? runs : [])]),
@@ -1572,7 +1582,10 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       for (const e of st.scans ?? []) {
         const s = scans().find((x) => seriesOfScan(x) === e.series);
         if (!s) { missing.push("a diffusion scan the scene names is not loaded"); continue; }
+        // The tract set the scene showed, not the newest the database holds now.
+        if (e.tracts) askDerived("tracts", e.series, e.tracts);
         await findStored(s).catch(() => null);
+        if (e.tracts && storedState.get(s.browserId)?.seriesUID !== e.tracts) missing.push("the tract set the scene showed is no longer in the database; the newest is shown");
         if (e.way) wayBy.set(s.browserId, { way: e.way, touched: true });
         const n = await showNamed(s, e.byName ?? []);
         if (n) applied.push(`${n} tract${n === 1 ? "" : "s"} by name`);
