@@ -1,0 +1,12 @@
+BrainstemSeg's trained weights (bundleparc-brainstemseg.safetensors, converted unchanged from the checkpoint
+/opt/pipeline/checkpoints/model.ckpt inside brainstemseg_v4_2.sif) are licensed under the
+Creative Commons Attribution 4.0 International License (CC BY 4.0): https://creativecommons.org/licenses/by/4.0/
+
+Attribution: "BrainstemSeg: Automated White Matter Bundle Segmentation for Brainstem and Subcortical Pathways", version
+4.2, Gaurav Rudravaram, Bennett Landman, Kurt Schilling (Vanderbilt University). Zenodo, 2026.
+https://doi.org/10.5281/zenodo.19343085
+Paper: Schilling KG et al. "Automated Segmentation of Brainstem and Subcortical White Matter: Mapping the Deep Tegmental
+Core with BundleParc." bioRxiv 2026. https://doi.org/10.64898/2026.06.09.731210
+
+Changes: the tensors were read with PyTorch's safe loader and written as float32 safetensors, the prefix
+"bundleparcnet." removed; no value changed. The tract names (tracts.json) are the checkpoint's own list.
