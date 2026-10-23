@@ -3,7 +3,7 @@
 // (critic, 2026-10-05, qa/2026-10-05-dmri-import-job.md, findings 6, 7, 11, 14).
 //   deno test -A --no-check --config ../../src/SlicerLive/deno.jsonc import-job.test.ts
 import { assert, assertEquals } from "jsr:@std/assert@1";
-import { anatomyOf, b0Path, colorFaPath, importGraph, isCurrent, isDiffusionScan, jobRules, partnerOf, planCases, synthstripVersion, trackSets, measuredB0, writeB0, writeColorFA, type SeriesFacts, CODE_SAME, madeWith } from "./import-job.ts";
+import { anatomyOf, b0Path, colorFaPath, importGraph, isCurrent, isDiffusionScan, jobRules, partnerOf, partnerRefusals, planCases, synthstripVersion, trackSets, measuredB0, writeB0, writeColorFA, type SeriesFacts, CODE_SAME, madeWith } from "./import-job.ts";
 import { packRGB24 } from "albula";
 import type { TensorFit } from "./tensor.ts";
 import type { DiffusionSeries } from "./dwi.ts";
@@ -44,6 +44,28 @@ Deno.test("the reversed partner: the record's reversed pair first, then b = 0 on
   // Placed elsewhere (another slab 40 mm away) or another study: not a partner.
   const far = S("far", "PA", [0, 0], { ijkToRAS: AX.map((v, i) => (i === 11 ? v + 40 : v)) });
   assertEquals(partnerOf(scan, [scan, far, S("other", "PA", [0, 0], { studyUID: "st2" })]), undefined);
+});
+
+Deno.test("a full-length reversed twin (the HCP protocols: dir98 / dir99, each in AP and PA) is the partner only when the record says reversed", () => {
+  // AABC / HCP Lifespan: four full diffusion scans, two runs, each run in both directions; no b = 0-only series.
+  const ap99 = dwi("ap99", 106, { phaseEncoding: "j-" }), pa99 = { ...dwi("pa99", 106, { phaseEncoding: "j" }), description: "dMRI_dir99_PA" };
+  const ap98 = { ...dwi("ap98", 105, { phaseEncoding: "j-" }), description: "dMRI_dir98_AP" }, pa98 = { ...dwi("pa98", 105, { phaseEncoding: "j" }), description: "dMRI_dir98_PA" };
+  ap99.description = "dMRI_dir99_AP";
+  // Each run with its own other half (the twin before the other run's shorter reversed scan), in any order of the list.
+  for (const list of [[ap99, pa99, ap98, pa98], [pa98, ap98, pa99, ap99], [pa99, ap98, ap99, pa98]]) {
+    const cases = planCases([...list, t1("t1")]);
+    assertEquals(cases.map((c) => [c.dwi.uid, c.partner?.uid]), [["ap99", "pa99"], ["ap98", "pa98"]]);
+  }
+  // Without the record, a series as long as the scan is not its partner (a repeat or another run): a case of its own.
+  const plain = dwi("a", 60), plain2 = dwi("b", 60);
+  assertEquals(planCases([plain, plain2]).map((c) => [c.dwi.uid, c.partner?.uid ?? null]), [["a", null], ["b", null]]);
+  assertEquals(partnerRefusals(plain, [plain, plain2]).map((r) => r.why), ["as many volumes as the scan, and not recorded as its reversed twin (? against ?)"]);
+  // Recorded as the same direction (Steve's Prisma dMRI_dir99_PA, taken AP): never.
+  const sameDir = { ...dwi("pa-not", 106, { phaseEncoding: "j-" }), description: "dMRI_dir99_PA" };
+  assertEquals(partnerOf(ap99, [ap99, sameDir]), undefined);
+  // Longer than the scan: never its partner (the longer one is the scan, and takes the shorter as its own).
+  assertEquals(partnerOf(ap98, [ap98, pa99]), undefined);
+  assertEquals(planCases([ap98, pa99]).map((c) => [c.dwi.uid, c.partner?.uid]), [["pa99", "ap98"]]);
 });
 
 Deno.test("the MRI of the anatomy: named as a T1, one volume, not computed; same study first, then the same patient; none named so, none chosen", () => {

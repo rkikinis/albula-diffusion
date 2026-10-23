@@ -64,7 +64,7 @@ import { faceNear as nearOnFace, isTumorName, matchesSearch, patientOf, pickAnat
 import { loadTable, type TableJson, type TractTable } from "./naming/table.ts";
 import { nameAgainst, nameTracts, type Named } from "./naming/name-tracts.ts";
 import { loadRapidParc, type RapidParcModel } from "./rapidparc/rapidparc.ts";
-import { correctWithReversed, denseSeeds, MIN_NEAR_STREAMLINES, NEAR_MM, GRAY_BAND_MM, otherSide, sortByDistance, stageText, streamlineDistances, tractName, trackUkfSeeds, wholeBrainSeeds, type Sorted, type StageTimes, type Structure, type TrackTiming } from "./planning.ts";
+import { correctWithReversed, denseSeeds, recordedReversed, MIN_NEAR_STREAMLINES, NEAR_MM, GRAY_BAND_MM, otherSide, sortByDistance, stageText, streamlineDistances, tractName, trackUkfSeeds, wholeBrainSeeds, type Sorted, type StageTimes, type Structure, type TrackTiming } from "./planning.ts";
 import { tractColor, UNNAMED } from "./naming/tract-colors.ts";
 import { seedsInSphere, trackFromSeeds, type Streamline, type TrackingOptions } from "./tracking.ts";
 import { DIFFUSION_REFERENCES } from "./references.ts";
@@ -468,6 +468,16 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       if (nodes.length && nodes.every((n) => same(n) && b0(n))) return { id: b.id, name: String(sequence?.name ?? b.name ?? "reversed scan"), frameIds: nodes.map((n) => n.id), dims: nodes[0].dims as number[], ijkToRAS: nodes[0].ijkToRAS as number[], phaseEncoding: phaseEncodingOfNode(nodes[0]) };
     }
     for (const n of live.nodes.values()) if (n.type === "image" && !(n as { hidden?: boolean }).hidden && !scan.frameIds.includes(n.id) && same(n) && b0(n)) return { id: n.id, name: String(n.name ?? "reversed scan"), frameIds: [n.id], dims: n.dims as number[], ijkToRAS: n.ijkToRAS as number[], phaseEncoding: phaseEncodingOfNode(n) };
+    // A DIFFUSION SCAN THE RECORD CALLS REVERSED, as long as this one or shorter (2026-10-23: the HCP protocols scan each
+    // run in both directions at full length; the import job's rule, import-job.ts partnerOf): its b = 0 images are the pair.
+    for (const b of sequenceBrowsers(live)) {
+      if (b.id === scan.browserId) continue;
+      const { frames, sequence } = browserFrames(live, b.id);
+      const nodes = frames.map((f) => live.nodes.get(f.node)).filter(Boolean) as MrsonNode[];
+      const zeros = nodes.filter(b0);
+      if (zeros.length && nodes.length <= scan.frameIds.length && nodes.every(same) && recordedReversed(scan.phaseEncoding, phaseEncodingOfNode(nodes[0])) === true)
+        return { id: b.id, name: String(sequence?.name ?? b.name ?? "reversed scan"), frameIds: zeros.map((n) => n.id), dims: zeros[0].dims as number[], ijkToRAS: zeros[0].ijkToRAS as number[], phaseEncoding: phaseEncodingOfNode(zeros[0]) };
+    }
     return undefined;
   };
   /** DISTORTION CORRECTION with the reversed scan (planning.ts correctWithReversed). */

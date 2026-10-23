@@ -54,6 +54,16 @@ export function resampleInto(data: ArrayLike<number>, from: Grid, to: Grid): Flo
   return out;
 }
 
+/** The recorded phase-encoding directions say the two are a reversed pair: the same axis, opposite signs ("j-" and "j").
+ *  Undefined when a record is missing or unsigned ("COL"); false for another axis or the same sign. One rule for the
+ *  import job's choice of the reversed scan (import-job.ts partnerOf) and the module's (module.ts partnerFor). */
+export function recordedReversed(a?: string, b?: string): boolean | undefined {
+  const axis = (d: string) => d === "ROW" ? "i" : d === "COL" || d === "COLUMN" ? "j" : d[0], signed = (d: string) => /^[ijk]-?$/.test(d);
+  if (!a || !b) return undefined;
+  if (axis(a) !== axis(b)) return false;
+  return signed(a) && signed(b) ? a.endsWith("-") !== b.endsWith("-") : undefined;
+}
+
 /**
  * WHERE THE TIME GOES, step by step, in Mike Halle's stages (his mail, 2026-10-02): read, distortion (align the partner,
  * estimate the field, apply it), mask and tensor, tracking (with its own breakdown), naming, distances, drawing. Milliseconds;

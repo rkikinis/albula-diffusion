@@ -20,7 +20,7 @@ import { MOTION_RULE } from "./motion.ts";
 import { REGISTRATION_RULE } from "./registration.ts";
 import { TRACKING_RULE } from "./tracking-rules.ts";
 import { OUTSIDE_RULE } from "./outside-brain.ts";
-import { stageText, type StageTimes } from "./planning.ts";
+import { recordedReversed, stageText, type StageTimes } from "./planning.ts";
 import { colorFA, type TensorFit } from "./tensor.ts";
 import { SHORT } from "./naming/name-tracts.ts";
 import { tractColor, TRACT_COLORS_VERSION } from "./naming/tract-colors.ts";
@@ -132,17 +132,17 @@ export function samePlacement(A: number[], B: number[]): boolean {
   }
   return true;
 }
-/** The recorded phase-encoding directions say the two are a reversed pair: the same axis, opposite signs. */
-function recordedReversed(a?: string, b?: string): boolean | undefined {
-  const axis = (d: string) => d === "ROW" ? "i" : d === "COL" || d === "COLUMN" ? "j" : d[0], signed = (d: string) => /^[ijk]-?$/.test(d);
-  if (!a || !b) return undefined;
-  if (axis(a) !== axis(b)) return false;
-  return signed(a) && signed(b) ? a.endsWith("-") !== b.endsWith("-") : undefined;
-}
 /**
  * THE REVERSED PARTNER of a diffusion scan (finding 7): a series of the same study placed as the scan is, holding
  * b = 0 images, and not itself a bigger diffusion scan. First choice: one the scanner's record calls reversed; then a
  * b = 0-only series; then a smaller diffusion series with b = 0 images. One the record calls NOT reversed is skipped.
+ *
+ * A FULL-LENGTH TWIN (2026-10-23; Ron: "fix the full-length reversed scan gap"): the HCP protocols (HCP Lifespan, AABC)
+ * scan every diffusion run in both directions at full length (dMRI_dir98_AP / _PA, dir99_AP / _PA). A series with as many
+ * volumes as the scan is its partner only when the record says the two are reversed -- without that record a series as
+ * long as the scan is a repeat or another run, and stays a scan of its own -- and among the record's reversed ones the twin
+ * comes first (the same run's other half, taken minutes apart: the least movement between them). Only its b = 0 images
+ * correct the distortion (as for any partner); its diffusion-weighted images are not yet joined to the scan's.
  */
 /** ImageType values that mark a series as a map computed from a scan, never a scan itself. */
 export const COMPUTED_IMAGE_TYPES = new Set(["ADC", "TRACE", "TRACEW", "FA", "EXP", "EADC", "CALC_BV", "COLFA", "TENSOR", "TENSOR_B0"]);
@@ -150,7 +150,8 @@ export const COMPUTED_IMAGE_TYPES = new Set(["ADC", "TRACE", "TRACEW", "FA", "EX
  *  the run log (run-log.ts). A series that passes all of them is listed with why: "" (a candidate). */
 export function partnerRefusals(dwi: SeriesFacts, all: SeriesFacts[]): { uid: string; description: string; why: string }[] {
   return all.filter((s) => s.uid !== dwi.uid && s.studyUID === dwi.studyUID).map((s) => {
-    const why = s.derived ? "a computed map (its image type)" : !hasB0(s) ? "no b = 0 image" : !(s.volumes < dwi.volumes) ? "not fewer volumes than the scan"
+    const why = s.derived ? "a computed map (its image type)" : !hasB0(s) ? "no b = 0 image" : s.volumes > dwi.volumes ? "more volumes than the scan"
+      : s.volumes === dwi.volumes && recordedReversed(dwi.phaseEncoding, s.phaseEncoding) !== true ? `as many volumes as the scan, and not recorded as its reversed twin (${s.phaseEncoding ?? "?"} against ${dwi.phaseEncoding ?? "?"})`
       : !samePlacement(s.ijkToRAS, dwi.ijkToRAS) ? "placed differently from the scan" : recordedReversed(dwi.phaseEncoding, s.phaseEncoding) === false ? `recorded as not reversed (${s.phaseEncoding ?? "?"} against ${dwi.phaseEncoding ?? "?"})` : "";
     return { uid: s.uid, description: s.description, why };
   });
@@ -158,9 +159,10 @@ export function partnerRefusals(dwi: SeriesFacts, all: SeriesFacts[]): { uid: st
 export function partnerOf(dwi: SeriesFacts, all: SeriesFacts[]): SeriesFacts | undefined {
   // Never a computed map (Siemens' TENSOR_B0 is a b = 0 image the scanner computed from the scan itself: on Steve's
   // Prisma scan, 2026-10-21, it was taken as the partner of both scans).
-  const c = all.filter((s) => s.uid !== dwi.uid && s.studyUID === dwi.studyUID && !s.derived && hasB0(s) && s.volumes < dwi.volumes && samePlacement(s.ijkToRAS, dwi.ijkToRAS)
-    && recordedReversed(dwi.phaseEncoding, s.phaseEncoding) !== false);
-  return c.find((s) => recordedReversed(dwi.phaseEncoding, s.phaseEncoding) === true) ?? c.find(isB0Only) ?? c[0];
+  const reversed = (s: SeriesFacts) => recordedReversed(dwi.phaseEncoding, s.phaseEncoding) === true;
+  const c = all.filter((s) => s.uid !== dwi.uid && s.studyUID === dwi.studyUID && !s.derived && hasB0(s) && samePlacement(s.ijkToRAS, dwi.ijkToRAS)
+    && (s.volumes < dwi.volumes || (s.volumes === dwi.volumes && reversed(s))) && recordedReversed(dwi.phaseEncoding, s.phaseEncoding) !== false);
+  return c.find((s) => reversed(s) && s.volumes === dwi.volumes) ?? c.find(reversed) ?? c.find(isB0Only) ?? c[0];
 }
 /** A T1 by the series' name (face.ts pickAnatomy's rule), or a 3D T1 sequence's usual names. */
 export const T1_NAME = /(^|[^a-z0-9])t1([^0-9]|$)|mprage|mp-rage|bravo|spgr|tfl3d|t1w/i;
@@ -175,11 +177,15 @@ export function anatomyOf(dwi: SeriesFacts, all: SeriesFacts[]): SeriesFacts | u
 }
 /** The cases of a set of series: every diffusion scan that is not itself another scan's partner. */
 export function planCases(all: SeriesFacts[]): { dwi: SeriesFacts; partner?: SeriesFacts; t1?: SeriesFacts; partnerRefusals?: { uid: string; description: string; why: string }[] }[] {
-  const scans = all.filter(isDiffusionScan).sort((a, b) => b.volumes - a.volumes);
-  const used = new Set<string>(), out: { dwi: SeriesFacts; partner?: SeriesFacts; t1?: SeriesFacts; partnerRefusals?: { uid: string; description: string; why: string }[] }[] = [];
+  // Longest first; between scans of one length (a full-length twin pair) by name, then uid, so the same one is the scan
+  // on every run (dMRI_dir99_AP before dMRI_dir99_PA).
+  const scans = all.filter(isDiffusionScan).sort((a, b) => b.volumes - a.volumes || a.description.localeCompare(b.description) || a.uid.localeCompare(b.uid));
+  const used = new Set<string>(), mains = new Set<string>(), out: { dwi: SeriesFacts; partner?: SeriesFacts; t1?: SeriesFacts; partnerRefusals?: { uid: string; description: string; why: string }[] }[] = [];
   for (const dwi of scans) {
     if (used.has(dwi.uid)) continue;
-    const partner = partnerOf(dwi, all), t1 = anatomyOf(dwi, all);
+    mains.add(dwi.uid);
+    // A scan already made a case of its own is never another's partner (two full-length scans could otherwise take each other).
+    const partner = partnerOf(dwi, all.filter((s) => !mains.has(s.uid) || s.uid === dwi.uid)), t1 = anatomyOf(dwi, all);
     if (partner) used.add(partner.uid);
     // No reversed scan: why each series of the study was not one, for the run log.
     out.push({ dwi, ...(partner ? { partner } : { partnerRefusals: partnerRefusals(dwi, all) }), ...(t1 ? { t1 } : {}) });

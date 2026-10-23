@@ -52,3 +52,16 @@ Deno.test("a converted scan's reversed scan is chosen; a TENSOR_B0 map never is"
   assertEquals(only[0].partnerRefusals?.find((r) => r.uid === t.uid)?.why, "a computed map (its image type)");
   assert(partnerRefusals(apS.facts, [apS.facts, paS.facts]).every((r) => r.why === ""), "the true reversed scan has no reason to be refused");
 });
+
+// THE FULL-LENGTH TWIN THROUGH REAL HEADERS (2026-10-23): the HCP protocols scan every diffusion run in both directions at
+// full length. Both written by the diffusion writer and read back: the PA run is the AP run's partner (the record's
+// phase-encoding sign comes through the reader), not a case of its own.
+Deno.test("a full-length reversed twin read from real headers is the scan's partner", async () => {
+  const dirs = [[1, 0, 0], [0, 1, 0], [0, 0, 1], [0.7, 0.7, 0], [0.7, 0, 0.7], [0, 0.7, 0.7]];
+  const ap = await written("dMRI_dir99_AP", [0, ...dirs.map(() => 1000)], [[0, 0, 0], ...dirs], "j-");
+  const pa = await written("dMRI_dir99_PA", [0, ...dirs.map(() => 1000)], [[0, 0, 0], ...dirs.map((d) => d.map((x) => -x))], "j");
+  const apS = seriesFromInstances(row(ap), ap.instances), paS = seriesFromInstances(row(pa), pa.instances);
+  assertEquals(apS.facts.volumes, paS.facts.volumes);
+  const plans = planCases([paS.facts, apS.facts]);
+  assertEquals(plans.map((p) => [p.dwi.uid, p.partner?.uid]), [[ap.uid, pa.uid]]);
+});
