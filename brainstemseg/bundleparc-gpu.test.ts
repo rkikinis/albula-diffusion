@@ -27,7 +27,8 @@ Deno.test({ name: "BrainstemSeg's network on the card: every block as PyTorch's,
   const cmp = (name: string, got: ArrayLike<number>, want: Float32Array) => {
     assert(got.length === want.length, `${name}: ${got.length} numbers, PyTorch ${want.length}`);
     let d = 0, top = 0; for (let i = 0; i < want.length; i++) { d = Math.max(d, Math.abs(got[i] - want[i])); top = Math.max(top, Math.abs(want[i])); }
-    const rel = d / top; if (rel > worst) { worst = rel; worstAt = name; }
+    // A block of zeros (top 0) is judged by its absolute difference: d / 0 was NaN, which never counted as worse (critic finding 9).
+    const rel = top > 0 ? d / top : d; if (rel > worst) { worst = rel; worstAt = name; }
     rows.push(`${name.padEnd(28)} ${d.toExponential(2)}  of ${top.toFixed(3).padStart(9)}  (${rel.toExponential(2)})`);
   };
   try {

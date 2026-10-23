@@ -178,7 +178,7 @@ Deno.test("BIDS diffusion: the b = 0 field maps for diffusion in fmap/, and the 
     Deno.writeFileSync(`${dw}.nii`, nifti([4, 4, 4, 3, 7], DA, new Int16Array(4 * 4 * 3 * 7).map((_, i) => 100 + i)));
     Deno.writeTextFileSync(`${dw}.bval`, "0 1000 1000 1000 1000 1000 1000\n");
     Deno.writeTextFileSync(`${dw}.bvec`, "0 1 0 0 0.7071 0.7071 0\n0 0 1 0 0.7071 0 0.7071\n0 0 0 1 0 0.7071 0.7071\n");
-    Deno.writeTextFileSync(`${dw}.json`, JSON.stringify({ SeriesDescription: "DTI_test", PhaseEncodingDirection: "j-", PulseSequenceDetails: "%CustomerSeq%\\cmrr_mbep2d_diff" }));
+    Deno.writeTextFileSync(`${dw}.json`, JSON.stringify({ SeriesDescription: "DTI_test", PhaseEncodingDirection: "j-", PulseSequenceDetails: "%CustomerSeq%\\cmrr_mbep2d_diff", B0FieldSource: "b0map" }));
     const fm = `${root}/sub-01/ses-pre/fmap`; Deno.mkdirSync(fm, { recursive: true });
     const intended = { IntendedFor: ["ses-pre/dwi/sub-01_ses-pre_acq-AP_dwi.nii"] };
     for (const [dir, pe] of [["PA", "j"], ["AP", "j-"]]) {
@@ -186,12 +186,19 @@ Deno.test("BIDS diffusion: the b = 0 field maps for diffusion in fmap/, and the 
       // A Siemens sidecar's backslash, as ds005123's carry (critic 2026-10-22, finding 1: dcmjs split the stored text there).
       Deno.writeTextFileSync(`${fm}/sub-01_ses-pre_acq-dwi_dir-${dir}_epi.json`, JSON.stringify({ PhaseEncodingDirection: pe, PulseSequenceDetails: "%CustomerSeq%\\cmrr_fieldmapse", ...intended }));
     }
+    // Another session's scan named (skipped, critic finding 8), and one linked by B0FieldIdentifier / B0FieldSource (read),
+    // phase-encoded along the other axis (so never the reversed scan of a j- scan).
+    Deno.writeFileSync(`${fm}/sub-01_ses-pre_acq-dwi_dir-LR_epi.nii`, nifti([4, 4, 4, 3, 1], DA, new Int16Array(48)));
+    Deno.writeTextFileSync(`${fm}/sub-01_ses-pre_acq-dwi_dir-LR_epi.json`, JSON.stringify({ PhaseEncodingDirection: "i", IntendedFor: ["ses-post/dwi/sub-01_ses-post_acq-AP_dwi.nii"] }));
+    Deno.writeFileSync(`${fm}/sub-01_ses-pre_acq-b0_dir-RL_epi.nii`, nifti([4, 4, 4, 3, 1], DA, new Int16Array(48)));
+    Deno.writeTextFileSync(`${fm}/sub-01_ses-pre_acq-b0_dir-RL_epi.json`, JSON.stringify({ PhaseEncodingDirection: "i-", B0FieldIdentifier: "b0map" }));
     Deno.writeFileSync(`${fm}/sub-01_ses-pre_acq-bold_magnitude1.nii`, nifti([3, 4, 4, 3, 1], DA, new Int16Array(48)));
     Deno.writeTextFileSync(`${fm}/sub-01_ses-pre_acq-bold_magnitude1.json`, JSON.stringify({ IntendedFor: ["ses-pre/func/x_bold.nii.gz"] }));
     const ds = await readBidsDataset(root);
     const { objects, skipped } = await buildBidsSubject(ds, "01", "pre", opts);
-    assertEquals(objects.map((o) => o.role), ["T1w", "dwi-AP", "dwi-b0-fieldmap-AP", "dwi-b0-fieldmap-PA", "seg-tumor"]);
+    assertEquals(objects.map((o) => o.role).sort(), ["T1w", "dwi-AP", "dwi-b0-fieldmap-AP", "dwi-b0-fieldmap-PA", "dwi-b0-fieldmap-RL", "seg-tumor"].sort());
     assert(skipped.some((s) => /magnitude1/.test(s.file) && /another kind of scan/.test(s.why)), JSON.stringify(skipped));
+    assert(skipped.some((s) => /dir-LR/.test(s.file) && /this session/.test(s.why)), `another session's scan named: skipped (${JSON.stringify(skipped)})`);
     const pa = objects.find((o) => o.role === "dwi-b0-fieldmap-PA")!;
     const back = fromDicomVolumes(volumesOfSeries(await parseInstances([ab(pa.files[0].bytes)])).frames);
     assertEquals(back.bValues, [0, 0]);

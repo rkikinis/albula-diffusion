@@ -11,8 +11,8 @@
   (`LICENSE-network.txt`); `../bundleparc.ts` and `../bundleparc-gpu.ts` are written from it (scilpy 2810fe2 /
   MASILab/brainstemseg_singularity 829caaf, identical).
 - Checked (`../bundleparc-gpu.test.ts`, 2026-10-22): every block against PyTorch in double precision on a 32-voxel cube,
-  1.8e-6 of each block's largest value at worst; Prisma dMRI_dir99_AP's 97 tracts against PyTorch's run, Dice 0.9998 at
-  the lowest.
+  1.8e-6 of each block's largest value at worst; Prisma dMRI_dir99_AP's 97 tracts against PyTorch running our rewrite of
+  their preparation and output steps (`brainstemseg-reference.py`), Dice 0.9998 at the lowest.
 
 License of the weights: CC BY 4.0 (`LICENSE-weights.txt`, with the attribution). When BrainstemSeg publishes new
 weights: rerun `brainstemseg-weights.py`, update the sha256 values above, rerun `brainstemseg-dump.py`,

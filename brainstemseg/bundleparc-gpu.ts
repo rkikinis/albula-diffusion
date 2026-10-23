@@ -331,7 +331,16 @@ export function bundleParcGpu(device: GPUDevice, model: BundleParcModel, opts: {
 
   let enc: GPUCommandEncoder | undefined; const temp: GPUBuffer[] = [];
   const encoder = () => (enc ??= device.createCommandEncoder());
-  const flush = async () => { if (enc) { device.queue.submit([enc.finish()]); enc = undefined; } await device.queue.onSubmittedWorkDone(); for (const b of temp.splice(0)) b.destroy(); };
+  // A REFUSED BUFFER OR A FAILED STEP IS SAID (critic 2026-10-22, brainstemseg-port finding 4): WebGPU reports them only as
+  // uncaptured errors, and the run went on with invalid buffers -- 97 empty tracts and no word. The first error is kept and
+  // thrown at the next wait.
+  let gpuError: string | undefined;
+  device.addEventListener("uncapturederror", (e) => { gpuError ??= String((e as GPUUncapturedErrorEvent).error?.message ?? e); });
+  const flush = async () => {
+    if (enc) { device.queue.submit([enc.finish()]); enc = undefined; }
+    await device.queue.onSubmittedWorkDone(); for (const b of temp.splice(0)) b.destroy();
+    if (gpuError) throw new Error(`BundleParc on the card: the graphics card refused a step: ${gpuError}`);
+  };
   const uni = (vals: number[]) => { const b = device.createBuffer({ size: Math.ceil(vals.length / 4) * 16, usage: U | CD }); device.queue.writeBuffer(b, 0, new Uint32Array([...vals, ...new Array((4 - vals.length % 4) % 4).fill(0)])); temp.push(b); return b; };
   const run = (pl: GPUComputePipeline, bufs: GPUBuffer[], groups: [number, number?, number?]) => {
     const bg = device.createBindGroup({ layout: pl.getBindGroupLayout(0), entries: bufs.map((b, i) => ({ binding: i, resource: { buffer: b } })) });
@@ -390,8 +399,8 @@ export function bundleParcGpu(device: GPUDevice, model: BundleParcModel, opts: {
   const ensure = (side: number) => {
     if (side === D) return;
     if (D) throw new Error("BundleParc on the card: one cube size per instance");
+    if (!(side > 0) || side % 16) throw new Error(`BundleParc on the card: the cube's side (${side}) must divide by 16`);
     D = side; const N0 = D ** 3;
-    if (D % 16) throw new Error(`BundleParc on the card: the cube's side (${D}) must divide by 16`);
     IN = buf(N0 * N_COEFS * 4); DW = buf(N0 * 64 * 4); EXP = buf(N0 * 128 * 4);
     B1 = buf(N0 * 32 * 4); B2 = buf(N0 * 32 * 4); B3 = buf(N0 * 32 * 4);
     for (let l = 0; l < 4; l++) F.push(buf((D >> l) ** 3 * CHANNELS[l] * 4));
@@ -420,6 +429,7 @@ export function bundleParcGpu(device: GPUDevice, model: BundleParcModel, opts: {
     },
     async decode(tract) {
       if (!D) throw new Error("BundleParc on the card: encode first");
+      if (!Number.isInteger(tract) || tract < 0 || tract >= model.tracts.length) throw new Error(`BundleParc on the card: no tract ${tract} (0..${model.tracts.length - 1})`);
       const t0 = performance.now(), name = model.tracts[tract];
       let p = promptEmbedding(model, tract); prompts.set(`${name}.prompt`, p);
       let zin = ZB, d = D >> 4;

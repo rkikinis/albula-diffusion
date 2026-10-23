@@ -20,10 +20,16 @@ const DWI_NAME = /_dwi\.nii(\.gz)?$/;
 const EPI_NAME = /_epi\.nii(\.gz)?$/;
 const AGENCIES = ["IEC", "FDA", "MHW"];
 
-/** IntendedFor (BIDS: a path relative to the subject, or a "bids::" URI; one or a list) names a diffusion scan. */
-function forDiffusion(side: Record<string, unknown>): boolean {
-  const v = side.IntendedFor, list = Array.isArray(v) ? v : v === undefined ? [] : [v];
-  return list.some((p) => /(^|\/)dwi\/[^/]*_dwi\.nii(\.gz)?$/.test(String(p)));
+const listOf = (v: unknown): string[] => (Array.isArray(v) ? v : v === undefined || v === null ? [] : [v]).map(String);
+/** Which of THIS session's diffusion files a field map is meant for: named in its IntendedFor (BIDS: a path relative to
+ *  the subject, or a "bids::" URI; one or a list), or -- BIDS 1.7 and later -- its B0FieldIdentifier named in that scan's
+ *  B0FieldSource. A path to another session's scan, or to none, is not this session's (critic 2026-10-22, finding 8). */
+function meantFor(side: Record<string, unknown>, dwis: { file: string; side: Record<string, unknown> }[]): string | undefined {
+  const named = listOf(side.IntendedFor).map((p) => p.replace(/^bids::/, ""));
+  for (const d of dwis) if (named.some((p) => /(^|\/)dwi\//.test(p) && p.split("/").pop() === d.file)) return d.file;
+  const ids = listOf(side.B0FieldIdentifier);
+  for (const d of dwis) if (ids.length && listOf(d.side.B0FieldSource).some((s) => ids.includes(s))) return d.file;
+  return undefined;
 }
 
 /** One object: the series as an Enhanced MR diffusion object, with its sidecar and its record. */
@@ -32,7 +38,8 @@ async function writeObject(ctx: BidsKindContext, e: string, series: DiffusionSer
   const side = sidecarText ? JSON.parse(sidecarText) as Record<string, unknown> : {};
   const kept = Object.fromEntries(Object.entries(side).filter(([k]) => !ctx.sidecarLeftOut.includes(k)));
   const base = e.replace(/\.nii(\.gz)?$/, "");
-  const acq = /_(?:acq|dir)-([A-Za-z0-9]+)/.exec(role === "dwi" ? e : e.replace(/_acq-dwi/, ""))?.[1];
+  // A field map is named by its direction (dir-PA), a diffusion scan as before (its first acq- or dir- entity).
+  const acq = role === "dwi" ? /_(?:acq|dir)-([A-Za-z0-9]+)/.exec(e)?.[1] : /_dir-([A-Za-z0-9]+)/.exec(e)?.[1] ?? /_acq-([A-Za-z0-9]+)/.exec(e.replace(/_acq-dwi/, ""))?.[1];
   const desc = `${String(side.SeriesDescription ?? (role === "dwi" ? "DWI" : "DWI b0 field map"))}${acq ? ` (${acq})` : ""}`.slice(0, 64);
   const number = ctx.nextSeriesNumber();
   const exp = await diffusionToEnhancedMR(series, { patientName: st.patientName, patientID: st.patientID, studyInstanceUID: st.studyInstanceUID, frameOfReferenceUID: st.frameOfReferenceUID, studyDescription: st.studyDescription, comments: st.comments, extra: st.extra, studyDate: st.studyDate, studyTime: st.studyTime }, {
@@ -84,21 +91,22 @@ export const bidsDiffusion: BidsKind = {
         out.push(await writeObject(ctx, e, series, sidecarText, "dwi", `dwi rule ${DWI_RULE}`, "diffusion"));
       } catch (err) { ctx.skip(e, (err as Error).message); }
     }
-    // THE b = 0 FIELD MAPS FOR DIFFUSION (fmap/…_epi, IntendedFor a dwi/ scan): every volume b = 0, no direction.
-    const dwiHere = dwiFiles.length > 0;
+    // THE b = 0 FIELD MAPS FOR DIFFUSION (fmap/…_epi, meant for one of this session's dwi/ scans): every volume b = 0.
+    const dwis: { file: string; side: Record<string, unknown> }[] = [];
+    for (const e of dwiFiles) { const t = await ctx.readText(`${ctx.dir}/dwi/${e.replace(/\.nii(\.gz)?$/, "")}.json`); try { dwis.push({ file: e, side: t ? JSON.parse(t) : {} }); } catch { dwis.push({ file: e, side: {} }); } }
     for (const e of (await ctx.files("fmap")).filter((f) => /\.nii(\.gz)?$/.test(f))) {
       if (!EPI_NAME.test(e)) { ctx.skip(`fmap/${e}`, "a field map for another kind of scan (only the b = 0 pairs, …_epi, meant for a diffusion scan are read)"); continue; }
       const m = /^(.*_epi)\.nii(\.gz)?$/.exec(e)!;
       const sidecarText = (await ctx.readText(`${ctx.dir}/fmap/${m[1]}.json`)) ?? "";
       let side: Record<string, unknown> = {};
       try { side = sidecarText ? JSON.parse(sidecarText) : {}; } catch { ctx.skip(`fmap/${e}`, "its sidecar is not valid JSON"); continue; }
-      if (!forDiffusion(side)) { ctx.skip(`fmap/${e}`, "meant for another scan (its IntendedFor names no diffusion scan)"); continue; }
-      if (!dwiHere) { ctx.skip(`fmap/${e}`, "meant for a diffusion scan this session does not have"); continue; }
+      const target = meantFor(side, dwis);
+      if (!target) { ctx.skip(`fmap/${e}`, "meant for another scan (neither its IntendedFor nor its B0FieldIdentifier names a diffusion scan of this session)"); continue; }
       ctx.say(`reading ${e}`);
       try {
         const vols = await parseNiftiVolumes(await Deno.readFile(`${ctx.dir}/fmap/${e}`), e), n = vols.length, zeros = new Array(n).fill(0).join(" ");
         const series = fromFsl(vols, `${zeros}\n`, `${zeros}\n${zeros}\n${zeros}\n`, e);
-        series.source = `${series.source}; a b = 0 field map (fmap/${e}): every volume b = 0`;
+        series.source = `${series.source}; a b = 0 field map (fmap/${e}) for dwi/${target}: every volume b = 0`;
         out.push(await writeObject(ctx, e, series, sidecarText, "dwi-b0-fieldmap", `fmap epi rule ${FMAP_RULE}`, "diffusion field map"));
       } catch (err) { ctx.skip(`fmap/${e}`, (err as Error).message); }
     }

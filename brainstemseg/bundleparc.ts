@@ -121,7 +121,10 @@ export interface Prepared {
  *  in the cube; one mean and one standard deviation over the whole cube, padding included. */
 export function prepareInput(fod: Float32Array, dims: [number, number, number], C: number): Prepared {
   const [X, Y, Z] = dims, S = VOLUME, m = Math.max(X, Y, Z);
-  const fit = dims.map((d) => Math.max(1, Math.min(S, Math.round(d * S / m)))) as [number, number, number];
+  // As their compute_fit_shape: scale = S / m first, then Python's round -- half to EVEN (Math.round goes up: 30 shapes in
+  // 40-260 got a cube one voxel off; critic 2026-10-22, brainstemseg-port finding 3).
+  const scale = S / m, roundHalfEven = (v: number) => { const f = Math.floor(v), r = v - f; return r > 0.5 ? f + 1 : r < 0.5 ? f : (f % 2 === 0 ? f : f + 1); };
+  const fit = dims.map((d) => Math.max(1, Math.min(S, roundHalfEven(d * scale)))) as [number, number, number];
   const step = dims.map((d, i) => d / fit[i]) as [number, number, number];
   const offset = fit.map((f) => Math.floor((S - f) / 2)) as [number, number, number];
   const cube = new Float32Array(S * S * S * N_COEFS);
@@ -132,8 +135,10 @@ export function prepareInput(fod: Float32Array, dims: [number, number, number], 
       const sy = y * step[1], y0 = Math.floor(sy), fy = sy - y0;
       for (let z = 0; z < fit[2]; z++) {
         const sz = z * step[2], z0 = Math.floor(sz), fz = sz - z0;
-        // scipy's order-1 spline: the 8 neighbors, a neighbor beyond the last voxel contributing 0 ("constant" mode
-        // reaches it only for a point beyond the edge, which the fit never asks for: (fit - 1)·step < size - 1).
+        // scipy's order-1 spline in "constant" mode: a point past the last voxel of any axis is 0 -- not (1 - f) times the
+        // last voxel, which is "grid-constant" (critic 2026-10-22, finding 2: an upsampled scan, longest side under 176,
+        // asks for such points on its last fitted slice of each axis). Inside, the 8 neighbors.
+        if (sx > X - 1 || sy > Y - 1 || sz > Z - 1) continue;
         const o = (((x + offset[0]) * S + (y + offset[1])) * S + (z + offset[2])) * N_COEFS;
         for (let c = 0; c < N_COEFS; c++) {
           let v = 0;
