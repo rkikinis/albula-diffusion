@@ -18,8 +18,10 @@ This extension adds diffusion MRI, from the scanner's files to the tracts near a
   Macdonald & Ruthotto 2016). Checked against FSL's topup (FSL 6.0.7.23, a check tool only) on the development
   cases where the head held still between the two scans: the fields correlate 0.93-0.97, differ by 0.30-0.39 mm at the
   median and 2.0-2.9 mm at the 99th percentile -- as Mike Halle's own version does -- in about 1 s against topup's 190 s
-  (`distortion-topup.test.ts`). Motion between the two scans is not modeled; topup models it, and on PAT03 (1.8°) the
-  two fields part.
+  (`distortion-topup.test.ts`). Since 2026-10-03 the default (distortion rule 2) estimates the reversed scan's rigid
+  movement together with the field, as topup's model does: on PAT16, PAT05 and PAT08 the fields then correlate
+  0.975-0.980 with topup's, 0.18-0.28 mm apart at the median and 1.6-2.1 mm at the 99th percentile, about 4 s a field.
+  PAT03 (the head turned 1.8° between the two scans) still disagrees with topup (r 0.15): open.
 - **Tracking**: UKF two-tensor free-water tractography — a port of UKFTractography (Rathi and colleagues, Brigham and
   Women's Hospital; `LICENSE-UKF.txt`) to TypeScript and to WebGPU. The graphics-card version is checked against the
   processor version on PAT16 (measured: 90% of fiber ends within 0.06 mm of the processor version's, tract-density maps
