@@ -190,7 +190,13 @@ const unitDir = (g: unknown): [number, number, number] | undefined => {
 export function phaseEncodingOf(standard: unknown, raw?: Raw, positive?: 0 | 1): string | undefined {
   if (raw) {
     const tag = privateTag(raw, "0077", "SlicerAlbula provenance 1", "02");
-    const text = tag ? raw[tag]?.Value?.[0] : undefined;
+    // UT is ONE value by the standard (a backslash in it is a character, not a separator), but dcmjs's dataset hands it
+    // back split at every backslash: a Siemens sidecar's "PulseSequenceDetails": "%CustomerSeq%\\cmrr_mbep2d_diff" cut the
+    // JSON at 1,627 characters, the sign was lost, and the job took the same-direction field map as the reversed scan on
+    // all 28 of OpenNeuro ds005123's older subjects (critic 2026-10-22, brainstemseg-port finding 1). Joined back here;
+    // core's own reader (dicom-tags.ts SINGLE_TEXT) already keeps it whole.
+    const parts = tag ? raw[tag]?.Value : undefined;
+    const text = Array.isArray(parts) && parts.every((p) => typeof p === "string") ? parts.join("\\") : undefined;
     if (typeof text === "string") {
       try { const pe = (JSON.parse(text) as { PhaseEncodingDirection?: unknown }).PhaseEncodingDirection; if (typeof pe === "string" && /^[ijk]-?$/.test(pe)) return pe; } catch { /* not JSON: the standard attribute */ }
     }

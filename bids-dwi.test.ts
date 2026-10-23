@@ -178,11 +178,13 @@ Deno.test("BIDS diffusion: the b = 0 field maps for diffusion in fmap/, and the 
     Deno.writeFileSync(`${dw}.nii`, nifti([4, 4, 4, 3, 7], DA, new Int16Array(4 * 4 * 3 * 7).map((_, i) => 100 + i)));
     Deno.writeTextFileSync(`${dw}.bval`, "0 1000 1000 1000 1000 1000 1000\n");
     Deno.writeTextFileSync(`${dw}.bvec`, "0 1 0 0 0.7071 0.7071 0\n0 0 1 0 0.7071 0 0.7071\n0 0 0 1 0 0.7071 0.7071\n");
+    Deno.writeTextFileSync(`${dw}.json`, JSON.stringify({ SeriesDescription: "DTI_test", PhaseEncodingDirection: "j-", PulseSequenceDetails: "%CustomerSeq%\\cmrr_mbep2d_diff" }));
     const fm = `${root}/sub-01/ses-pre/fmap`; Deno.mkdirSync(fm, { recursive: true });
     const intended = { IntendedFor: ["ses-pre/dwi/sub-01_ses-pre_acq-AP_dwi.nii"] };
     for (const [dir, pe] of [["PA", "j"], ["AP", "j-"]]) {
       Deno.writeFileSync(`${fm}/sub-01_ses-pre_acq-dwi_dir-${dir}_epi.nii`, nifti([4, 4, 4, 3, 2], DA, new Int16Array(4 * 4 * 3 * 2).map((_, i) => 90 + i)));
-      Deno.writeTextFileSync(`${fm}/sub-01_ses-pre_acq-dwi_dir-${dir}_epi.json`, JSON.stringify({ PhaseEncodingDirection: pe, ...intended }));
+      // A Siemens sidecar's backslash, as ds005123's carry (critic 2026-10-22, finding 1: dcmjs split the stored text there).
+      Deno.writeTextFileSync(`${fm}/sub-01_ses-pre_acq-dwi_dir-${dir}_epi.json`, JSON.stringify({ PhaseEncodingDirection: pe, PulseSequenceDetails: "%CustomerSeq%\\cmrr_fieldmapse", ...intended }));
     }
     Deno.writeFileSync(`${fm}/sub-01_ses-pre_acq-bold_magnitude1.nii`, nifti([3, 4, 4, 3, 1], DA, new Int16Array(48)));
     Deno.writeTextFileSync(`${fm}/sub-01_ses-pre_acq-bold_magnitude1.json`, JSON.stringify({ IntendedFor: ["ses-pre/func/x_bold.nii.gz"] }));
