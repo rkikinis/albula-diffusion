@@ -1,20 +1,68 @@
 // DIFFUSION SCANS IN A BIDS SESSION -> one Enhanced MR Image object each, the b-value and direction on every frame
 // (export-dicom-dwi.ts). A kind of the BIDS import, registered by hooks.ts through the SDK (registerBidsKind): core
-// builds the anatomy and the masks of a session, this extension its dwi/ folder.
+// builds the anatomy and the masks of a session, this extension its dwi/ folder -- and, since 2026-10-22, the b = 0 field
+// maps meant for a diffusion scan in fmap/ (`…_epi` with IntendedFor naming a dwi/ file: the reversed phase-encoding pair
+// OpenNeuro ds005123 stores there; ds001226 stored its reversed scan in dwi/). Each is written as a diffusion object whose
+// every frame is b = 0, with its phase-encoding direction from its sidecar, so the import job's choice of the reversed
+// scan (import-job.ts partnerOf) takes it as it takes one stored in dwi/. Other field maps (for functional MRI: magnitude,
+// phase difference) are skipped and said.
 import type { BuiltObject } from "albula";
 import type { BidsKind, BidsKindContext } from "albula";
 import { parseNiftiVolumes } from "albula";
-import { fromFsl } from "./dwi.ts";
+import { fromFsl, type DiffusionSeries } from "./dwi.ts";
 import { diffusionToEnhancedMR } from "./export-dicom-dwi.ts";
 
 /** Diffusion 1 -> 2, 2026-09-29 (bids.ts keeps the history of the rules): ISOTROPIC for a direction-less b > 0, UUID UIDs. */
 export const DWI_RULE = 2;
+/** The b = 0 field maps for diffusion (fmap/…_epi), rule 1, 2026-10-22. Its own rule: the diffusion scans' UIDs are unchanged. */
+export const FMAP_RULE = 1;
 const DWI_NAME = /_dwi\.nii(\.gz)?$/;
+const EPI_NAME = /_epi\.nii(\.gz)?$/;
 const AGENCIES = ["IEC", "FDA", "MHW"];
+
+/** IntendedFor (BIDS: a path relative to the subject, or a "bids::" URI; one or a list) names a diffusion scan. */
+function forDiffusion(side: Record<string, unknown>): boolean {
+  const v = side.IntendedFor, list = Array.isArray(v) ? v : v === undefined ? [] : [v];
+  return list.some((p) => /(^|\/)dwi\/[^/]*_dwi\.nii(\.gz)?$/.test(String(p)));
+}
+
+/** One object: the series as an Enhanced MR diffusion object, with its sidecar and its record. */
+async function writeObject(ctx: BidsKindContext, e: string, series: DiffusionSeries, sidecarText: string, role: string, uidRule: string, kind: string): Promise<BuiltObject> {
+  const st = ctx.study, agency = ctx.options.safetyStandardAgency as "IEC" | "FDA" | "MHW";
+  const side = sidecarText ? JSON.parse(sidecarText) as Record<string, unknown> : {};
+  const kept = Object.fromEntries(Object.entries(side).filter(([k]) => !ctx.sidecarLeftOut.includes(k)));
+  const base = e.replace(/\.nii(\.gz)?$/, "");
+  const acq = /_(?:acq|dir)-([A-Za-z0-9]+)/.exec(role === "dwi" ? e : e.replace(/_acq-dwi/, ""))?.[1];
+  const desc = `${String(side.SeriesDescription ?? (role === "dwi" ? "DWI" : "DWI b0 field map"))}${acq ? ` (${acq})` : ""}`.slice(0, 64);
+  const number = ctx.nextSeriesNumber();
+  const exp = await diffusionToEnhancedMR(series, { patientName: st.patientName, patientID: st.patientID, studyInstanceUID: st.studyInstanceUID, frameOfReferenceUID: st.frameOfReferenceUID, studyDescription: st.studyDescription, comments: st.comments, extra: st.extra, studyDate: st.studyDate, studyTime: st.studyTime }, {
+    seriesDescription: desc, seriesNumber: number, sourceDescription: sidecarText ? JSON.stringify(kept, null, 2) : undefined,
+    // The sidecar's phase-encoding axis as the standard attribute: i along the rows (ROW), j along the columns (COL);
+    // the writer keeps the voxel axes as the image's (export-dicom-dwi.ts). Its sign stays in the private block.
+    ...(typeof side.PhaseEncodingDirection === "string" && /^[ij]-?$/.test(side.PhaseEncodingDirection) ? { phaseEncoding: (side.PhaseEncodingDirection[0] === "i" ? "ROW" : "COLUMN") as "ROW" | "COLUMN" } : {}),
+    safetyStandardAgency: agency,
+    uids: { series: await ctx.uid(base, uidRule, "series"), sop: await ctx.uid(base, uidRule, "instance") },
+  });
+  const shells = [...new Set(series.bValues.map((b) => Math.round(b)))].sort((a, b) => a - b);
+  const noDir = series.bValues.filter((b, i) => b > 0 && Math.hypot(...series.gradients[i]) < 0.5).length;
+  const [nx, ny] = series.volumes[0].dims;
+  return {
+    role: `${role}${acq ? `-${acq}` : ""}`, description: `${kind}: ${e}, ${series.volumes.length} volumes, b = ${shells.join("/")}`,
+    seriesInstanceUID: exp.seriesInstanceUID,
+    files: [{
+      name: `${exp.sopInstanceUID}.dcm`, bytes: exp.bytes,
+      index: { sopInstanceUID: exp.sopInstanceUID, seriesInstanceUID: exp.seriesInstanceUID, studyInstanceUID: st.studyInstanceUID, modality: "MR", seriesNumber: number,
+        seriesDescription: desc, frameOfReferenceUID: st.frameOfReferenceUID, displayedSize: `${nx}x${ny}`, numberOfFrames: exp.frames, newStudy: st.newStudy } as BuiltObject["files"][number]["index"],
+    }],
+    notes: [series.source, `safety standard ${agency}: ${String(ctx.options.safetyReason ?? "(no reason given)")}`,
+      ...(noDir ? [`${noDir} volume(s) with b > 0 and no direction: written as ISOTROPIC (trace) images`] : []),
+      `sidecar kept in the private block without: ${ctx.sidecarLeftOut.filter((k) => k in side).join(", ") || "(none of the left-out fields present)"}`],
+  };
+}
 
 export const bidsDiffusion: BidsKind = {
   name: "diffusion",
-  folders: ["dwi"],
+  folders: ["dwi", "fmap"],
   async check(ctx: BidsKindContext) {
     // A diffusion scan needs the safety standard, stated (critic 2026-09-28, finding 8).
     const any = (await ctx.files("dwi")).some((e) => DWI_NAME.test(e));
@@ -23,7 +71,7 @@ export const bidsDiffusion: BidsKind = {
     }
   },
   async build(ctx: BidsKindContext): Promise<BuiltObject[]> {
-    const out: BuiltObject[] = [], st = ctx.study, agency = ctx.options.safetyStandardAgency as "IEC" | "FDA" | "MHW";
+    const out: BuiltObject[] = [];
     const dwiFiles = (await ctx.files("dwi")).filter((e) => DWI_NAME.test(e));
     for (const e of dwiFiles) {
       const m = /^(.*_dwi)\.nii(\.gz)?$/.exec(e)!;
@@ -32,36 +80,27 @@ export const bidsDiffusion: BidsKind = {
       ctx.say(`reading ${e}`);
       try {
         const sidecarText = (await ctx.readText(`${ctx.dir}/dwi/${m[1]}.json`)) ?? "";
-        const side = sidecarText ? JSON.parse(sidecarText) as Record<string, unknown> : {};
-        const kept = Object.fromEntries(Object.entries(side).filter(([k]) => !ctx.sidecarLeftOut.includes(k)));
         const series = fromFsl(await parseNiftiVolumes(await Deno.readFile(`${ctx.dir}/dwi/${e}`), e), bval, bvec, e);
-        const acq = /_(?:acq|dir)-([A-Za-z0-9]+)/.exec(e)?.[1];
-        const desc = `${String(side.SeriesDescription ?? "DWI")}${acq ? ` (${acq})` : ""}`.slice(0, 64);
-        const number = ctx.nextSeriesNumber();
-        const exp = await diffusionToEnhancedMR(series, { patientName: st.patientName, patientID: st.patientID, studyInstanceUID: st.studyInstanceUID, frameOfReferenceUID: st.frameOfReferenceUID, studyDescription: st.studyDescription, comments: st.comments, extra: st.extra, studyDate: st.studyDate, studyTime: st.studyTime }, {
-          seriesDescription: desc, seriesNumber: number, sourceDescription: sidecarText ? JSON.stringify(kept, null, 2) : undefined,
-          // The sidecar's phase-encoding axis as the standard attribute: i along the rows (ROW), j along the columns (COL);
-          // the writer keeps the voxel axes as the image's (export-dicom-dwi.ts). Its sign stays in the private block.
-          ...(typeof side.PhaseEncodingDirection === "string" && /^[ij]-?$/.test(side.PhaseEncodingDirection) ? { phaseEncoding: (side.PhaseEncodingDirection[0] === "i" ? "ROW" : "COLUMN") as "ROW" | "COLUMN" } : {}),
-          safetyStandardAgency: agency,
-          uids: { series: await ctx.uid(m[1], `dwi rule ${DWI_RULE}`, "series"), sop: await ctx.uid(m[1], `dwi rule ${DWI_RULE}`, "instance") },
-        });
-        const shells = [...new Set(series.bValues.map((b) => Math.round(b)))].sort((a, b) => a - b);
-        const noDir = series.bValues.filter((b, i) => b > 0 && Math.hypot(...series.gradients[i]) < 0.5).length;
-        const [nx, ny] = series.volumes[0].dims;
-        out.push({
-          role: `dwi${acq ? `-${acq}` : ""}`, description: `diffusion: ${e}, ${series.volumes.length} volumes, b = ${shells.join("/")}`,
-          seriesInstanceUID: exp.seriesInstanceUID,
-          files: [{
-            name: `${exp.sopInstanceUID}.dcm`, bytes: exp.bytes,
-            index: { sopInstanceUID: exp.sopInstanceUID, seriesInstanceUID: exp.seriesInstanceUID, studyInstanceUID: st.studyInstanceUID, modality: "MR", seriesNumber: number,
-              seriesDescription: desc, frameOfReferenceUID: st.frameOfReferenceUID, displayedSize: `${nx}x${ny}`, numberOfFrames: exp.frames, newStudy: st.newStudy } as BuiltObject["files"][number]["index"],
-          }],
-          notes: [series.source, `safety standard ${agency}: ${String(ctx.options.safetyReason ?? "(no reason given)")}`,
-            ...(noDir ? [`${noDir} volume(s) with b > 0 and no direction: written as ISOTROPIC (trace) images`] : []),
-            `sidecar kept in the private block without: ${ctx.sidecarLeftOut.filter((k) => k in side).join(", ") || "(none of the left-out fields present)"}`],
-        });
+        out.push(await writeObject(ctx, e, series, sidecarText, "dwi", `dwi rule ${DWI_RULE}`, "diffusion"));
       } catch (err) { ctx.skip(e, (err as Error).message); }
+    }
+    // THE b = 0 FIELD MAPS FOR DIFFUSION (fmap/…_epi, IntendedFor a dwi/ scan): every volume b = 0, no direction.
+    const dwiHere = dwiFiles.length > 0;
+    for (const e of (await ctx.files("fmap")).filter((f) => /\.nii(\.gz)?$/.test(f))) {
+      if (!EPI_NAME.test(e)) { ctx.skip(`fmap/${e}`, "a field map for another kind of scan (only the b = 0 pairs, …_epi, meant for a diffusion scan are read)"); continue; }
+      const m = /^(.*_epi)\.nii(\.gz)?$/.exec(e)!;
+      const sidecarText = (await ctx.readText(`${ctx.dir}/fmap/${m[1]}.json`)) ?? "";
+      let side: Record<string, unknown> = {};
+      try { side = sidecarText ? JSON.parse(sidecarText) : {}; } catch { ctx.skip(`fmap/${e}`, "its sidecar is not valid JSON"); continue; }
+      if (!forDiffusion(side)) { ctx.skip(`fmap/${e}`, "meant for another scan (its IntendedFor names no diffusion scan)"); continue; }
+      if (!dwiHere) { ctx.skip(`fmap/${e}`, "meant for a diffusion scan this session does not have"); continue; }
+      ctx.say(`reading ${e}`);
+      try {
+        const vols = await parseNiftiVolumes(await Deno.readFile(`${ctx.dir}/fmap/${e}`), e), n = vols.length, zeros = new Array(n).fill(0).join(" ");
+        const series = fromFsl(vols, `${zeros}\n`, `${zeros}\n${zeros}\n${zeros}\n`, e);
+        series.source = `${series.source}; a b = 0 field map (fmap/${e}): every volume b = 0`;
+        out.push(await writeObject(ctx, e, series, sidecarText, "dwi-b0-fieldmap", `fmap epi rule ${FMAP_RULE}`, "diffusion field map"));
+      } catch (err) { ctx.skip(`fmap/${e}`, (err as Error).message); }
     }
     return out;
   },

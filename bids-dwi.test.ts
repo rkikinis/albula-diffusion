@@ -163,3 +163,46 @@ Deno.test("BIDS diffusion: a T1 the writers cannot take is skipped and named, an
     assert(r.skipped.some((k) => /no T1 series/.test(k.why)), "the mask says why it was not used");
   } finally { await Deno.remove(root, { recursive: true }); }
 });
+
+// THE b = 0 FIELD MAPS FOR DIFFUSION (fmap/…_epi, 2026-10-22; OpenNeuro ds005123 stores its reversed pair there): each one
+// meant for a diffusion scan becomes a diffusion object of b = 0 frames with its phase-encoding direction, and the import
+// job's own choice takes the reversed one (PA, "j") as the scan's reversed scan and refuses the one in the scan's own
+// direction (AP, "j-"); a field map for functional MRI is skipped, and said.
+Deno.test("BIDS diffusion: the b = 0 field maps for diffusion in fmap/, and the job takes the reversed one", async () => {
+  const { partnerRefusals, planCases, seriesFromInstances } = await import("./import-job.ts");
+  const root = await makeDataset();
+  try {
+    const DA = [-2.5, 0, 0, 5, 0, 2.5, 0, -5, 0, 0, 2.5, -3, 0, 0, 0, 1];
+    // A scan the job counts as diffusion (7 volumes, 6 directions: import-job.ts isDiffusionScan), on the same grid.
+    const dw = `${root}/sub-01/ses-pre/dwi/sub-01_ses-pre_acq-AP_dwi`;
+    Deno.writeFileSync(`${dw}.nii`, nifti([4, 4, 4, 3, 7], DA, new Int16Array(4 * 4 * 3 * 7).map((_, i) => 100 + i)));
+    Deno.writeTextFileSync(`${dw}.bval`, "0 1000 1000 1000 1000 1000 1000\n");
+    Deno.writeTextFileSync(`${dw}.bvec`, "0 1 0 0 0.7071 0.7071 0\n0 0 1 0 0.7071 0 0.7071\n0 0 0 1 0 0.7071 0.7071\n");
+    const fm = `${root}/sub-01/ses-pre/fmap`; Deno.mkdirSync(fm, { recursive: true });
+    const intended = { IntendedFor: ["ses-pre/dwi/sub-01_ses-pre_acq-AP_dwi.nii"] };
+    for (const [dir, pe] of [["PA", "j"], ["AP", "j-"]]) {
+      Deno.writeFileSync(`${fm}/sub-01_ses-pre_acq-dwi_dir-${dir}_epi.nii`, nifti([4, 4, 4, 3, 2], DA, new Int16Array(4 * 4 * 3 * 2).map((_, i) => 90 + i)));
+      Deno.writeTextFileSync(`${fm}/sub-01_ses-pre_acq-dwi_dir-${dir}_epi.json`, JSON.stringify({ PhaseEncodingDirection: pe, ...intended }));
+    }
+    Deno.writeFileSync(`${fm}/sub-01_ses-pre_acq-bold_magnitude1.nii`, nifti([3, 4, 4, 3, 1], DA, new Int16Array(48)));
+    Deno.writeTextFileSync(`${fm}/sub-01_ses-pre_acq-bold_magnitude1.json`, JSON.stringify({ IntendedFor: ["ses-pre/func/x_bold.nii.gz"] }));
+    const ds = await readBidsDataset(root);
+    const { objects, skipped } = await buildBidsSubject(ds, "01", "pre", opts);
+    assertEquals(objects.map((o) => o.role), ["T1w", "dwi-AP", "dwi-b0-fieldmap-AP", "dwi-b0-fieldmap-PA", "seg-tumor"]);
+    assert(skipped.some((s) => /magnitude1/.test(s.file) && /another kind of scan/.test(s.why)), JSON.stringify(skipped));
+    const pa = objects.find((o) => o.role === "dwi-b0-fieldmap-PA")!;
+    const back = fromDicomVolumes(volumesOfSeries(await parseInstances([ab(pa.files[0].bytes)])).frames);
+    assertEquals(back.bValues, [0, 0]);
+    // Through the job's own reader and choice, as for a real database.
+    const facts = await Promise.all(objects.filter((o) => o.role.startsWith("dwi")).map(async (o) => {
+      const inst = await parseInstances([ab(o.files[0].bytes)], { headers: true });
+      return seriesFromInstances({ seriesUID: o.seriesInstanceUID, studyUID: o.files[0].index.studyInstanceUID, patientUID: "p1", description: o.files[0].index.seriesDescription ?? "" }, inst).facts;
+    }));
+    const plans = planCases(facts);
+    assertEquals(plans.length, 1);
+    assertEquals(plans[0].partner?.uid, pa.seriesInstanceUID, "the PA field map is the reversed scan");
+    const ap = objects.find((o) => o.role === "dwi-b0-fieldmap-AP")!;
+    const why = partnerRefusals(plans[0].dwi, facts).find((r) => r.uid === ap.seriesInstanceUID)?.why ?? "";
+    assert(/not reversed/.test(why), `the AP field map is refused for its direction: "${why}"`);
+  } finally { await Deno.remove(root, { recursive: true }); }
+});
