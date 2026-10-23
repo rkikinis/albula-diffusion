@@ -99,7 +99,7 @@ on any other path into core, and core never imports an extension. `extension.jso
 |---|---|
 | `hooks.ts` | what separates one DICOM volume from the next (the b-value and direction: `diffusion-vendors.ts`), and the BIDS `dwi/` kind (`bids-dwi.ts`). Loaded wherever data is read: the app, the copy writer, the command-line tools. |
 | `module.ts` | the Diffusion module: the patient's case and the one button; under Advanced, Maps (b0 corrected, FA, Color FA, distortion, dcm2niix's check), Tracts (near a structure or from a clicked point; two-tensor, smooth curves or single tensor), and the tract list (search, groups, Show / Hide all, Add lines), drawn as tubes in 3D and as dots where they cross the slices; data-probe rows for the tracts under the pointer. |
-| assets | `tractcloud/model/` (the trained network, 8.9 MB) and `vendor/dcm2niix/`, copied beside the app's bundle. |
+| assets | `naming/` (TractCloud's 42-tract table), `rapidparc/model/` (13 MB), `template/` (the MNI 2009c head, 13 MB) and `vendor/dcm2niix/`, copied beside the app's bundle (`extension.json` `assets`). Not shipped: `tractcloud/model/` (validation runs only) and `brainstemseg/model/` (not in the app yet). |
 
 Its modules follow the [Albula Module Design Rules](https://github.com/rkikinis/SlicerAlbula/blob/main/Contents/docs/MODULE-DESIGN-RULES.md),
 as every module in Albula does; a new extension's modules start from them.
@@ -133,9 +133,36 @@ and the CSD reference, and the SynthStrip brain masks of ds001226 (`synthstrip-m
 Some comments name documents of the Albula workspace (`Contents/docs/…`) that are not published; they record the
 reasoning behind a choice and are not needed to build or run anything.
 
+## Other people's methods in this extension
+
+Each was written here from its source code or its papers, and checked against the original (or, where no program is
+the original, against the field's reference implementation) on the same data. "Version" is what the port was written
+from and checked against; the weights are pinned by their sha256 in each `model/README.md`. A stored tract set records
+the naming network's fingerprint and the fingerprint of all the code that made it (`NAMING.md`, "Reading a tract
+set's record"). Measured agreement as of 2026-10-22.
+
+| method (whose) | files | written from, version | license | checked against | measured | test |
+|---|---|---|---|---|---|---|
+| UKF two-tensor tractography (Rathi and colleagues, BWH) | `ukf.ts`, `ukf-gpu.ts` (card) | UKFTractography commit 2d2b66153970 (v2.1) | UKF agreement (`LICENSE-UKF.txt`) | the original, built from source, same seeds (PAT16) | 828 of 838 fibers end within 0.1 mm (processor); card 741 of 838 | `ukf-reference.test.ts`, `ukf-gpu.test.ts` |
+| TractCloud network (O'Donnell group) | `tractcloud/tractcloud.ts`, `tractcloud-gpu.ts` (card) | SlicerDMRI/TractCloud v1.0.0, source 94de627 | 3D Slicer's (`tractcloud/model/LICENSE.txt`) | the original in PyTorch, 5,120 streamlines | every layer within 4e-6, every cluster the same | `tractcloud/tractcloud.test.ts` |
+| RapidParc network (Bisten, Schultz et al., Bonn) | `rapidparc/rapidparc.ts`, `rapidparc-gpu.ts` (card) | MedVisBonn/RapidParc source 4d03d3c, weights v1.0.0 | BSD 3-Clause | the original in PyTorch, 4,174 PAT16 streamlines | layer by layer; at most 2 clusters may differ (the test's bound) | `rapidparc/rapidparc.test.ts`, `rapidparc-gpu.test.ts` |
+| BrainstemSeg (Vanderbilt) on BundleParc's network (SCIL-VITAL) | `brainstemseg/bundleparc.ts`, `bundleparc-gpu.ts` (card) | MASILab/brainstemseg_singularity 829caaf = scilpy 2810fe2; weights v4.2 | network MIT, weights CC BY 4.0 | the original in PyTorch: double precision block by block; single precision on Prisma's 97 tracts | 1.8e-6 at worst per block; Dice 0.9998 at the lowest | `brainstemseg/bundleparc-gpu.test.ts` |
+| Diffusion tensor fit (the standard WLS fit) | `tensor.ts`, `tensor-gpu.ts` (card) | Salvador 2005, Veraart 2013 | ours | DIPY 1.12.1, PAT16's 151,244 brain voxels | FA within 0.0006, direction within 0.02° | `tensor.test.ts`, `tensor-gpu.test.ts` |
+| Multi-shell multi-tissue CSD (Jeurissen 2014, Tournier 2007) | `csd.ts`, `responses.ts`, `csd-volume.ts` | the papers; DIPY read as a second description | ours | DIPY, PAT16's 6,770 reference voxels | equal within 0.1% in 6,742, better in 28, worse in none; responses within 4% | `csd.test.ts`, `responses.test.ts` |
+| Parallel transport tractography (Aydogan & Shi 2021) | `ptt.ts` | the paper; DIPY's PTTDirectionGetter as a second description | ours | — (compared with UKF on 15 cases) | — | `ptt.test.ts` |
+| Distortion correction from a reversed pair (Chang & Fitzpatrick 1992; Ruthotto 2012; Macdonald & Ruthotto 2016) | `distortion.ts` | the papers | ours | FSL topup 6.0.7.23 (a check tool) | fields correlate 0.93-0.97, 0.30-0.39 mm apart at the median | `distortion-topup.test.ts` |
+| Head movement between images, after eddy (Andersson & Sotiropoulos 2016) | `motion.ts` | the paper, not eddy's code | ours | FSL eddy (a check tool) | 0.20-0.30 mm | `motion.test.ts` |
+| Rigid alignment to the T1 on normalized gradient fields (Haber & Modersitzki 2006), as Mike Halle's tractline | `registration.ts` | the description, not tractline's code | ours | tractline's alignment; BRAINSFit (a check tool), by the workspace's `registration-check.ts` (2026-10-03) | 0.03-0.09 mm from tractline's, 0.18-0.34 mm from BRAINSFit's | `registration.test.ts` (its own properties) |
+| median_otsu brain mask (DIPY) | `median-otsu.ts` | DIPY 1.12.1's source (BSD-3) | ours | DIPY 1.12.1 on PAT16 and PAT05 (2026-10-02, the workspace's record) | identical voxel for voxel | `median-otsu.test.ts` (the fast filter against the plain one; the threshold) |
+
+A dash: no number is recorded here; see the file's header and its test. Not ports: SynthStrip (Hoopes et al. 2022)
+runs on Mike Halle's haversack server, asked through the SDK; dcm2niix runs as a second opinion (`vendor/dcm2niix/`).
+
 ## Licenses and credits
 
 Albula's own code here: Apache 2.0 (`LICENSE`). The UKF port keeps UKFTractography's license (`LICENSE-UKF.txt`),
-TractCloud's trained network keeps 3D Slicer's (`tractcloud/model/LICENSE.txt`), dcm2niix keeps its own
-(`vendor/dcm2niix/LICENSE.txt`) — see `NOTICE`. The papers each part rests on are in `references.ts` and appear in the
+TractCloud's trained network keeps 3D Slicer's (`tractcloud/model/LICENSE.txt`), RapidParc's weights the BSD 3-Clause
+(`rapidparc/model/LICENSE.txt`), BrainstemSeg's weights CC BY 4.0 and BundleParc's network MIT
+(`brainstemseg/model/LICENSE-weights.txt`, `LICENSE-network.txt`), the MNI template its own (`template/LICENSE.txt`),
+dcm2niix its own (`vendor/dcm2niix/LICENSE.txt`) — see `NOTICE`. The papers each part rests on are in `references.ts` and appear in the
 module's Help & Acknowledgment.

@@ -35,4 +35,12 @@ These parts are under their own licenses, which apply to them instead:
    McGill University; use, copy, modify and distribution permitted with the notice (template/LICENSE.txt). Used to find
    the head's own frame (head-frame.ts); the landmarks there are the AFIDs project's consensus placements on it.
 
+6. brainstemseg/model/ — BrainstemSeg's trained weights ("BrainstemSeg: Automated White Matter Bundle Segmentation for
+   Brainstem and Subcortical Pathways", v4.2, Gaurav Rudravaram, Bennett Landman, Kurt Schilling, Vanderbilt University;
+   Zenodo doi:10.5281/zenodo.19343085), converted to float32 safetensors with no value changed; Creative Commons
+   Attribution 4.0 International (brainstemseg/model/LICENSE-weights.txt, with the attribution). The network they run in,
+   BundleParc (Théberge, El Yamani, Boré, Rheault, Descoteaux, Jodoin; SCIL-VITAL), is MIT-licensed, Copyright (c) 2024
+   SCIL-VITAL (brainstemseg/model/LICENSE-network.txt); brainstemseg/bundleparc.ts and bundleparc-gpu.ts are written here
+   from its source (scilpy, and MASILab/brainstemseg_singularity at 829caaf) and its paper.
+
 The papers each part rests on are listed in references.ts.
