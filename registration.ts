@@ -22,7 +22,11 @@ import { medianOtsuMask } from "./median-otsu.ts";
 /** Let the page answer (a long step in the app; nothing in Deno). */
 const yieldNow = () => new Promise<void>((r) => setTimeout(r, 0));
 
-export const REGISTRATION_RULE = 1;
+/** The default rule. 1: from the scanner's placement (same session). 2: brain centers, the shift, 27 starting tilts, and rule
+ *  1's path as a candidate (rigidToT1Wide; sessions apart). Rule 2 is built and under test (2026-10-25); the default
+ *  changes on Ron's word. */
+export const REGISTRATION_RULE: RegistrationRuleId = 1;
+export type RegistrationRuleId = 1 | 2;
 
 /** A 3D image on a grid: x fastest, ijkToRAS row-major 4×4 (or 3×4). */
 export interface Grid3 { dims: [number, number, number]; ijkToRAS: number[]; data: ArrayLike<number> }
@@ -128,23 +132,123 @@ export interface RigidResult { T: Rigid; /** The cost at the result and at the s
  * inside `mask` (on the moving grid: the brain, dilated -- its edge carries the signal). From the scanner's coordinates.
  */
 export async function rigidToT1(moving: Grid3, fixedFull: Grid3, mask: Uint8Array, opts: { fwhmMm?: number[]; samples?: number; fixedMm?: number } = {}): Promise<RigidResult> {
+  const t0 = performance.now(), P = ngfProblem(moving, fixedFull, mask, opts);
+  const levels: RigidResult["levels"] = [];
+  let p = [0, 0, 0, 0, 0, 0], costAtStart = NaN, cost = NaN;
+  for (const fwhm of opts.fwhmMm ?? [8, 4]) {
+    const f = P.level(fwhm);
+    // The scanner's placement's cost at THIS level's blur: the last level's is what the result is compared with (costs at
+    // different blurs are not comparable).
+    costAtStart = f([0, 0, 0, 0, 0, 0]);
+    const d = await descend(f, p);
+    p = d.p;
+    levels.push({ fwhmMm: fwhm, iterations: d.iterations, cost: +d.cost.toFixed(5) });
+    cost = d.cost;
+  }
+  return { T: P.toRigid(p), cost, costAtStart, levels, ms: performance.now() - t0 };
+}
+
+/** Rule 2's starting tilts, per axis (degrees): every combination, 27 starts, about the brain's center. */
+export const TILT_STARTS_DEG = [-20, 0, 20];
+
+export interface Candidate {
+  /** Where it started: "scanner" (rule 1's path, unchanged) or "brain centers" with its tilt. */
+  start: string; tiltDeg?: [number, number, number];
+  /** Its cost at the finest level, and how far (mean over the sample, mm) it puts the brain from the chosen one. */
+  cost: number; apartMm: number;
+}
+
+/**
+ * RULE 2 (Ron, 2026-10-25: DIPY as the roadmap, with "yes" to building it): a large capture range before the fine stage,
+ * for a T1 and a diffusion scan made in different sessions (HCP-Aging: 5-42 mm and 1-26 degrees apart; rule 1 settled 26
+ * degrees off on HCA9640889). DIPY's order of steps (dipy/align/_public.py affine_registration: centers of mass, then
+ * translation alone, then rigid), with the brains' centers instead of the whole images' (a T1 with neck against a b = 0
+ * of the brain moves the center of mass; mri_robust_register's page warns of it, and DIPY with one mask failed 10 of 12):
+ *   1. the b = 0 brain's center onto the center of SynthStrip's brain on the T1 (skipped without it);
+ *   2. the shift alone, at the coarse blur;
+ *   3. FLIRT's lesson, small: 27 starting tilts about the brain's center, each a short rigid search at the coarse blur;
+ *      the best three that are not the same answer (more than 2 mm apart) are finished at both blurs;
+ *   4. rule 1's own path from the scanner's placement is always a candidate too, so a scan already in place can only gain.
+ * The lowest cost at the finest blur wins. All candidates are returned with their cost and distance, for the doubt
+ * (alignToT1) and the record. Literature and measurements: Contents/docs/registration-capture-range-literature-2026-10-25.md.
+ */
+export async function rigidToT1Wide(moving: Grid3, fixedFull: Grid3, mask: Uint8Array, brainT1?: Grid3, opts: { fwhmMm?: number[]; samples?: number; fixedMm?: number } = {}): Promise<RigidResult & { candidates: Candidate[] }> {
+  const t0 = performance.now(), P = ngfProblem(moving, fixedFull, mask, opts), levels = opts.fwhmMm ?? [8, 4];
+  const coarse = P.level(levels[0]), search = P.level(levels[0], SEARCH_THIN), fine = P.level(levels[levels.length - 1]);
+  type Tried = { start: string; tiltDeg?: [number, number, number]; p: number[]; cost: number; levels: RigidResult["levels"] };
+  // Each level in turn from `p` (rule 1's path when p is the scanner's placement).
+  const run = async (p: number[], fws: number[], ls: RigidResult["levels"] = []) => { for (const fw of fws) { const d = await descend(P.level(fw), p); p = d.p; ls.push({ fwhmMm: fw, iterations: d.iterations, cost: +d.cost.toFixed(5) }); } return { p, levels: ls }; };
+  // 4. Rule 1's path, from the scanner's placement.
+  const scanner = await run([0, 0, 0, 0, 0, 0], levels);
+  const tried: Tried[] = [{ start: "scanner", p: scanner.p, cost: fine(scanner.p), levels: scanner.levels }];
+  // 1. Brain center onto brain center.
+  let shift = [0, 0, 0];
+  if (brainT1) {
+    const [bx, by] = brainT1.dims, M = brainT1.ijkToRAS, s = [0, 0, 0]; let n = 0;
+    for (let v = 0; v < brainT1.data.length; v++) if (Number(brainT1.data[v]) > 0.5) {
+      const i = v % bx, j = Math.floor(v / bx) % by, k = Math.floor(v / (bx * by));
+      for (let r = 0; r < 3; r++) s[r] += M[4 * r] * i + M[4 * r + 1] * j + M[4 * r + 2] * k + M[4 * r + 3];
+      n++;
+    }
+    if (n) shift = s.map((x, r) => x / n - P.center[r]);
+  }
+  // 2. The shift alone.
+  const shifted = (await descend(search, [...shift, 0, 0, 0], SHIFT)).p;
+  // 3. The tilts: a short search from each on the thinned sample; the best three distinct ones then run the coarse level
+  // in full, and those still distinct from each other and from the scanner's path go on to the fine levels.
+  const searched: { tiltDeg: [number, number, number]; p: number[]; cost: number }[] = [];
+  for (const a of TILT_STARTS_DEG) for (const b of TILT_STARTS_DEG) for (const c of TILT_STARTS_DEG) {
+    const q = [shifted[0], shifted[1], shifted[2], ...[a, b, c].map((d) => (d * Math.PI / 180) / PS[3])];
+    const d = await descend(search, q, ALL, 10);
+    searched.push({ tiltDeg: [a, b, c], p: d.p, cost: d.cost });
+  }
+  searched.sort((x, y) => x.cost - y.cost);
+  const keep: typeof searched = [];
+  for (const s of searched) { if (keep.length >= 3) break; if (keep.every((k) => P.apart(k.p, s.p) > SAME_MM)) keep.push(s); }
+  const coarseDone: { k: typeof keep[number]; p: number[]; ls: RigidResult["levels"] }[] = [];
+  for (const k of keep) {
+    const c = await run(k.p, [levels[0]]);
+    if (P.apart(c.p, scanner.p) > SAME_MM && coarseDone.every((o) => P.apart(o.p, c.p) > SAME_MM)) coarseDone.push({ k, p: c.p, ls: c.levels });
+  }
+  for (const o of coarseDone) { const f = await run(o.p, levels.slice(1), o.ls); tried.push({ start: "brain centers", tiltDeg: o.k.tiltDeg, p: f.p, cost: fine(f.p), levels: f.levels }); }
+  // The scanner's path stands unless another is clearly better: a scan already in place comes out exactly as under rule 1.
+  const best = tried.slice(1).reduce((b, t) => (t.cost < b.cost - CLEARLY_BETTER ? t : b), tried[0]);
+  const candidates: Candidate[] = tried.map((t) => ({ start: t.start, ...(t.tiltDeg ? { tiltDeg: t.tiltDeg } : {}), cost: +t.cost.toFixed(5), apartMm: +P.apart(t.p, best.p).toFixed(2) }));
+  return { T: P.toRigid(best.p), cost: best.cost, costAtStart: fine([0, 0, 0, 0, 0, 0]), levels: best.levels, ms: performance.now() - t0, candidates };
+}
+/** Rule 2's search uses every 4th point of the sample; two answers within 2 mm (mean over the brain) are the same answer;
+ *  a candidate replaces the scanner's path only when its cost is lower by more than 1e-4 (the doubt's tolerance). */
+const SEARCH_THIN = 4, SAME_MM = 2, CLEARLY_BETTER = 1e-4;
+
+/** Parameters: t (mm) and three angles (radians, in units of 0.01 so all six move on a similar scale). */
+const PS = [1, 1, 1, 0.01, 0.01, 0.01];
+const ALL = [0, 1, 2, 3, 4, 5], SHIFT = [0, 1, 2];
+
+/**
+ * THE COST, set up once: the sample (brain voxels of the moving grid, every k-th, fixed so the cost is deterministic for
+ * the optimizer), its world points and their center (the rotations turn about it), and per blur level the cost function
+ * of the six parameters (made once per level and kept).
+ */
+function ngfProblem(moving: Grid3, fixedFull: Grid3, mask: Uint8Array, opts: { samples?: number; fixedMm?: number } = {}) {
   // The T1 averaged to about 2 mm first (the finest blur is 4 mm FWHM): its blur and gradient on a 1 mm grid were most
   // of the time (2026-10-03).
   const fixed = coarsen(fixedFull, opts.fixedMm ?? 2);
-  const t0 = performance.now(), [nx, ny, nz] = moving.dims, Mm = moving.ijkToRAS, Fi = inv4(fixed.ijkToRAS);
-  // The sample: brain voxels of the moving grid, every k-th (fixed: the cost is deterministic for the optimizer).
+  const [nx, ny] = moving.dims, Mm = moving.ijkToRAS, Fi = inv4(fixed.ijkToRAS);
   const all: number[] = []; for (let v = 0; v < mask.length; v++) if (mask[v]) all.push(v);
   const step = Math.max(1, Math.floor(all.length / (opts.samples ?? 40000))), idx = all.filter((_, i) => i % step === 0);
   const world = new Float64Array(3 * idx.length);
   idx.forEach((v, s) => { const i = v % nx, j = Math.floor(v / nx) % ny, k = Math.floor(v / (nx * ny)); for (let r = 0; r < 3; r++) world[3 * s + r] = Mm[4 * r] * i + Mm[4 * r + 1] * j + Mm[4 * r + 2] * k + Mm[4 * r + 3]; });
-  let c = [0, 0, 0]; for (let s = 0; s < idx.length; s++) for (let r = 0; r < 3; r++) c[r] += world[3 * s + r] / idx.length;
+  const c = [0, 0, 0]; for (let s = 0; s < idx.length; s++) for (let r = 0; r < 3; r++) c[r] += world[3 * s + r] / idx.length;
   const center = c as [number, number, number];
-  const levels: RigidResult["levels"] = [];
-  let p = [0, 0, 0, 0, 0, 0];                               // t (mm), angles (rad, scaled by 0.01 below)
-  const PS = [1, 1, 1, 0.01, 0.01, 0.01];
   const toRigid = (q: number[]): Rigid => { const s = q.map((x, i) => x * PS[i]); return { R: rotation(s[3], s[4], s[5]), t: [s[0], s[1], s[2]], c: center }; };
-  let costAtStart = NaN, cost = NaN;
-  for (const fwhm of opts.fwhmMm ?? [8, 4]) {
+  const made = new Map<string, (q: number[]) => number>();
+  /** The cost at a blur; `thin` > 1 uses every thin-th point of the sample (rule 2's search: the same points, center and
+   *  parameters, fewer of them). */
+  const level = (fwhm: number, thin = 1): (q: number[]) => number => {
+    const key = `${fwhm}/${thin}`, had = made.get(key);
+    if (had) return had;
+    const base = thin > 1 ? level(fwhm) : undefined;
+    if (base) { const f = thinned.get(fwhm)!(thin); made.set(key, f); return f; }
     // The moving image's normalized gradient at the sample, once per level.
     const mb = blurMm(moving, fwhm), mg = worldGradient(mb, moving);
     let em = 0; for (const v of idx) em += Math.hypot(mg[3 * v], mg[3 * v + 1], mg[3 * v + 2]); em = (em / idx.length) * 0.1;
@@ -154,9 +258,9 @@ export async function rigidToT1(moving: Grid3, fixedFull: Grid3, mask: Uint8Arra
     const fb = blurMm(fixed, fwhm), fg = worldGradient(fb, fixed);
     let ef = 0, nf = 0; for (let v = 0; v < fb.length; v += 7) if (fb[v] > 0) { ef += Math.hypot(fg[3 * v], fg[3 * v + 1], fg[3 * v + 2]); nf++; } ef = (ef / Math.max(1, nf)) * 0.1;
     const g3 = new Float64Array(3);
-    const f = (q: number[]): number => {
+    const cost = (q: number[], thin: number): number => {
       const T = toRigid(q), R = T.R; let s = 0, n = 0;
-      for (let k = 0; k < idx.length; k++) {
+      for (let k = 0; k < idx.length; k += thin) {
         const y = applyRigid(T, world.subarray(3 * k, 3 * k + 3));
         const X = Fi[0] * y[0] + Fi[1] * y[1] + Fi[2] * y[2] + Fi[3], Y = Fi[4] * y[0] + Fi[5] * y[1] + Fi[6] * y[2] + Fi[7], Z = Fi[8] * y[0] + Fi[9] * y[1] + Fi[10] * y[2] + Fi[11];
         sampleAt(fg, fixed.dims, 3, X, Y, Z, g3);
@@ -167,34 +271,44 @@ export async function rigidToT1(moving: Grid3, fixedFull: Grid3, mask: Uint8Arra
       }
       return s / n;
     };
-    // The scanner's placement's cost at THIS level's blur: the last level's is what the result is compared with (costs at
-    // different blurs are not comparable).
-    costAtStart = f([0, 0, 0, 0, 0, 0]);
-    // BFGS on central differences, backtracking line search.
-    const H = 1e-3, grad = (q: number[]) => q.map((_, i) => { const a = q.slice(), b = q.slice(); a[i] += H; b[i] -= H; return (f(a) - f(b)) / (2 * H); });
-    let B = [0, 1, 2, 3, 4, 5].map((i) => [0, 1, 2, 3, 4, 5].map((j) => (i === j ? 1 : 0)));
-    let fx = f(p), gx = grad(p), it = 0;
-    for (; it < 60; it++) {
-      await yieldNow();
-      const d = B.map((row) => -row.reduce((s, v, j) => s + v * gx[j], 0));
-      let slope = d.reduce((s, v, i) => s + v * gx[i], 0);
-      if (!(slope < 0)) { B = B.map((row, i) => row.map((_, j) => (i === j ? 1 : 0))); d.splice(0, 6, ...gx.map((v) => -v)); slope = -gx.reduce((s, v) => s + v * v, 0); }
-      let a = 1, q = p, fq = fx;
-      for (let ls = 0; ls < 20; ls++) { q = p.map((v, i) => v + a * d[i]); fq = f(q); if (fq <= fx + 1e-4 * a * slope) break; a /= 2; }
-      if (!(fq < fx)) break;
-      const gq = grad(q), s = q.map((v, i) => v - p[i]), y = gq.map((v, i) => v - gx[i]), sy = s.reduce((acc, v, i) => acc + v * y[i], 0);
-      const small = Math.max(...s.map(Math.abs)) < 1e-3 && fx - fq < 1e-7;
-      p = q; fx = fq; gx = gq;
-      if (sy > 1e-12) {
-        const By = B.map((row) => row.reduce((acc, v, j) => acc + v * y[j], 0)), yBy = y.reduce((acc, v, i) => acc + v * By[i], 0);
-        B = B.map((row, i) => row.map((v, j) => v + ((sy + yBy) * s[i] * s[j]) / (sy * sy) - (By[i] * s[j] + s[i] * By[j]) / sy));
-      }
-      if (small) break;
+    const f = (q: number[]) => cost(q, 1);
+    thinned.set(fwhm, (thin: number) => (q: number[]) => cost(q, thin));
+    made.set(key, f);
+    return f;
+  };
+  const thinned = new Map<number, (thin: number) => (q: number[]) => number>();
+  /** The mean distance (mm) between where two parameter sets put the sample's points. */
+  const apart = (a: number[], b: number[]): number => {
+    const A = toRigid(a), B = toRigid(b); let s = 0;
+    for (let k = 0; k < idx.length; k++) { const x = world.subarray(3 * k, 3 * k + 3), u = applyRigid(A, x), v = applyRigid(B, x); s += Math.hypot(u[0] - v[0], u[1] - v[1], u[2] - v[2]); }
+    return s / idx.length;
+  };
+  return { center, toRigid, level, apart };
+}
+
+/** BFGS on central differences, backtracking line search, from `p`; only the parameters in `free` move (the others' gradient is 0, so the approximate inverse Hessian keeps them still). */
+async function descend(f: (q: number[]) => number, p: number[], free: number[] = ALL, maxIterations = 60): Promise<{ p: number[]; cost: number; iterations: number }> {
+  const H = 1e-3, grad = (q: number[]) => q.map((_, i) => { if (!free.includes(i)) return 0; const a = q.slice(), b = q.slice(); a[i] += H; b[i] -= H; return (f(a) - f(b)) / (2 * H); });
+  let B: number[][] = [0, 1, 2, 3, 4, 5].map((i) => [0, 1, 2, 3, 4, 5].map((j) => (i === j ? 1 : 0)));
+  let fx = f(p), gx = grad(p), it = 0;
+  for (; it < maxIterations; it++) {
+    await yieldNow();
+    const d = B.map((row) => -row.reduce((s, v, j) => s + v * gx[j], 0));
+    let slope = d.reduce((s, v, i) => s + v * gx[i], 0);
+    if (!(slope < 0)) { B = B.map((row, i) => row.map((_, j) => (i === j ? 1 : 0))); d.splice(0, 6, ...gx.map((v) => -v)); slope = -gx.reduce((s, v) => s + v * v, 0); }
+    let a = 1, q = p, fq = fx;
+    for (let ls = 0; ls < 20; ls++) { q = p.map((v, i) => v + a * d[i]); fq = f(q); if (fq <= fx + 1e-4 * a * slope) break; a /= 2; }
+    if (!(fq < fx)) break;
+    const gq = grad(q), s = q.map((v, i) => v - p[i]), y = gq.map((v, i) => v - gx[i]), sy = s.reduce((acc, v, i) => acc + v * y[i], 0);
+    const small = Math.max(...s.map(Math.abs)) < 1e-3 && fx - fq < 1e-7;
+    p = q; fx = fq; gx = gq;
+    if (sy > 1e-12) {
+      const By = B.map((row) => row.reduce((acc, v, j) => acc + v * y[j], 0)), yBy = y.reduce((acc, v, i) => acc + v * By[i], 0);
+      B = B.map((row, i) => row.map((v, j) => v + ((sy + yBy) * s[i] * s[j]) / (sy * sy) - (By[i] * s[j] + s[i] * By[j]) / sy));
     }
-    levels.push({ fwhmMm: fwhm, iterations: it, cost: +fx.toFixed(5) });
-    cost = fx;
+    if (small) break;
   }
-  return { T: toRigid(p), cost, costAtStart, levels, ms: performance.now() - t0 };
+  return { p, cost: fx, iterations: it };
 }
 
 /** The field at cell centers (voxels along its axis) and its slope along the axis (the stretch), for sampling anywhere. */
@@ -210,7 +324,7 @@ export function fieldWithSlope(fit: FieldFit): { b: Float32Array; slope: Float32
  * correction distortion.ts applyField makes, with its stretch), and the scan as acquired is read there. Target grid: the
  * T1's axes at the scan's own spacing, over the box the scan covers once moved. Gradients turned by the rotation.
  */
-export async function resampleOntoT1(dwi: DiffusionSeries, T: Rigid, t1: Pick<Grid3, "dims" | "ijkToRAS">, field?: { fit: FieldFit; sign: 1 | -1 }, opts: { /** The scan's voxels to cover (the brain, on the scan's grid): the box is theirs plus a margin, not the whole field of view. */ cover?: Uint8Array; marginMm?: number; /** Head movement (motion.ts): per volume, the move from the scan's reference to where the head was, and its eddy-current shift d = g·(y − c)/100 mm along e. */ motion?: (Rigid & { ec?: { g: number[]; e: number[] } })[] } = {}): Promise<DiffusionSeries> {
+export async function resampleOntoT1(dwi: DiffusionSeries, T: Rigid, t1: Pick<Grid3, "dims" | "ijkToRAS">, field?: { fit: FieldFit; sign: 1 | -1 }, opts: { /** The scan's voxels to cover (the brain, on the scan's grid): the box is theirs plus a margin, not the whole field of view. */ cover?: Uint8Array; marginMm?: number; /** Head movement (motion.ts): per volume, the move from the scan's reference to where the head was, and its eddy-current shift d = g·(y − c)/100 mm along e. */ motion?: (Rigid & { ec?: { g: number[]; e: number[] } })[]; /** The registration rule that made the move, for the record. */ rule?: RegistrationRuleId } = {}): Promise<DiffusionSeries> {
   const src = dwi.volumes[0], [sx, sy, sz] = src.dims, Ms = src.ijkToRAS, Si = inv4(Ms), sp = spacingOf(Ms);
   const Mt = t1.ijkToRAS, tsp = spacingOf(Mt), axes = [0, 1, 2].map((c) => [Mt[c] / tsp[c], Mt[4 + c] / tsp[c], Mt[8 + c] / tsp[c]]);
   // THE SPACING keeps the scan's voxel volume (critic, 2026-10-03, finding 7: the smallest spacing in all three directions
@@ -292,7 +406,7 @@ export async function resampleOntoT1(dwi: DiffusionSeries, T: Rigid, t1: Pick<Gr
     const m = mv?.[vi]?.R, g = m ? [m[0] * g0[0] + m[3] * g0[1] + m[6] * g0[2], m[1] * g0[0] + m[4] * g0[1] + m[7] * g0[2], m[2] * g0[0] + m[5] * g0[1] + m[8] * g0[2]] : g0;
     return [R[0] * g[0] + R[1] * g[1] + R[2] * g[2], R[3] * g[0] + R[4] * g[1] + R[5] * g[2], R[6] * g[0] + R[7] * g[1] + R[8] * g[2]] as [number, number, number];
   });
-  return { ...dwi, volumes, ijkToRAS: M, gradients, source: `${dwi.source}; onto the T1 (registration rule ${REGISTRATION_RULE})` };
+  return { ...dwi, volumes, ijkToRAS: M, gradients, source: `${dwi.source}; onto the T1 (registration rule ${opts.rule ?? REGISTRATION_RULE})` };
 }
 
 /** A move too large to be the same session's -- the alignment is then shown as doubtful (the person aligns by hand). */
@@ -323,18 +437,26 @@ export function scanBrain(dwi: DiffusionSeries, field?: { fit: FieldFit; sign: 1
  */
 export async function alignToT1(dwi: DiffusionSeries, t1: Grid3, field?: { fit: FieldFit; sign: 1 | -1 }, times?: { register?: number; resample?: number },
   /** Head movement (motion.ts): each volume's move, and the b = 0 mean and brain it made (corrected for the field and the movement). */
-  motion?: { moves: Rigid[]; b0: Float32Array; mask: Uint8Array }): Promise<{ dwi: DiffusionSeries; T: Rigid; result: RigidResult; said: string; doubt?: string }> {
+  motion?: { moves: Rigid[]; b0: Float32Array; mask: Uint8Array },
+  /** The rule (default REGISTRATION_RULE), and for rule 2 SynthStrip's brain on the T1 (its center; without it rule 2 starts
+   *  its search from the scanner's placement). */
+  opts: { rule?: RegistrationRuleId; brainT1?: Grid3 } = {}): Promise<{ dwi: DiffusionSeries; T: Rigid; result: RigidResult & { candidates?: Candidate[] }; said: string; doubt?: string; rule: RegistrationRuleId }> {
   const t0 = performance.now(), src = dwi.volumes[0];
   let b0: Float32Array, mask: Uint8Array;
   if (motion) ({ b0, mask } = motion);
   else ({ b0, mask } = scanBrain(dwi, field));
-  const result = await rigidToT1({ dims: src.dims as [number, number, number], ijkToRAS: src.ijkToRAS, data: b0 }, t1, mask);
+  const rule = opts.rule ?? REGISTRATION_RULE, moving: Grid3 = { dims: src.dims as [number, number, number], ijkToRAS: src.ijkToRAS, data: b0 };
+  const result = rule === 2 ? await rigidToT1Wide(moving, t1, mask, opts.brainT1) : await rigidToT1(moving, t1, mask);
   const t1Done = performance.now();
   if (times) times.register = t1Done - t0;
-  const out = await resampleOntoT1(dwi, result.T, t1, field, { cover: mask, ...(motion ? { motion: motion.moves } : {}) });
+  const out = await resampleOntoT1(dwi, result.T, t1, field, { cover: mask, rule, ...(motion ? { motion: motion.moves } : {}) });
   if (times) times.resample = performance.now() - t1Done;
   const sz = rigidSize(result.T);
-  const doubt = sz.mm > DOUBTFUL.mm || sz.degrees > DOUBTFUL.degrees ? `it had to move ${sz.mm.toFixed(0)} mm and ${sz.degrees.toFixed(0)}°, more than within one visit`
+  // Rule 1: a move larger than one session's is doubtful. Rule 2 is made for scans sessions apart, so the size says
+  // nothing; its doubt is PROVISIONAL (only "worse") until Ron chooses one from the measurements (2026-10-25: how much the
+  // match improved does not separate -- same-session cases improve 2.7-30%, the failure 6%).
+  const tooFar = rule === 1 && (sz.mm > DOUBTFUL.mm || sz.degrees > DOUBTFUL.degrees);
+  const doubt = tooFar ? `it had to move ${sz.mm.toFixed(0)} mm and ${sz.degrees.toFixed(0)}°, more than within one visit`
     : result.cost > result.costAtStart + 1e-4 ? "the match got worse" : undefined;     // equal: the scan was already in place (critic, finding 18)
-  return { dwi: out, T: result.T, result, said: `aligned to the MRI of the anatomy (moved ${sz.mm.toFixed(1)} mm and ${sz.degrees.toFixed(1)}°)`, ...(doubt ? { doubt } : {}) };
+  return { dwi: out, T: result.T, result, rule, said: `aligned to the MRI of the anatomy (moved ${sz.mm.toFixed(1)} mm and ${sz.degrees.toFixed(1)}°)`, ...(doubt ? { doubt } : {}) };
 }

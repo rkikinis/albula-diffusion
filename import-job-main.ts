@@ -34,7 +34,8 @@ import { indexSeries, provenanceEdges, provenancePathFor, seriesFilePaths } from
 const args = parseArgs(Deno.args, { string: ["server", "db", "series", "assets", "parent", "core-version"], boolean: ["dry-run", "force", "counts-only", "only-missing"] });
 const quiet = args["counts-only"];
 // In counts-only mode only these fields leave the program.
-const QUIET_KEYS = new Set(["at", "event", "case", "of", "state", "cases", "studies", "streamlines", "stored", "named", "seconds", "wall", "made", "current", "kept", "waiting", "cannot", "failed", "wouldBeMade", "stopped"]);
+// "stages": step names and seconds only.
+const QUIET_KEYS = new Set(["at", "event", "case", "of", "state", "cases", "studies", "streamlines", "stored", "named", "seconds", "wall", "stages", "made", "current", "kept", "waiting", "cannot", "failed", "wouldBeMade", "stopped"]);
 const say = (o: Record<string, unknown>) => {
   const line = { at: new Date().toISOString(), ...o };
   console.log(JSON.stringify(quiet ? Object.fromEntries(Object.entries(line).filter(([k]) => QUIET_KEYS.has(k))) : line));

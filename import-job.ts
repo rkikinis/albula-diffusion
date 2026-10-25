@@ -430,7 +430,7 @@ export async function makeTracts(dbDir: string, dbId: string, server: string, pl
   if (!plan.t1) return { state: "waiting", why: "waiting for an MRI of the anatomy named as a T1 (same study or patient)" };
   const t0 = performance.now();
   onProgress?.("finding the brain on the MRI of the anatomy");
-  const brain = await brainOnT1(server, plan.t1, onProgress);
+  const brain = await brainOnT1(server, plan.t1, onProgress), brainMs = performance.now() - t0;
   if (!brain.mask) return { state: brain.kind ?? "waiting", why: `the brain on the MRI of the anatomy: ${brain.why}` };
   // SYNTHSTRIP'S WEIGHTS ARRIVE WITH ITS FIRST JOB (critic 2026-10-06, R2-5): on a fresh installation the version asked
   // before the run says "not yet installed". Asked again now that a mask was made; the shared `versions` is updated, so
@@ -440,7 +440,7 @@ export async function makeTracts(dbDir: string, dbId: string, server: string, pl
     if (v) { versions.synthstrip = v; rules = jobRules(versions); }
   }
   const dwi = fromDicomVolumes(plan.dwi.frames, plan.dwi.facts.description);
-  const t1v = plan.t1.frames[0], stages: StageTimes = {};
+  const t1v = plan.t1.frames[0], stages: StageTimes = { brain: brainMs };
   onProgress?.("correcting, aligning and tracking the whole brain");
   const r = await wholeBrainTracts({ dwi,
     ...(plan.partner ? { partner: { b0s: plan.partner.frames.filter((v) => Number(diffusionOf(v)?.bValue ?? 0) < 50).map((v) => v.data as ArrayLike<number>), grid: { dims: plan.partner.frames[0].dims, ijkToRAS: plan.partner.frames[0].ijkToRAS }, name: "the reversed scan" } } : {}),
@@ -466,6 +466,7 @@ export async function makeTracts(dbDir: string, dbId: string, server: string, pl
       const fit = await alignTemplate(t1g, opts.template.t1, opts.template.brain), fr = frames(fit, TALAIRACH_RISE_DEG);
       headFrame = { rule: HEAD_FRAME_RULE, templateToPatient: fit.templateToPatient, talairach: fr.talairach.toPatient, brainstem: fr.brainstem.toPatient,
         stages: fit.stages.map((x) => ({ name: x.name, cost: +x.cost.toFixed(4), costAtStart: +x.costAtStart.toFixed(4) })), seconds: +((performance.now() - h0) / 1000).toFixed(1) };
+      stages.frame = performance.now() - h0;
     } catch (e) { frameNote = `; the head's own frame could not be found (${(e as Error).message})`; }
   } else if (opts.template) frameNote = "; no head frame (the scan is not on the T1's axes)";
   // The case's time includes the frame (critic 2026-10-07, finding 9).
@@ -476,6 +477,7 @@ export async function makeTracts(dbDir: string, dbId: string, server: string, pl
   // Several objects can follow each other under one scan (remade after a change): numbered from 900 by their time -- one
   // above the highest stored, so a deleted older one never makes the newest share a number (critic 2026-10-06, R2-7).
   const seriesNumber = Math.max(899, ...stored.map((x) => x.seriesNumber)) + 1;
+  const w0 = performance.now();
   const written = await tractsToDicom(sets, { patientStudy: patientStudyOf(plan.dwi.header), frameOfReferenceUID: forUID, seriesInstanceUID: plan.dwi.facts.uid, instances: plan.dwi.instances,
     alsoReferenced: [...(aligned ? [{ seriesInstanceUID: plan.t1.facts.uid, instances: plan.t1.instances }] : []), ...(plan.partner ? [{ seriesInstanceUID: plan.partner.facts.uid, instances: plan.partner.instances }] : [])] },
     { algorithmName: "UKF two-tensor (Albula's port of UKFTractography)", algorithmVersion: `tracking rule ${r.rule.id}`, algorithmParameters: JSON.stringify(r.rule.ukf).slice(0, 10240),
@@ -483,7 +485,9 @@ export async function makeTracts(dbDir: string, dbId: string, server: string, pl
   // A streamline of one point (a seed that stopped at once) has no line to store; the writer leaves it out, and says so.
   const onePoint = r.sl.length - written.tracks;
   const said = `${r.sl.length} streamlines (${written.tracks} stored${onePoint ? `, ${onePoint} of a single point left out` : ""}), ${named} named into ${sets.length - (sets.some((s) => s.label === UNNAMED) ? 1 : 0)} tracts, in ${seconds.toFixed(0)} s${headFrame ? ` (the head's frame ${headFrame.seconds.toFixed(0)} s of it)` : ""}${frameNote}`;
-  const out = { seriesUID: written.seriesInstanceUID, streamlines: r.sl.length, stored: written.tracks, named, seconds, said };
+  stages.write = performance.now() - w0;
+  // Where the time went, step by step, in the case's report too (a dry run stores nothing, so this is where it is seen).
+  const out = { seriesUID: written.seriesInstanceUID, streamlines: r.sl.length, stored: written.tracks, named, seconds, said, stages: stageText(stages) };
   if (opts.dryRun) return { state: "would be made", ...out };
   const now = new Date(), d2 = (n: number) => String(n).padStart(2, "0");
   const meta = { sopInstanceUID: written.sopInstanceUID, seriesInstanceUID: written.seriesInstanceUID, studyInstanceUID: plan.dwi.facts.studyUID, modality: "MR",
