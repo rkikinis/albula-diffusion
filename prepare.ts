@@ -6,7 +6,7 @@
 import type { DiffusionSeries } from "./dwi.ts";
 import { applyField, type FieldFit } from "./distortion.ts";
 import { applyMotion, estimateMotion, MOTION_RULE, type MotionResult, type MotionRuleId } from "./motion.ts";
-import { alignToT1, type Candidate, type Grid3, type RegistrationRuleId, type Rigid } from "./registration.ts";
+import { alignToT1, type AlignmentCheckId, type Candidate, type Grid3, type RegistrationRuleId, type Rigid } from "./registration.ts";
 import { checkGradientTable, withCheckedDirections, type GradientCheck } from "./gradient-check.ts";
 import type { StageTimes } from "./planning.ts";
 
@@ -32,7 +32,7 @@ export interface Prepared {
 /** Did the head-movement correction make the images agree with each other better than as acquired? (Not: it is undone.) */
 export const motionHelped = (r: { before: number; after: number }): boolean => Number.isFinite(r.after) && Number.isFinite(r.before) && r.after < r.before;
 
-export async function prepareScan(dwi: DiffusionSeries, opts: { field?: { fit: FieldFit; sign: 1 | -1 }; t1?: Grid3; /** registration.ts: the rule (default REGISTRATION_RULE), and SynthStrip's brain on the T1 for rules 2 and 3. */ registrationRule?: RegistrationRuleId; brainT1?: Grid3; motionRule?: MotionRuleId; /** The scanner's record of the phase-encoding direction ("j-", or DICOM's "ROW" / "COL"), for the eddy currents when no field gives the axis. */ phaseEncoding?: string; /** motion.ts rounds (default two). */ motionRounds?: number; times?: StageTimes; say?: (s: string) => void; /** false: the directions are used as recorded, unchecked (for checking tools only). */ checkDirections?: boolean; /** The check already made for this scan (the module keeps it per scan: it depends on nothing the person can change; critic finding 8). */ directions?: GradientCheck } = {}): Promise<Prepared> {
+export async function prepareScan(dwi: DiffusionSeries, opts: { field?: { fit: FieldFit; sign: 1 | -1 }; t1?: Grid3; /** registration.ts: the rule (default REGISTRATION_RULE), and SynthStrip's brain on the T1 for rules 2 and 3. */ registrationRule?: RegistrationRuleId; brainT1?: Grid3; /** registration.ts ALIGNMENT_CHECK by default. */ alignmentCheck?: AlignmentCheckId; motionRule?: MotionRuleId; /** The scanner's record of the phase-encoding direction ("j-", or DICOM's "ROW" / "COL"), for the eddy currents when no field gives the axis. */ phaseEncoding?: string; /** motion.ts rounds (default two). */ motionRounds?: number; times?: StageTimes; say?: (s: string) => void; /** false: the directions are used as recorded, unchecked (for checking tools only). */ checkDirections?: boolean; /** The check already made for this scan (the module keeps it per scan: it depends on nothing the person can change; critic finding 8). */ directions?: GradientCheck } = {}): Promise<Prepared> {
   const rule = opts.motionRule ?? MOTION_RULE, field = opts.field, said: string[] = [];
   // THE DIRECTIONS FIRST: everything after (the movement's predictions, the tensors, the tracts) uses them. A table that
   // does not fit the images is replaced by the one that does, and that is said; "undecided" keeps the record and says so.
@@ -76,7 +76,7 @@ export async function prepareScan(dwi: DiffusionSeries, opts: { field?: { fit: F
     ...(directions ? { directions } : {}), ...(directionsSaid ? { directionsSaid } : {}) };
   if (!opts.t1) return { dwi: await inPlace(), said: said.join("; "), ...done };
   opts.say?.("Aligning the diffusion scan to the MRI of the anatomy…");
-  const a = await alignToT1(dwi, opts.t1, field, opts.times, motion, { ...(opts.registrationRule ? { rule: opts.registrationRule } : {}), ...(opts.brainT1 ? { brainT1: opts.brainT1 } : {}) });
+  const a = await alignToT1(dwi, opts.t1, field, opts.times, motion, { ...(opts.registrationRule ? { rule: opts.registrationRule } : {}), ...(opts.brainT1 ? { brainT1: opts.brainT1 } : {}), ...(opts.alignmentCheck ? { check: opts.alignmentCheck } : {}) });
   const alignment = { T: a.T, ...(a.doubt ? { doubt: a.doubt } : {}), rule: a.rule, ...(a.result.candidates ? { candidates: a.result.candidates } : {}), cost: a.result.cost, ...(a.mirrorRatio !== undefined ? { mirrorRatio: a.mirrorRatio } : {}) };
   // A DOUBTFUL ALIGNMENT IS NOT USED (until aligning by hand is built): the scanner's placement stands.
   if (a.doubt) {

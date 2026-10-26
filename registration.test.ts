@@ -175,5 +175,14 @@ Deno.test("check 2, the mirror test: a right pair passes; the same scan flipped 
   const b = await alignToT1(flipped.dwi, t1, undefined, undefined, flipped.motion, { brainT1, check: 2 });
   console.log(`  right pair: ratio ${a.mirrorRatio?.toFixed(3)}${a.doubt ? ` (doubt: ${a.doubt})` : ""}; flipped: ratio ${b.mirrorRatio?.toFixed(3)}${b.doubt ? " (doubted)" : ""}`);
   assert(!a.doubt && a.mirrorRatio! < 0.93, `right pair: ${a.mirrorRatio} ${a.doubt ?? ""}`);
-  assert(/mirror image/.test(b.doubt ?? ""), `flipped scan not doubted: ratio ${b.mirrorRatio}`);
+  assert(/flipped left to right/.test(b.doubt ?? ""), `flipped scan not doubted as flipped: ratio ${b.mirrorRatio}, ${b.doubt}`);
+});
+
+Deno.test("an empty brain in the diffusion scan is a doubt, not a pass (critic 2026-10-26, finding 9)", async () => {
+  const t1Dims: [number, number, number] = [40, 48, 36], t1M = [4, 0, 0, -80, 0, 4, 0, -96, 0, 0, 4, -72, 0, 0, 0, 1];
+  const t1: Grid3 = { dims: t1Dims, ijkToRAS: t1M, data: head(t1Dims, t1M) };
+  const bDims: [number, number, number] = [32, 38, 28], bM = [5, 0, 0, -80, 0, 5, 0, -95, 0, 0, 5, -70, 0, 0, 0, 1], b0 = head(bDims, bM);
+  const dwi = { volumes: [{ dims: bDims, ijkToRAS: bM, data: b0, dtype: "<f4" }], bValues: [0], gradients: [[0, 0, 0]], ijkToRAS: bM, source: "test", convention: 1 } as unknown as DiffusionSeries;
+  const a = await alignToT1(dwi, t1, undefined, undefined, { moves: [], b0, mask: new Uint8Array(b0.length) }, { rule: 1 });
+  assert(/could not be measured/.test(a.doubt ?? ""), `doubt: ${a.doubt}`);
 });

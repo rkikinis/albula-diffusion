@@ -39,12 +39,14 @@ export type RegistrationRuleId = 1 | 2 | 3;
  * impossible, so in effect no check. 2: THE MIRROR TEST -- the same b = 0 mirrored left to right about its brain's
  * center is aligned to the same T1 the same way; a right pair matches clearly better than its own mirror image, another
  * person's T1 or a scan flipped left to right does not. Doubtful when cost / mirrored cost > MIRROR_DOUBT. Measured
- * (scores, uncorrected b = 0 means): right pairs 0.585-0.883 (ds001226 22, ds005123 28, Martinos Prisma 1; also checked on scans made sessions apart),
- * another person's T1 0.966-1.028 (63), the scan flipped 1.13-1.71 (63). Costs one more alignment.
+ * (ds001226 22 with the distortion corrected, ds005123 28 and the Martinos Prisma scan without; also checked on scans
+ * made sessions apart): right pairs 0.585-0.883, another person's T1 0.966-1.028 (51). A flipped scan's ratio is 1 / its
+ * right pair's (so 1.13 and up), not a separate measurement. Closest to the limit: scans without distortion correction
+ * (the Prisma pair coarsened to 3 x 3 x 6 mm reached 0.937; corrected, 0.777). Costs one more alignment.
  */
 export const ALIGNMENT_CHECK: AlignmentCheckId = 1;
 export type AlignmentCheckId = 1 | 2;
-export const MIRROR_DOUBT = 0.93;
+export const MIRROR_DOUBT = 0.93, MIRROR_FLIPPED = 1.08;
 
 /** The b = 0 mirrored left to right (world x) about its brain's center: only the grid's matrix changes. */
 export function mirroredLeftRight(g: Grid3, mask: Uint8Array): Grid3 {
@@ -511,8 +513,14 @@ export async function alignToT1(dwi: DiffusionSeries, t1: Grid3, field?: { fit: 
   // nothing; their doubt is "the match got worse" (Ron, 2026-10-25: the size limit dropped, "your recommendation"; how much
   // the match improved does not separate -- same-session cases improve 2.7-30%, the failure 6%).
   const tooFar = rule === 1 && (sz.mm > DOUBTFUL.mm || sz.degrees > DOUBTFUL.degrees);
-  const doubt = tooFar ? `it had to move ${sz.mm.toFixed(0)} mm and ${sz.degrees.toFixed(0)}°, more than within one visit`
-    : mirrorRatio !== undefined && mirrorRatio > MIRROR_DOUBT ? `the scan matches its own mirror image about as well (${mirrorRatio.toFixed(2)}): the MRI of the anatomy may be another person's, or one of the two is flipped left to right`
+  // A cost that is not a number (no brain found in the diffusion scan: an empty sample) passed every comparison before
+  // (critic 2026-10-26, mirror test, finding 9): it is a doubt.
+  const doubt = !Number.isFinite(result.cost) ? "the match could not be measured (no brain was found in the diffusion scan)"
+    : tooFar ? `it had to move ${sz.mm.toFixed(0)} mm and ${sz.degrees.toFixed(0)}°, more than within one visit`
+    // The ratio tells which (critic 2026-10-26, finding 6): another person's T1 sits at about 1 (0.97-1.03 measured), a
+    // scan flipped left to right clearly above (1.13 and up).
+    : mirrorRatio !== undefined && mirrorRatio > MIRROR_FLIPPED ? `the scan matches the MRI of the anatomy better mirrored (${mirrorRatio.toFixed(2)}): one of the two is probably flipped left to right`
+    : mirrorRatio !== undefined && mirrorRatio > MIRROR_DOUBT ? `the scan matches its own mirror image about as well (${mirrorRatio.toFixed(2)}): the MRI of the anatomy may be another person's`
     : result.cost > result.costAtStart + 1e-4 ? "the match got worse" : undefined;     // equal: the scan was already in place (critic, finding 18)
   return { dwi: out, T: result.T, result, rule, ...(mirrorRatio !== undefined ? { mirrorRatio } : {}), said: `aligned to the MRI of the anatomy (moved ${sz.mm.toFixed(1)} mm and ${sz.degrees.toFixed(1)}°${rule !== asked ? "; to the whole MRI: its brain was not available" : ""})`, ...(doubt ? { doubt } : {}) };
 }

@@ -17,7 +17,7 @@ import { DIRECTION_CHECK_RULE } from "./gradient-check.ts";
 import { wholeBrainTracts, PIPELINE_MAX_B } from "./pipeline.ts";
 import { DISTORTION_RULE } from "./distortion.ts";
 import { MOTION_RULE } from "./motion.ts";
-import { ALIGNMENT_CHECK, REGISTRATION_RULE, type RegistrationRuleId } from "./registration.ts";
+import { ALIGNMENT_CHECK, REGISTRATION_RULE, type AlignmentCheckId, type RegistrationRuleId } from "./registration.ts";
 import { TRACKING_RULE } from "./tracking-rules.ts";
 import { OUTSIDE_RULE } from "./outside-brain.ts";
 import { recordedReversed, stageText, type StageTimes } from "./planning.ts";
@@ -475,9 +475,7 @@ export async function makeTracts(dbDir: string, dbId: string, server: string, pl
   const seconds = (performance.now() - t0) / 1000;
   const provenance = { rules, madeWith: madeWith(versions), inputs, made: new Date().toISOString(), seconds: +seconds.toFixed(1), stages: stageText(stages), ...(headFrame ? { headFrame } : {}),
     streamlines: r.sl.length, onePointLeftOut: r.sl.filter((p) => p.length < 6).length, corrected: r.corrected, alignedToT1: aligned,
-    // The alignment as made: the rule applied (3 falls back to 2 without a brain), its cost, the mirror test's ratio, the doubt.
-    ...(r.prep.alignment ? { alignment: { rule: r.prep.alignment.rule, cost: +(r.prep.alignment.cost ?? NaN).toFixed(4), ...(r.prep.alignment.mirrorRatio !== undefined ? { mirrorRatio: +r.prep.alignment.mirrorRatio.toFixed(3) } : {}), ...(r.prep.alignment.doubt ? { doubt: r.prep.alignment.doubt } : {}) } } : {}),
-    trackingRuleApplied: r.rule.id, motionRuleApplied: r.prep.motionRule, ...(r.prep.directions ? { directions: { rule: r.prep.directions.rule, verdict: r.prep.directions.verdict, used: r.prep.directions.best.label, Q: r.prep.directions.best.Q, recordOverBest: r.prep.directions.recordOverBest } } : {}), ...(r.alignment ? { alignment: r.alignment } : {}), brain: r.fit.seedMaskRule ?? r.fit.maskRule };
+    trackingRuleApplied: r.rule.id, motionRuleApplied: r.prep.motionRule, ...(r.prep.directions ? { directions: { rule: r.prep.directions.rule, verdict: r.prep.directions.verdict, used: r.prep.directions.best.label, Q: r.prep.directions.best.Q, recordOverBest: r.prep.directions.recordOverBest } } : {}), ...(r.alignment ? { alignment: r.alignment } : {}) /* the move, the rule applied, its cost, the mirror test's ratio, the doubt */, brain: r.fit.seedMaskRule ?? r.fit.maskRule };
   // Several objects can follow each other under one scan (remade after a change): numbered from 900 by their time -- one
   // above the highest stored, so a deleted older one never makes the newest share a number (critic 2026-10-06, R2-7).
   const seriesNumber = Math.max(899, ...stored.map((x) => x.seriesNumber)) + 1;
@@ -529,7 +527,7 @@ export async function makeMaps(dbDir: string, server: string, plan: { dwi: ReadS
   /** How the kept set was made: its registration rule and whether it was aligned to the T1 (critic 2026-10-25, registration
    *  rule 3, finding 2). The maps are made under THAT rule, and are not written when they would not be aligned as the
    *  tracts are: a map on another grid than its tracts is worse than none. */
-  made?: { registration: number; alignedToT1?: boolean }): Promise<CaseOutcome> {
+  made?: { registration: number; alignmentCheck?: number; alignedToT1?: boolean }): Promise<CaseOutcome> {
   const exists = (p: string) => Deno.stat(`${dbDir}/${p}`).then(() => true, () => false);
   const missing = (await Promise.all(MAP_PATHS.map(async (p) => (await exists(p(tractsUID))) ? undefined : p))).filter((p): p is (typeof MAP_PATHS)[number] => !!p);
   if (!missing.length) return { state: "current", seriesUID: tractsUID };
@@ -545,7 +543,7 @@ export async function makeMaps(dbDir: string, server: string, plan: { dwi: ReadS
     ...(plan.partner ? { partner: { b0s: plan.partner.frames.filter((v) => Number(diffusionOf(v)?.bValue ?? 0) < 50).map((v) => v.data as ArrayLike<number>), grid: { dims: plan.partner.frames[0].dims, ijkToRAS: plan.partner.frames[0].ijkToRAS }, name: plan.partner.facts.description } } : {}),
     phaseEncoding: { scan: plan.dwi.facts.phaseEncoding, partner: plan.partner?.facts.phaseEncoding },
     t1: { dims: t1v.dims as [number, number, number], ijkToRAS: t1v.ijkToRAS, data: t1v.data as ArrayLike<number> },
-    brainT1: brain.mask }, device, model, { labeler, fitOnly: true, ...(made ? { registrationRule: made.registration as RegistrationRuleId } : {}) });
+    brainT1: brain.mask }, device, model, { labeler, fitOnly: true, ...(made ? { registrationRule: made.registration as RegistrationRuleId, alignmentCheck: (made.alignmentCheck ?? 1) as AlignmentCheckId } : {}) });
   const alignedNow = !!r.alignment && !r.alignment.doubt;
   if (made?.alignedToT1 !== undefined && alignedNow !== made.alignedToT1)
     return { state: "failed", why: `the maps would ${alignedNow ? "" : "not "}be on the T1's axes, the kept tracts are ${made.alignedToT1 ? "" : "not "}(registration rule ${made.registration}); no maps written` };

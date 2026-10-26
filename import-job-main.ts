@@ -61,19 +61,19 @@ async function gitState(dir: string): Promise<string> {
  *  the highest series number -- the same rule the Diffusion module uses -- and only that one object read, for its inputs.
  *  The edges are read once per run. */
 let edgesOnce: Promise<{ child: string; parent: string; kind: string }[]> | undefined;
-async function newestStored(dbPath: string, rows: { seriesUID: string; seriesNumber: string }[], dwiUID: string): Promise<{ seriesUID: string; inputs?: { partner?: string | null; t1?: string | null }; made?: { registration: number; alignedToT1?: boolean } } | undefined> {
+async function newestStored(dbPath: string, rows: { seriesUID: string; seriesNumber: string }[], dwiUID: string): Promise<{ seriesUID: string; inputs?: { partner?: string | null; t1?: string | null }; made?: { registration: number; alignmentCheck?: number; alignedToT1?: boolean } } | undefined> {
   edgesOnce ??= provenanceEdges(provenancePathFor(dbPath)).catch(() => []);
   const kids = new Set((await edgesOnce).filter((e) => e.kind === "tracts" && e.parent === dwiUID).map((e) => e.child));
   const top = rows.filter((r) => kids.has(r.seriesUID)).sort((a, b) => (Number(b.seriesNumber) || 0) - (Number(a.seriesNumber) || 0))[0];
   if (!top) return undefined;
   const file = (await seriesFilePaths(dbPath, top.seriesUID))[0];
-  let inputs: { partner?: string | null; t1?: string | null } | undefined, made: { registration: number; alignedToT1?: boolean } | undefined;
+  let inputs: { partner?: string | null; t1?: string | null } | undefined, made: { registration: number; alignmentCheck?: number; alignedToT1?: boolean } | undefined;
   try {
-    const t = await dicomToTracts(await Deno.readFile(file)), p = t.provenance as { inputs?: typeof inputs; rules?: { registration?: number }; alignedToT1?: boolean } | undefined;
+    const t = await dicomToTracts(await Deno.readFile(file)), p = t.provenance as { inputs?: typeof inputs; rules?: { registration?: number; alignmentCheck?: number }; alignedToT1?: boolean } | undefined;
     inputs = p?.inputs ?? undefined;
     // How the set was aligned, for maps added beside it (critic 2026-10-25, registration rule 3, finding 2): its recorded
     // registration rule (a record from before the rule was recorded: rule 1, the only one then) and whether it was aligned.
-    made = { registration: Number(p?.rules?.registration ?? 1), ...(typeof p?.alignedToT1 === "boolean" ? { alignedToT1: p.alignedToT1 } : {}) };
+    made = { registration: Number(p?.rules?.registration ?? 1), alignmentCheck: Number(p?.rules?.alignmentCheck ?? 1), ...(typeof p?.alignedToT1 === "boolean" ? { alignedToT1: p.alignedToT1 } : {}) };
   } catch { /* unreadable: counts as missing inputs */ }
   return { seriesUID: top.seriesUID, inputs, ...(made ? { made } : {}) };
 }
@@ -179,7 +179,7 @@ try {
       // THERE = the newest set, made from the inputs the database holds now (the reversed scan, the T1), with its maps
       // (MAP_PATHS) beside it. Its maps missing: they alone are added, no tracking (finding 5). Older inputs, or no set:
       // a new set is made beside the old, which stays.
-      let mapsFor: { uid: string; made?: { registration: number; alignedToT1?: boolean } } | undefined;
+      let mapsFor: { uid: string; made?: { registration: number; alignmentCheck?: number; alignedToT1?: boolean } } | undefined;
       if (args["only-missing"]) {
         const s = await newestStored(db.path, await (rowsOnce ??= indexSeries(db.path)), plan.dwi.facts.uid).catch(() => undefined);
         const sameInputs = !!s?.inputs && (s.inputs.partner ?? null) === (plan.partner?.facts.uid ?? null) && (s.inputs.t1 ?? null) === (plan.t1?.facts.uid ?? null);

@@ -11,7 +11,7 @@ import type { DiffusionSeries } from "./dwi.ts";
 import { fitTensors, type TensorFit } from "./tensor.ts";
 import { correctWithReversed, trackUkfSeeds, wholeBrainSeeds, type StageTimes, type TrackTiming } from "./planning.ts";
 import { everyBrainVoxel, seedsFor, TRACKING_RULE, TRACKING_RULES, ukfDataFor, withBrainFromT1, type MaskGrid, type TrackingRuleId } from "./tracking-rules.ts";
-import type { Grid3, RegistrationRuleId, Rigid } from "./registration.ts";
+import type { AlignmentCheckId, Grid3, RegistrationRuleId, Rigid } from "./registration.ts";
 import type { FieldFit } from "./distortion.ts";
 import { prepareScan, type Prepared } from "./prepare.ts";
 import { MOTION_RULE, type MotionRuleId } from "./motion.ts";
@@ -48,6 +48,8 @@ export interface PipelineOptions {
   distortionRule?: 1 | 2; trackingRule?: TrackingRuleId; motionRule?: MotionRuleId; motionRounds?: number;
   /** registration.ts REGISTRATION_RULE (rules 2 and 3 use SynthStrip's brain on the T1, `brainT1`: rule 2 for its start, rule 3 also as the T1 it aligns to). */
   registrationRule?: RegistrationRuleId;
+  /** registration.ts ALIGNMENT_CHECK. */
+  alignmentCheck?: AlignmentCheckId;
   /** How the brain mask is made when not from the T1 (tensor.ts), and seeds anywhere in the head (false). */
   maskMethod?: "head" | "median-otsu"; seedMask?: boolean;
   /** Whole-brain starting points and their draw; one seed in every brain voxel (checking only). */
@@ -91,7 +93,7 @@ export async function wholeBrainTracts(input: PipelineInput, device: GPUDevice, 
   // Head movement, the field and the T1 in one resampling.
   const prep = await prepareScan(dwi, { ...(field.fit ? { field: { fit: field.fit, sign: field.sign ?? -1 } } : {}),
     ...(input.t1 ? { t1: input.t1 } : {}),
-    ...(opts.registrationRule ? { registrationRule: opts.registrationRule } : {}),
+    ...(opts.registrationRule ? { registrationRule: opts.registrationRule } : {}), ...(opts.alignmentCheck ? { alignmentCheck: opts.alignmentCheck } : {}),
     ...(input.brainT1 ? { brainT1: { dims: input.brainT1.dims as [number, number, number], ijkToRAS: input.brainT1.ijkToRAS, data: input.brainT1.data } } : {}),
     motionRule: opts.motionRule ?? MOTION_RULE, ...(opts.motionRounds ? { motionRounds: opts.motionRounds } : {}),
     ...(input.phaseEncoding?.scan ? { phaseEncoding: input.phaseEncoding.scan } : {}), times: stages });

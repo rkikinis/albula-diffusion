@@ -8,7 +8,9 @@
 // an unknown one is said as such, never guessed (methods.test.ts).
 
 /** The record a stored set of tracts carries (DICOM Tractography Results, the private block's provenance). */
-export interface HowMadeRecord { rules?: Record<string, unknown>; inputs?: { partner?: string | null; t1?: string | null } }
+export interface HowMadeRecord { rules?: Record<string, unknown>; inputs?: { partner?: string | null; t1?: string | null };
+  /** Whether the alignment was used, and its doubt when it was not (critic 2026-10-26, mirror test, finding 1). */
+  alignedToT1?: boolean; alignment?: { doubt?: string } }
 
 const MOTION: Record<number, string> = {
   0: "Head movement: not corrected (the scan came corrected)",
@@ -23,7 +25,15 @@ const TRACKING: Record<number, string> = {
 };
 const REGISTRATION: Record<number, string> = {
   1: "Aligned to the T1: rigid, normalized gradient fields (Haber and Modersitzki 2006)",
+  2: "Aligned to the T1: rigid, normalized gradient fields (Haber and Modersitzki 2006), from a wide search of starting positions",
+  3: "Aligned to the T1: rigid, normalized gradient fields (Haber and Modersitzki 2006), from a wide search of starting positions, against the brain found on the T1 by SynthStrip (Hoopes et al. 2022)",
 };
+
+/** THE ALIGNMENT REFUSED: said first and plainly -- the tracts are then in the scanner's placement, not on the T1. */
+export function notAligned(rec: HowMadeRecord | undefined): string | undefined {
+  if (!rec?.inputs?.t1 || rec.alignedToT1 !== false) return undefined;
+  return `Not lined up with the MRI of the anatomy: the automatic alignment looked wrong${rec.alignment?.doubt ? ` (${rec.alignment.doubt})` : ""}. The tracts are shown where the scanner placed them.`;
+}
 
 /** The steps, in the order they were done, each one line. */
 export function howMade(rec: HowMadeRecord | undefined): string[] {
@@ -34,7 +44,7 @@ export function howMade(rec: HowMadeRecord | undefined): string[] {
   const m = num("motion"), d = num("distortion"), g = num("registration"), t = num("tracking");
   if (m !== undefined) out.push(MOTION[m] ?? unknown("Head movement", m));
   if (d !== undefined) out.push(i.partner ? "Scanner distortion corrected with the reversed scan (Andersson, Skare and Ashburner 2003)" : "Scanner distortion: not corrected (no reversed scan)");
-  if (g !== undefined) out.push(i.t1 ? REGISTRATION[g] ?? unknown("Aligned to the T1", g) : "Not aligned to a T1 (none in the study)");
+  if (g !== undefined) out.push(!i.t1 ? "Not aligned to a T1 (none in the study)" : notAligned(rec) ?? REGISTRATION[g] ?? unknown("Aligned to the T1", g));
   if (t !== undefined) out.push(TRACKING[t] ?? unknown("Whole-brain tractography", t));
   if (r.labeler !== undefined) out.push("Tracts named by RapidParc (Bisten et al. 2026) on the fiber-cluster atlas of Zhang, O'Donnell et al. (2018)");
   return out;

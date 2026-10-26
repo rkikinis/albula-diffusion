@@ -51,7 +51,7 @@ const ADV_MIN_FA = 0.15;
 import { DCM2NIIX_VERSION, secondOpinion, type SecondOpinion } from "./second-opinion.ts";
 import { databaseSeries, openDatabaseId } from "albula";
 import { adPath, b0Path, colorFaPath, dicomToTracts, faPath, mdPath, rdPath, UNNAMED as UNNAMED_SET } from "./tracts-dicom.ts";
-import { howMade } from "./methods.ts";
+import { howMade, notAligned } from "./methods.ts";
 import { byName, laterality, measure, MEASURE_RULE, openingWay, throughBox, throughVoxels, toCsv, voxelsOf, type ExportRow, type Maps, type Measures, type Way } from "./selection.ts";
 import { databaseFileUrl, nrrdDecode, nrrdGeometry, nrrdSplitHeader } from "albula";
 import { addRowMenu, fitList, makeNameEditable, pickRectangle, type PickedRectangle, saveToDownloads, showInDownloads, sliceOffset, sliceOrientation, startEditing, viewBanner, type RowAction } from "albula";
@@ -781,7 +781,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
   // WHICH ONE: the newest the database holds for the scan. Every object records the version that made it; none is
   // "stale" (Ron, 2026-10-14: "for reproducibility scientists would like to run a specific version of a pipeline on
   // data"): choosing among versions is the versioning design still to come.
-  const storedState = new Map<string, { state: "stored" | "none" | "unknown"; made?: string; seriesUID?: string; tracking?: number; rules?: Record<string, unknown>; inputs?: { partner?: string | null; t1?: string | null } }>();
+  const storedState = new Map<string, { state: "stored" | "none" | "unknown"; made?: string; seriesUID?: string; tracking?: number; rules?: Record<string, unknown>; inputs?: { partner?: string | null; t1?: string | null }; alignedToT1?: boolean; alignment?: { doubt?: string } }>();
   let jobBusyNow = false;
   // While a loaded scan has no stored tracts: look again every 10 s (the server may be making them right now).
   setInterval(() => {
@@ -864,7 +864,9 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     }
     const made = typeof t.provenance?.made === "string" ? t.provenance.made : undefined;
     const rules = t.provenance?.rules as { tracking?: number } | undefined;
-    storedState.set(scan.browserId, { state: "stored", seriesUID: at.seriesUID, made, tracking: rules?.tracking, rules: t.provenance?.rules as Record<string, unknown> | undefined, inputs: t.provenance?.inputs as { partner?: string | null; t1?: string | null } | undefined });
+    storedState.set(scan.browserId, { state: "stored", seriesUID: at.seriesUID, made, tracking: rules?.tracking, rules: t.provenance?.rules as Record<string, unknown> | undefined, inputs: t.provenance?.inputs as { partner?: string | null; t1?: string | null } | undefined,
+      ...(typeof t.provenance?.alignedToT1 === "boolean" ? { alignedToT1: t.provenance.alignedToT1 as boolean } : {}),
+      ...(t.provenance?.alignment ? { alignment: t.provenance.alignment as { doubt?: string } } : {}) });
     return { sl, named: { tract: Int32Array.from(tract), side: Int8Array.from(side), draws: 0, seconds: 0 }, made };
   }
   // THE MAPS MADE AT IMPORT (Ron, 2026-10-14: "Why not do all proper registrations as part of the import? That would allow
@@ -1993,6 +1995,9 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       const st = storedState.get(scan.browserId);
       // WHAT, NOT WHEN (Ron, 2026-10-15): the steps, each with its method (methods.ts); the date and rule numbers in the tooltip.
       const steps = st?.state === "stored" ? howMade(st) : [];
+      // A REFUSED ALIGNMENT IS SAID WHERE IT IS SEEN, not inside the folded list (critic 2026-10-26, mirror test, finding 1).
+      const refused = st?.state === "stored" ? notAligned(st) : undefined;
+      if (refused) { const w = document.createElement("div"); w.className = "sl-hint"; w.style.color = "var(--sl-warn)"; w.textContent = refused; top.append(w); }
       if (steps.length) {
         const box = document.createElement("details"); box.className = "sl-hint"; box.style.margin = "2px 0";
         const sum = document.createElement("summary"); sum.textContent = "How these fiber tracts were made"; sum.style.cursor = "pointer"; box.append(sum);
