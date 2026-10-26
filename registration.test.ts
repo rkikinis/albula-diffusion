@@ -187,7 +187,7 @@ Deno.test("an empty brain in the diffusion scan is a doubt, not a pass (critic 2
   assert(/could not be measured/.test(a.doubt ?? ""), `doubt: ${a.doubt}`);
 });
 
-Deno.test("the import's alignment, given, is used as recorded: no new alignment, the same scan on the T1's axes; a recorded doubt keeps the scan in place (2026-10-26)", async () => {
+Deno.test("the alignment the import recorded, given, is used as recorded: no new alignment, the same scan on the T1's axes; a recorded doubt keeps the scan in place (2026-10-26)", async () => {
   const t1Dims: [number, number, number] = [40, 48, 36], t1M = [4, 0, 0, -80, 0, 4, 0, -96, 0, 0, 4, -72, 0, 0, 0, 1];
   const t1: Grid3 = { dims: t1Dims, ijkToRAS: t1M, data: head(t1Dims, t1M) };
   const bDims: [number, number, number] = [32, 38, 28], bM = [5, 0, 0, -80, 0, 5, 0, -95, 0, 0, 5, -70, 0, 0, 0, 1], b0 = head(bDims, bM);

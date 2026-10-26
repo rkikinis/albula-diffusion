@@ -211,6 +211,10 @@ Deno.test("BIDS diffusion: the b = 0 field maps for diffusion in fmap/, and the 
     const pa = objects.find((o) => o.role === "dwi-b0-fieldmap-PA")!;
     const back = fromDicomVolumes(volumesOfSeries(await parseInstances([ab(pa.files[0].bytes)])).frames);
     assertEquals(back.bValues, [0, 0]);
+    // FRAME RULE 2 (critic 2026-10-26, finding 9): a field map shares the frame of the diffusion scan it names; the T1 does not.
+    const frameOfRow = (role: string) => objects.find((o) => o.role === role)!.files[0].index.frameOfReferenceUID;
+    for (const r of ["dwi-b0-fieldmap-PA", "dwi-b0-fieldmap-AP", "dwi-b0-fieldmap-RL"]) assertEquals(frameOfRow(r), frameOfRow("dwi-AP"), `${r} in the scan's frame`);
+    assert(frameOfRow("dwi-AP") !== frameOfRow("T1w"));
     // Through the job's own reader and choice, as for a real database.
     const facts = await Promise.all(objects.filter((o) => o.role.startsWith("dwi")).map(async (o) => {
       const inst = await parseInstances([ab(o.files[0].bytes)], { headers: true });

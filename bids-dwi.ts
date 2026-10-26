@@ -33,7 +33,8 @@ function meantFor(side: Record<string, unknown>, dwis: { file: string; side: Rec
 }
 
 /** One object: the series as an Enhanced MR diffusion object, with its sidecar and its record. */
-async function writeObject(ctx: BidsKindContext, e: string, series: DiffusionSeries, sidecarText: string, role: string, uidRule: string, kind: string): Promise<BuiltObject> {
+async function writeObject(ctx: BidsKindContext, e: string, series: DiffusionSeries, sidecarText: string, role: string, uidRule: string, kind: string,
+  /** The source file whose frame this object shares (a field map: the diffusion scan its sidecar names). */ frameStem?: string): Promise<BuiltObject> {
   const st = ctx.study, agency = ctx.options.safetyStandardAgency as "IEC" | "FDA" | "MHW";
   const side = sidecarText ? JSON.parse(sidecarText) as Record<string, unknown> : {};
   const kept = Object.fromEntries(Object.entries(side).filter(([k]) => !ctx.sidecarLeftOut.includes(k)));
@@ -44,7 +45,11 @@ async function writeObject(ctx: BidsKindContext, e: string, series: DiffusionSer
   const number = ctx.nextSeriesNumber();
   // ITS OWN FRAME OF REFERENCE (core's FRAME_RULE 2, 2026-10-26): BIDS does not say the scan shares the T1's scanner
   // coordinates (HCP-type sessions hold scans from separate sittings), so it does not claim to. The rule is in its UIDs.
-  const frame = await ctx.frameOf(base), frameRole = `frame rule ${ctx.frameRule}`;
+  // A b = 0 FIELD MAP takes the frame of the diffusion scan its sidecar names (IntendedFor / B0FieldSource): the source
+  // states they belong together, and distortion correction reads them in the same scanner coordinates (critic
+  // 2026-10-26, finding 9). Two diffusion runs in dwi/ (ds001226's AP and PA, HCP's dir98/dir99) carry no such statement
+  // and keep a frame each; the pipeline pairs them by placement (import-job.ts partnerOf, planning.ts samePlacement).
+  const frame = await ctx.frameOf(frameStem ?? base), frameRole = `frame rule ${ctx.frameRule}`;
   const exp = await diffusionToEnhancedMR(series, { patientName: st.patientName, patientID: st.patientID, studyInstanceUID: st.studyInstanceUID, frameOfReferenceUID: frame, studyDescription: st.studyDescription, comments: st.comments, extra: st.extra, studyDate: st.studyDate, studyTime: st.studyTime }, {
     seriesDescription: desc, seriesNumber: number, sourceDescription: sidecarText ? JSON.stringify(kept, null, 2) : undefined,
     // The sidecar's phase-encoding axis as the standard attribute: i along the rows (ROW), j along the columns (COL);
@@ -110,7 +115,7 @@ export const bidsDiffusion: BidsKind = {
         const vols = await parseNiftiVolumes(await Deno.readFile(`${ctx.dir}/fmap/${e}`), e), n = vols.length, zeros = new Array(n).fill(0).join(" ");
         const series = fromFsl(vols, `${zeros}\n`, `${zeros}\n${zeros}\n${zeros}\n`, e);
         series.source = `${series.source}; a b = 0 field map (fmap/${e}) for dwi/${target}: every volume b = 0`;
-        out.push(await writeObject(ctx, e, series, sidecarText, "dwi-b0-fieldmap", `fmap epi rule ${FMAP_RULE}`, "diffusion field map"));
+        out.push(await writeObject(ctx, e, series, sidecarText, "dwi-b0-fieldmap", `fmap epi rule ${FMAP_RULE}`, "diffusion field map", target.replace(/\.nii(\.gz)?$/, "")));
       } catch (err) { ctx.skip(`fmap/${e}`, (err as Error).message); }
     }
     return out;

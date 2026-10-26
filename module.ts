@@ -42,9 +42,9 @@ import { colorFA, fitTensors, type TensorFit } from "./tensor.ts";
 import { type UkfData } from "./ukf.ts";
 import { edgeFluid, OUTSIDE_RULE, outsideBrain } from "./outside-brain.ts";
 import { seedsFor, TRACKING_RULE, TRACKING_RULES, ukfDataFor, withBrainFromT1, type TrackingRuleId } from "./tracking-rules.ts";
-import type { FieldFit } from "./distortion.ts";
+import { DISTORTION_RULE, type FieldFit } from "./distortion.ts";
 import { prepareScan } from "./prepare.ts";
-import type { GivenAlignment } from "./registration.ts";
+import { ALIGNMENT_CHECK, REGISTRATION_RULE, type GivenAlignment } from "./registration.ts";
 import type { GradientCheck } from "./gradient-check.ts";
 import { MOTION_RULE, type MotionRuleId } from "./motion.ts";
 /** "Stop below FA"'s default under Advanced (the single-tensor tracker's; the UKF's comes from the tracking rule). */
@@ -294,11 +294,14 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
   // viewBanner): while the module waits for a click to seed, and while any work runs, with the step it is on and its
   // progress when it has one.
   let banner: ReturnType<typeof viewBanner> = null, bannerStep = "";
+  /** While the module waits for the import (waitForImport): ends the wait. */
+  let stopWaiting: (() => void) | undefined;
   function syncBanner() {
     const pct = /(\d+)%/.exec(busy)?.[1];
     const want = seeding
       ? { title: "Seed: click where the tracts should start, in a slice or the 3D view", hint: "Esc cancels", progress: undefined, actions: [{ label: "Cancel", title: "Stop waiting for a click (Esc)", onClick: () => { cancelSeeding?.(); say("Seeding cancelled."); } }] }
-      : busy ? { title: busy.replace(/\s*\d+%$/, ""), hint: !pct && bannerStep && bannerStep !== busy ? bannerStep.replace(/…$/, "") : undefined, progress: pct ? Number(pct) / 100 : null, actions: [] }
+      : busy ? { title: busy.replace(/\s*\d+%$/, ""), hint: !pct && bannerStep && bannerStep !== busy ? bannerStep.replace(/…$/, "") : undefined, progress: pct ? Number(pct) / 100 : null,
+          actions: stopWaiting ? [{ label: "Stop waiting", title: "Stop waiting for the import: it keeps working, and the tracts and maps appear here when it is done", onClick: () => stopWaiting?.() }] : [] }
       : null;
     if (!want) { banner?.close(); banner = null; bannerStep = ""; return; }
     if (banner) banner.update(want); else banner = viewBanner(want);
@@ -507,7 +510,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     // THE IMPORT'S ALIGNMENT (Ron, 2026-10-26: "wait for the import"): at the default settings the scan is lined up with
     // the T1 as its stored set was -- waited for when the import has not made the set yet -- not aligned here again.
     let given: GivenAlignment | undefined;
-    if (anatOk && usesDefaults(scan) && motionRule === MOTION_RULE && await waitForImport(scan)) {
+    if (anatOk && alignsAsImport(scan) && motionRule === MOTION_RULE && await waitForImport(scan)) {
       // The set's record (its alignment), read once; not through ensureWholeBrain, which may be what called this.
       if (!storedState.get(scan.browserId)?.alignment?.T) await loadStored(scan, await tractTable()).catch(() => null);
       given = importAlignment(scan, anatOk, partner);
@@ -846,32 +849,58 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
    * (POST /_jobs/run), and this waits for it, saying so. Asked once per scan in a window: a run that made nothing for it
    * (refused, failed), or no import-time work on this Mac, and the scan is made here as before. True when a set is there.
    */
-  const importAsked = new Set<string>();
+  const importDone = new Set<string>();        // its run ended without a set for the scan: the scan is made here from now on
+  const importRequested = new Set<string>();   // asked of the server once; a second press waits again without asking again
+  /** What the import's alignment and maps depend on, beyond the scan, its T1 and its reversed scan (critic 2026-10-26,
+   *  finding 10): the correction on and the scan as acquired. Smooth curves or another Advanced setting do not change them. */
+  const alignsAsImport = (scan: Scan) => correct && !preCorrected.has(scan.browserId);
   async function waitForImport(scan: Scan): Promise<boolean> {
     if (storedState.get(scan.browserId)?.state === "stored") return true;
-    if (!usesDefaults(scan) || importAsked.has(scan.browserId)) return false;
+    if (!alignsAsImport(scan) || importDone.has(scan.browserId)) return false;
     if (await findStored(scan).catch(() => null)) return true;
     const uid = dwiUidOf(scan), dbId = await openDatabaseId().catch(() => null);
     const inDb = uid && dbId ? (await databaseSeries({ fresh: true }).catch(() => null))?.series.some((x) => x.seriesInstanceUID === uid) : false;
     if (!inDb) return false;
-    importAsked.add(scan.browserId);
-    const asked = await fetch("/_jobs/run", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ db: dbId }) })
-      .then((r) => r.json()).catch(() => null) as { queued?: boolean } | null;
-    if (!asked?.queued) return false;
+    if (!importRequested.has(scan.browserId)) {
+      const asked = await fetch("/_jobs/run", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ db: dbId, extension: "diffusion" }) })
+        .then((r) => r.json()).catch(() => null) as { queued?: boolean; why?: string } | null;
+      // NOT GOING TO RUN (finding 4): said at once, and the scan is made here.
+      if (!asked?.queued) {
+        importDone.add(scan.browserId);
+        say(`The import cannot prepare this scan on this computer${asked?.why ? ` (${asked.why})` : ""}; making it here, which takes a minute or more.`);
+        return false;
+      }
+      importRequested.add(scan.browserId);
+    }
     const was = busy, tw = performance.now();
+    let stopped = false;
+    // STOP WAITING (finding 5): the module is free again; the import keeps working, and its set appears when it is done.
+    stopWaiting = () => { stopped = true; };
     try {
       // Up to 30 minutes: the run may be preparing other scans of the database first.
-      while (performance.now() - tw < 30 * 60_000) {
-        const s = Math.round((performance.now() - tw) / 1000);
-        busy = `Waiting for the import to prepare this scan's fiber tracts and maps… ${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; render();
+      while (performance.now() - tw < 30 * 60_000 && !stopped) {
+        const sec = Math.round((performance.now() - tw) / 1000);
+        busy = `Waiting for the import to prepare this scan's fiber tracts and maps… ${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}`; render();
         await new Promise((r) => setTimeout(r, 5000));
-        if (await findStored(scan).catch(() => null)) break;
-        // Not running for this database any more (and not queued): it ended without a set for this scan.
+        if (stopped) break;
+        const found = await findStored(scan).catch(() => null);
+        if (found) {
+          // ITS MAPS TOO (finding 11): the set is indexed before its maps are written; the last one written is RD.
+          const t0 = performance.now();
+          while (!stopped && performance.now() - t0 < 120_000) {
+            const url = await databaseFileUrl(rdPath(found.seriesUID)).catch(() => null);
+            if (url && (await fetch(url, { method: "HEAD" }).then((r) => r.ok).catch(() => false))) break;
+            await new Promise((r) => setTimeout(r, 3000));
+          }
+          break;
+        }
+        // Not running on this database any more, nor queued (any import-time work counts: finding 3).
         if (performance.now() - tw > 15_000 && !(await jobRunning())) { await findStored(scan).catch(() => null); break; }
       }
-    } finally { busy = was; render(); }
+    } finally { stopWaiting = undefined; busy = was; render(); }
+    if (stopped) throw new Error("you stopped waiting for the import; it keeps working, and this scan's tracts and maps can be shown when it is done");
     const got = storedState.get(scan.browserId)?.state === "stored";
-    if (!got) say("The import made no fiber tracts for this scan (the database's run log says why); making them here, which takes a minute or more.");
+    if (!got) { importDone.add(scan.browserId); say("The import made no fiber tracts for this scan; making them here, which takes a minute or more."); }
     return got;
   }
   /** THE IMPORT'S ALIGNMENT of this scan, when its stored set was made from the same T1 and the same reversed scan as are
@@ -879,6 +908,10 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
   function importAlignment(scan: Scan, anat: MrsonNode, partner: Partner | undefined): GivenAlignment | undefined {
     const st = storedState.get(scan.browserId), a = st?.alignment;
     if (st?.state !== "stored" || !a?.T || !a.rule) return undefined;
+    // MADE UNDER TODAY'S RULES for what the alignment depends on (critic 2026-10-26, finding 8): a set from an older rule
+    // or check is not taken as it is; the scan is aligned here.
+    const r = st.rules ?? {};
+    if (r.registration !== REGISTRATION_RULE || (r.alignmentCheck ?? 1) !== ALIGNMENT_CHECK || r.motion !== MOTION_RULE || r.distortion !== DISTORTION_RULE) return undefined;
     const uidOf = (id: string | undefined) => id ? ((live.nodes.get(id)?.origin as Record<string, unknown> | undefined)?.seriesInstanceUID as string | undefined) : undefined;
     if ((st.inputs?.t1 ?? null) !== (uidOf(anat.id) ?? null)) return undefined;
     if ((st.inputs?.partner ?? null) !== (uidOf(partner?.frameIds[0]) ?? null)) return undefined;
@@ -994,7 +1027,9 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     if (!s) return false;
     const open = await openDatabaseId().catch(() => null);
     if (!open) return false;
-    return (s.running?.extension === "diffusion" && s.running.db === open) || !!s.queued?.includes(open);
+    // ANY IMPORT-TIME WORK ON IT (critic 2026-10-26, finding 3): the core's job (FastSurfer) runs before the extensions'
+    // on the same database, and the diffusion job comes after it in the same run.
+    return s.running?.db === open || !!s.queued?.includes(open);
   };
   /** The server starts no job while this window tracks on the graphics card (finding 3); renewed while the run lasts. */
   const holdJobs = (): (() => void) => {
