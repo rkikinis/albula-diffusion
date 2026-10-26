@@ -75,6 +75,15 @@ Deno.test("BIDS import with the diffusion kind: T1, diffusion and mask, stable U
     assert(t1.files.every((f) => f.index.newStudy?.patientID === "ds999999-sub-01"), "the T1 rows create the patient");
     assertEquals(new Set(a.flatMap((o) => o.files.map((f) => f.index.studyInstanceUID))).size, 1, "one study");
     assertEquals(seg.files[0].index.derivedFrom?.parentSeriesUID, t1.seriesInstanceUID, "the SEG hangs under the T1");
+    // FRAME RULE 2 (2026-10-26): the T1 and its mask share a frame of reference; the diffusion scan has its own -- BIDS
+    // does not say it shares the T1's scanner coordinates -- in its file and in its index row alike.
+    const io0 = await dicomIO();
+    const forOf = (u: Uint8Array) => String((io0.naturalize(io0.readFile(ab(u)).dict) as Record<string, unknown>).FrameOfReferenceUID ?? "");
+    const [t1For, dwiFor, segFor] = [forOf(t1.files[0].bytes), forOf(dwi.files[0].bytes), forOf(seg.files[0].bytes)];
+    assert(t1For && dwiFor, "both have a frame of reference");
+    assertEquals(segFor, t1For, "the mask is in the T1's frame");
+    assert(dwiFor !== t1For, "the diffusion scan has a frame of its own");
+    assertEquals(dwi.files[0].index.frameOfReferenceUID, dwiFor, "the index row says the same frame as the file");
 
     // The T1 through our own reader: same values at the same positions (the grid may be re-ordered).
     const t1Back = volumesOfSeries(await parseInstances(t1.files.map((f) => ab(f.bytes)))).frames;

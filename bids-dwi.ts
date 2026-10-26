@@ -42,13 +42,16 @@ async function writeObject(ctx: BidsKindContext, e: string, series: DiffusionSer
   const acq = role === "dwi" ? /_(?:acq|dir)-([A-Za-z0-9]+)/.exec(e)?.[1] : /_dir-([A-Za-z0-9]+)/.exec(e)?.[1] ?? /_acq-([A-Za-z0-9]+)/.exec(e.replace(/_acq-dwi/, ""))?.[1];
   const desc = `${String(side.SeriesDescription ?? (role === "dwi" ? "DWI" : "DWI b0 field map"))}${acq ? ` (${acq})` : ""}`.slice(0, 64);
   const number = ctx.nextSeriesNumber();
-  const exp = await diffusionToEnhancedMR(series, { patientName: st.patientName, patientID: st.patientID, studyInstanceUID: st.studyInstanceUID, frameOfReferenceUID: st.frameOfReferenceUID, studyDescription: st.studyDescription, comments: st.comments, extra: st.extra, studyDate: st.studyDate, studyTime: st.studyTime }, {
+  // ITS OWN FRAME OF REFERENCE (core's FRAME_RULE 2, 2026-10-26): BIDS does not say the scan shares the T1's scanner
+  // coordinates (HCP-type sessions hold scans from separate sittings), so it does not claim to. The rule is in its UIDs.
+  const frame = await ctx.frameOf(base), frameRole = `frame rule ${ctx.frameRule}`;
+  const exp = await diffusionToEnhancedMR(series, { patientName: st.patientName, patientID: st.patientID, studyInstanceUID: st.studyInstanceUID, frameOfReferenceUID: frame, studyDescription: st.studyDescription, comments: st.comments, extra: st.extra, studyDate: st.studyDate, studyTime: st.studyTime }, {
     seriesDescription: desc, seriesNumber: number, sourceDescription: sidecarText ? JSON.stringify(kept, null, 2) : undefined,
     // The sidecar's phase-encoding axis as the standard attribute: i along the rows (ROW), j along the columns (COL);
     // the writer keeps the voxel axes as the image's (export-dicom-dwi.ts). Its sign stays in the private block.
     ...(typeof side.PhaseEncodingDirection === "string" && /^[ij]-?$/.test(side.PhaseEncodingDirection) ? { phaseEncoding: (side.PhaseEncodingDirection[0] === "i" ? "ROW" : "COLUMN") as "ROW" | "COLUMN" } : {}),
     safetyStandardAgency: agency,
-    uids: { series: await ctx.uid(base, uidRule, "series"), sop: await ctx.uid(base, uidRule, "instance") },
+    uids: { series: await ctx.uid(base, uidRule, frameRole, "series"), sop: await ctx.uid(base, uidRule, frameRole, "instance") },
   });
   const shells = [...new Set(series.bValues.map((b) => Math.round(b)))].sort((a, b) => a - b);
   const noDir = series.bValues.filter((b, i) => b > 0 && Math.hypot(...series.gradients[i]) < 0.5).length;
@@ -59,7 +62,7 @@ async function writeObject(ctx: BidsKindContext, e: string, series: DiffusionSer
     files: [{
       name: `${exp.sopInstanceUID}.dcm`, bytes: exp.bytes,
       index: { sopInstanceUID: exp.sopInstanceUID, seriesInstanceUID: exp.seriesInstanceUID, studyInstanceUID: st.studyInstanceUID, modality: "MR", seriesNumber: number,
-        seriesDescription: desc, frameOfReferenceUID: st.frameOfReferenceUID, displayedSize: `${nx}x${ny}`, numberOfFrames: exp.frames, newStudy: st.newStudy } as BuiltObject["files"][number]["index"],
+        seriesDescription: desc, frameOfReferenceUID: frame, displayedSize: `${nx}x${ny}`, numberOfFrames: exp.frames, newStudy: st.newStudy } as BuiltObject["files"][number]["index"],
     }],
     notes: [series.source, `safety standard ${agency}: ${String(ctx.options.safetyReason ?? "(no reason given)")}`,
       ...(noDir ? [`${noDir} volume(s) with b > 0 and no direction: written as ISOTROPIC (trace) images`] : []),

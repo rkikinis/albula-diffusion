@@ -186,3 +186,24 @@ Deno.test("an empty brain in the diffusion scan is a doubt, not a pass (critic 2
   const a = await alignToT1(dwi, t1, undefined, undefined, { moves: [], b0, mask: new Uint8Array(b0.length) }, { rule: 1 });
   assert(/could not be measured/.test(a.doubt ?? ""), `doubt: ${a.doubt}`);
 });
+
+Deno.test("the import's alignment, given, is used as recorded: no new alignment, the same scan on the T1's axes; a recorded doubt keeps the scan in place (2026-10-26)", async () => {
+  const t1Dims: [number, number, number] = [40, 48, 36], t1M = [4, 0, 0, -80, 0, 4, 0, -96, 0, 0, 4, -72, 0, 0, 0, 1];
+  const t1: Grid3 = { dims: t1Dims, ijkToRAS: t1M, data: head(t1Dims, t1M) };
+  const bDims: [number, number, number] = [32, 38, 28], bM = [5, 0, 0, -80, 0, 5, 0, -95, 0, 0, 5, -70, 0, 0, 0, 1], b0 = head(bDims, bM);
+  const dwi = () => ({ volumes: [{ dims: bDims, ijkToRAS: bM, data: Float32Array.from(b0), dtype: "<f4" }], bValues: [0], gradients: [[0, 0, 0]], ijkToRAS: bM, source: "test", convention: 1 }) as unknown as DiffusionSeries;
+  const mask = new Uint8Array(b0.length); for (let v = 0; v < mask.length; v++) mask[v] = b0[v] > 30 ? 1 : 0;
+  const motion = { moves: [], b0, mask };
+  const made = await alignToT1(dwi(), t1, undefined, undefined, motion, { rule: 2, check: 1 });
+  const times: { register?: number; resample?: number } = {};
+  const given = await alignToT1(dwi(), t1, undefined, times, motion, { given: { T: made.T, rule: made.rule, mirrorRatio: 0.7, cost: made.result.cost } });
+  assert(times.register === 0, "no alignment was made");
+  assert(given.T === made.T && given.mirrorRatio === 0.7 && !given.doubt);
+  assert(/as the import did/.test(given.said), given.said);
+  const a = made.dwi.volumes[0].data, b = given.dwi.volumes[0].data;
+  assert(a.length === b.length);
+  for (let i = 0; i < a.length; i++) assertAlmostEquals(Number(b[i]), Number(a[i]), 1e-5);
+  const doubted = await alignToT1(dwi(), t1, undefined, undefined, motion, { given: { T: made.T, rule: 3, doubt: "the scan matches its own mirror image about as well (0.99): the MRI of the anatomy may be another person's" } });
+  assert(/another person's/.test(doubted.doubt ?? ""), `doubt kept: ${doubted.doubt}`);
+  assert(doubted.dwi.volumes[0].dims.join() === bDims.join(), "a doubted alignment leaves the scan on its own grid");
+});

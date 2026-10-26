@@ -34,8 +34,8 @@ export const REGISTRATION_RULE: RegistrationRuleId = 3;
 export type RegistrationRuleId = 1 | 2 | 3;
 
 /**
- * THE ALIGNMENT'S CHECK under rules 2 and 3 (critic 2026-10-25/26, rule 3 finding 1 and the doubt proposal; NOT the
- * default until Ron decides). 1: only "the match got worse" -- which rule 1's own path among the candidates makes
+ * THE ALIGNMENT'S CHECK under rules 2 and 3 (critic 2026-10-25/26, rule 3 finding 1 and the doubt proposal; check 2 THE
+ * DEFAULT since 2026-10-26, Ron: "1 yes"). 1: only "the match got worse" -- which rule 1's own path among the candidates makes
  * impossible, so in effect no check. 2: THE MIRROR TEST -- the same b = 0 mirrored left to right about its brain's
  * center is aligned to the same T1 the same way; a right pair matches clearly better than its own mirror image, another
  * person's T1 or a scan flipped left to right does not. Doubtful when cost / mirrored cost > MIRROR_DOUBT. Measured
@@ -44,9 +44,11 @@ export type RegistrationRuleId = 1 | 2 | 3;
  * right pair's (so 1.13 and up), not a separate measurement. Closest to the limit: scans without distortion correction
  * (the Prisma pair coarsened to 3 x 3 x 6 mm reached 0.937; corrected, 0.777). Costs one more alignment.
  */
-export const ALIGNMENT_CHECK: AlignmentCheckId = 1;
+export const ALIGNMENT_CHECK: AlignmentCheckId = 2;
 export type AlignmentCheckId = 1 | 2;
 export const MIRROR_DOUBT = 0.93, MIRROR_FLIPPED = 1.08;
+/** An alignment already made (by the import job, recorded with its tract set): alignToT1's `given`. */
+export interface GivenAlignment { T: Rigid; rule: RegistrationRuleId; doubt?: string; mirrorRatio?: number; cost?: number }
 
 /** The b = 0 mirrored left to right (world x) about its brain's center: only the grid's matrix changes. */
 export function mirroredLeftRight(g: Grid3, mask: Uint8Array): Grid3 {
@@ -492,11 +494,25 @@ export async function alignToT1(dwi: DiffusionSeries, t1: Grid3, field?: { fit: 
   /** The rule (default REGISTRATION_RULE), and SynthStrip's brain on the T1: rule 2 starts from its center (without it,
    *  from the scanner's placement); rule 3 aligns to the T1 inside it, and without it is rule 2 -- said in the record and
    *  in `rule` (the import job refuses a case without the brain, so this is the module's path). */
-  opts: { rule?: RegistrationRuleId; brainT1?: Grid3; /** ALIGNMENT_CHECK by default. */ check?: AlignmentCheckId } = {}): Promise<{ dwi: DiffusionSeries; T: Rigid; result: RigidResult & { candidates?: Candidate[] }; said: string; doubt?: string; rule: RegistrationRuleId; /** Check 2: cost / mirrored cost. */ mirrorRatio?: number }> {
+  opts: { rule?: RegistrationRuleId; brainT1?: Grid3; /** ALIGNMENT_CHECK by default. */ check?: AlignmentCheckId;
+    /** THE IMPORT'S ALIGNMENT, taken instead of aligning again (Ron, 2026-10-26: the module "waits for the import"): the
+     *  move, its rule, its check's ratio and its doubt as the import job recorded them for this scan and this T1. */
+    given?: GivenAlignment } = {}): Promise<{ dwi: DiffusionSeries; T: Rigid; result: RigidResult & { candidates?: Candidate[] }; said: string; doubt?: string; rule: RegistrationRuleId; /** Check 2: cost / mirrored cost. */ mirrorRatio?: number }> {
   const t0 = performance.now(), src = dwi.volumes[0];
   let b0: Float32Array, mask: Uint8Array;
   if (motion) ({ b0, mask } = motion);
   else ({ b0, mask } = scanBrain(dwi, field));
+  if (opts.given) {
+    const g = opts.given, sz = rigidSize(g.T);
+    const result = { T: g.T, cost: g.cost ?? NaN, costAtStart: NaN, levels: [], ms: 0 };
+    if (times) times.register = 0;
+    // A doubted alignment is not used (prepare.ts): nothing to read onto the T1.
+    const t1Done = performance.now();
+    const out = g.doubt ? dwi : await resampleOntoT1(dwi, g.T, t1, field, { cover: mask, rule: g.rule, ...(motion ? { motion: motion.moves } : {}) });
+    if (times) times.resample = performance.now() - t1Done;
+    return { dwi: out, T: g.T, result, rule: g.rule, ...(g.mirrorRatio !== undefined ? { mirrorRatio: g.mirrorRatio } : {}),
+      said: `aligned to the MRI of the anatomy as the import did (moved ${sz.mm.toFixed(1)} mm and ${sz.degrees.toFixed(1)}°)`, ...(g.doubt ? { doubt: g.doubt } : {}) };
+  }
   const asked = opts.rule ?? REGISTRATION_RULE, rule: RegistrationRuleId = asked === 3 && !opts.brainT1 ? 2 : asked;
   const moving: Grid3 = { dims: src.dims as [number, number, number], ijkToRAS: src.ijkToRAS, data: b0 };
   const target = rule === 3 ? brainOnlyT1(t1, opts.brainT1!) : t1;

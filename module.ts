@@ -44,6 +44,7 @@ import { edgeFluid, OUTSIDE_RULE, outsideBrain } from "./outside-brain.ts";
 import { seedsFor, TRACKING_RULE, TRACKING_RULES, ukfDataFor, withBrainFromT1, type TrackingRuleId } from "./tracking-rules.ts";
 import type { FieldFit } from "./distortion.ts";
 import { prepareScan } from "./prepare.ts";
+import type { GivenAlignment } from "./registration.ts";
 import type { GradientCheck } from "./gradient-check.ts";
 import { MOTION_RULE, type MotionRuleId } from "./motion.ts";
 /** "Stop below FA"'s default under Advanced (the single-tensor tracker's; the UKF's comes from the tracking rule). */
@@ -503,6 +504,14 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     if (have && have.maxB === adv.maxB && have.partnerId === (partner?.id ?? "") && (have.anatomyId ?? "") === (anatOk?.id ?? "") && have.motionAsked === motionRule) return have;
     if (have) dropMaps(have);
     if (moved(live.nodes.get(scan.frameIds[0]))) throw new Error("the scan has a transform (Transforms module); the maps and tracts are not computed on a moved scan yet — harden or remove the transform first");
+    // THE IMPORT'S ALIGNMENT (Ron, 2026-10-26: "wait for the import"): at the default settings the scan is lined up with
+    // the T1 as its stored set was -- waited for when the import has not made the set yet -- not aligned here again.
+    let given: GivenAlignment | undefined;
+    if (anatOk && usesDefaults(scan) && motionRule === MOTION_RULE && await waitForImport(scan)) {
+      // The set's record (its alignment), read once; not through ensureWholeBrain, which may be what called this.
+      if (!storedState.get(scan.browserId)?.alignment?.T) await loadStored(scan, await tractTable()).catch(() => null);
+      given = importAlignment(scan, anatOk, partner);
+    }
     say(`Reading ${scan.frameIds.length} diffusion volumes…`);
     const t0 = performance.now();
     const vols: Volume[] = [];
@@ -525,7 +534,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     // SYNTHSTRIP'S BRAIN BEFORE THE ALIGNMENT (critic 2026-10-25, registration rule 3, finding 3): rule 3 aligns to the T1
     // inside it, as the import job does; asked once here and kept for the tracking (brainFor). Without it the alignment is
     // rule 2 against the whole MRI, and the record says why.
-    const brainAsk = anatOk && z ? askBrain(anatOk.id) : undefined;
+    const brainAsk = anatOk && z && !given ? askBrain(anatOk.id) : undefined;
     let brainT1: { dims: [number, number, number]; ijkToRAS: number[]; data: Uint8Array } | undefined;
     if (brainAsk) {
       waitingForBrain = true;
@@ -535,7 +544,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     }
     const prep = await prepareScan(dwi, { ...(field.fit ? { field: { fit: field.fit, sign: field.sign ?? -1 } } : {}),
       ...(anatOk && z ? { t1: { dims: anatOk.dims as [number, number, number], ijkToRAS: anatOk.ijkToRAS as number[], data: z.data as ArrayLike<number> } } : {}),
-      ...(brainT1 ? { brainT1 } : {}),
+      ...(brainT1 ? { brainT1 } : {}), ...(given ? { givenAlignment: given } : {}),
       motionRule, ...(scan.phaseEncoding ? { phaseEncoding: scan.phaseEncoding } : {}), times, say,
       ...(directionsChecked.has(scan.browserId) ? { directions: directionsChecked.get(scan.browserId) } : {}) });
     if (prep.directions) directionsChecked.set(scan.browserId, prep.directions);
@@ -573,7 +582,9 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     render();
     try {
       // The stored map when the import made one (no fit); else the module's own.
-      const kept = await storedMap(scan, what).catch(() => undefined);
+      // None yet: the import is asked to make the scan's set and its maps, and this waits (2026-10-26).
+      const kept = await storedMap(scan, what).catch(() => undefined)
+        ?? (await waitForImport(scan) ? await storedMap(scan, what).catch(() => undefined) : undefined);
       // The corrected b0 fills the slice views alone, as the diffusion scan itself did; FA and Color FA go over the T1.
       if (kept) { if (what === "b0") putBackground(kept, null); else putMap(scan, kept); return; }
       const c = await ensureFit(scan);
@@ -781,7 +792,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
   // WHICH ONE: the newest the database holds for the scan. Every object records the version that made it; none is
   // "stale" (Ron, 2026-10-14: "for reproducibility scientists would like to run a specific version of a pipeline on
   // data"): choosing among versions is the versioning design still to come.
-  const storedState = new Map<string, { state: "stored" | "none" | "unknown"; made?: string; seriesUID?: string; tracking?: number; rules?: Record<string, unknown>; inputs?: { partner?: string | null; t1?: string | null }; alignedToT1?: boolean; alignment?: { doubt?: string } }>();
+  const storedState = new Map<string, { state: "stored" | "none" | "unknown"; made?: string; seriesUID?: string; tracking?: number; rules?: Record<string, unknown>; inputs?: { partner?: string | null; t1?: string | null }; alignedToT1?: boolean; alignment?: { doubt?: string } & Partial<GivenAlignment> }>();
   let jobBusyNow = false;
   // While a loaded scan has no stored tracts: look again every 10 s (the server may be making them right now).
   setInterval(() => {
@@ -828,6 +839,51 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     storedState.set(scan.browserId, { state: "stored", seriesUID: chosen });
     return { seriesUID: chosen };
   }
+  /**
+   * WAIT FOR THE IMPORT (Ron, 2026-10-26: "wait for the import"; with the mirror test the alignment alone takes about 50 s
+   * here, and a button press would pass 66 s). A scan of the open database with no tract set yet, at the default
+   * settings, is not corrected, aligned and fitted here: the server's import-time work is asked to make its set
+   * (POST /_jobs/run), and this waits for it, saying so. Asked once per scan in a window: a run that made nothing for it
+   * (refused, failed), or no import-time work on this Mac, and the scan is made here as before. True when a set is there.
+   */
+  const importAsked = new Set<string>();
+  async function waitForImport(scan: Scan): Promise<boolean> {
+    if (storedState.get(scan.browserId)?.state === "stored") return true;
+    if (!usesDefaults(scan) || importAsked.has(scan.browserId)) return false;
+    if (await findStored(scan).catch(() => null)) return true;
+    const uid = dwiUidOf(scan), dbId = await openDatabaseId().catch(() => null);
+    const inDb = uid && dbId ? (await databaseSeries({ fresh: true }).catch(() => null))?.series.some((x) => x.seriesInstanceUID === uid) : false;
+    if (!inDb) return false;
+    importAsked.add(scan.browserId);
+    const asked = await fetch("/_jobs/run", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ db: dbId }) })
+      .then((r) => r.json()).catch(() => null) as { queued?: boolean } | null;
+    if (!asked?.queued) return false;
+    const was = busy, tw = performance.now();
+    try {
+      // Up to 30 minutes: the run may be preparing other scans of the database first.
+      while (performance.now() - tw < 30 * 60_000) {
+        const s = Math.round((performance.now() - tw) / 1000);
+        busy = `Waiting for the import to prepare this scan's fiber tracts and maps… ${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; render();
+        await new Promise((r) => setTimeout(r, 5000));
+        if (await findStored(scan).catch(() => null)) break;
+        // Not running for this database any more (and not queued): it ended without a set for this scan.
+        if (performance.now() - tw > 15_000 && !(await jobRunning())) { await findStored(scan).catch(() => null); break; }
+      }
+    } finally { busy = was; render(); }
+    const got = storedState.get(scan.browserId)?.state === "stored";
+    if (!got) say("The import made no fiber tracts for this scan (the database's run log says why); making them here, which takes a minute or more.");
+    return got;
+  }
+  /** THE IMPORT'S ALIGNMENT of this scan, when its stored set was made from the same T1 and the same reversed scan as are
+   *  loaded: the module lines the scan up as the import did, without aligning it again (registration.ts `given`). */
+  function importAlignment(scan: Scan, anat: MrsonNode, partner: Partner | undefined): GivenAlignment | undefined {
+    const st = storedState.get(scan.browserId), a = st?.alignment;
+    if (st?.state !== "stored" || !a?.T || !a.rule) return undefined;
+    const uidOf = (id: string | undefined) => id ? ((live.nodes.get(id)?.origin as Record<string, unknown> | undefined)?.seriesInstanceUID as string | undefined) : undefined;
+    if ((st.inputs?.t1 ?? null) !== (uidOf(anat.id) ?? null)) return undefined;
+    if ((st.inputs?.partner ?? null) !== (uidOf(partner?.frameIds[0]) ?? null)) return undefined;
+    return { T: a.T, rule: a.rule, ...(a.doubt ? { doubt: a.doubt } : {}), ...(a.mirrorRatio !== undefined ? { mirrorRatio: a.mirrorRatio } : {}), ...(a.cost !== undefined ? { cost: a.cost } : {}) };
+  }
   /** What a set switch (findStored) took off the screen, for switchedSet to put back from the new set. */
   const reshowAfterSwitch = new Map<string, { tracts: number[] }>();
   let restoring = false;   // a scene's restore asks for its sets itself and shows what the scene says
@@ -866,7 +922,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     const rules = t.provenance?.rules as { tracking?: number } | undefined;
     storedState.set(scan.browserId, { state: "stored", seriesUID: at.seriesUID, made, tracking: rules?.tracking, rules: t.provenance?.rules as Record<string, unknown> | undefined, inputs: t.provenance?.inputs as { partner?: string | null; t1?: string | null } | undefined,
       ...(typeof t.provenance?.alignedToT1 === "boolean" ? { alignedToT1: t.provenance.alignedToT1 as boolean } : {}),
-      ...(t.provenance?.alignment ? { alignment: t.provenance.alignment as { doubt?: string } } : {}) });
+      ...(t.provenance?.alignment ? { alignment: t.provenance.alignment as { doubt?: string } & Partial<GivenAlignment> } : {}) });
     return { sl, named: { tract: Int32Array.from(tract), side: Int8Array.from(side), draws: 0, seconds: 0 }, made };
   }
   // THE MAPS MADE AT IMPORT (Ron, 2026-10-14: "Why not do all proper registrations as part of the import? That would allow
@@ -985,12 +1041,8 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
         // server is still preparing them, wait for it and say so (Ron's "q3: A": one run, never two).
         let stored = usesDefaults(scan) ? await loadStored(scan, model).catch(() => null) : null;
         if (!usesDefaults(scan)) say("Your settings under Advanced differ from the ones the tracts made at import used: making them here, as set.");
-        if (!stored && usesDefaults(scan) && await jobRunning()) {
-          const tw = performance.now();
-          while (await jobRunning() && performance.now() - tw < 15 * 60_000) {
-            busy = `Waiting for the fiber tracts being prepared… ${Math.round((performance.now() - tw) / 1000)} s`; render();
-            await new Promise((r) => setTimeout(r, 3000));
-          }
+        // NONE YET: the import is asked to make them, and this waits (Ron, 2026-10-26: "wait for the import").
+        if (!stored && usesDefaults(scan) && await waitForImport(scan)) {
           stored = await loadStored(scan, model).catch(() => null);
           busy = "Making tracts…"; render();
         }
