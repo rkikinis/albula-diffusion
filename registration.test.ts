@@ -156,3 +156,24 @@ Deno.test("without SynthStrip's brain, rule 3 is rule 2 against the whole MRI, a
   assert(/its brain was not available/.test(a.said), a.said);
   assert(/registration rule 2/.test(a.dwi.source), a.dwi.source);
 });
+
+Deno.test("check 2, the mirror test: a right pair passes; the same scan flipped left to right is doubted", async () => {
+  const t1Dims: [number, number, number] = [80, 96, 72], t1M = [2, 0, 0, -80, 0, 2, 0, -96, 0, 0, 2, -72, 0, 0, 0, 1], n1 = 80 * 96 * 72;
+  const data = head(t1Dims, t1M), brain = new Uint8Array(n1);
+  for (let v = 0; v < n1; v++) { const i = v % 80, j = Math.floor(v / 80) % 96, k = Math.floor(v / 7680), p = [2 * i - 80, 2 * j - 96, 2 * k - 72]; if ((p[0] / 60) ** 2 + (p[1] / 75) ** 2 + (p[2] / 55) ** 2 < 1) brain[v] = 1; }
+  const t1: Grid3 = { dims: t1Dims, ijkToRAS: t1M, data }, brainT1: Grid3 = { dims: t1Dims, ijkToRAS: t1M, data: brain };
+  const bDims: [number, number, number] = [56, 66, 50], bM = [2.5, 0, 0, -70, 0, 2.5, 0, -82, 0, 0, 2.5, -62, 0, 0, 0, 1];
+  const scan = (flip: boolean) => {
+    const b0 = head(bDims, bM), out = new Float32Array(b0.length);
+    // Flipped: the image's left and right swapped (x index reversed), the header unchanged -- as a mislabeled scan.
+    for (let v = 0; v < b0.length; v++) { const i = v % bDims[0], r = v - i; out[v] = flip ? b0[r + bDims[0] - 1 - i] : b0[v]; }
+    const mask = new Uint8Array(out.length); for (let v = 0; v < mask.length; v++) mask[v] = out[v] > 30 ? 1 : 0;
+    return { dwi: { volumes: [{ dims: bDims, ijkToRAS: bM, data: out, dtype: "<f4" }], bValues: [0], gradients: [[0, 0, 0]], ijkToRAS: bM, source: "test", convention: 1 } as unknown as DiffusionSeries, motion: { moves: [], b0: out, mask } };
+  };
+  const right = scan(false), flipped = scan(true);
+  const a = await alignToT1(right.dwi, t1, undefined, undefined, right.motion, { brainT1, check: 2 });
+  const b = await alignToT1(flipped.dwi, t1, undefined, undefined, flipped.motion, { brainT1, check: 2 });
+  console.log(`  right pair: ratio ${a.mirrorRatio?.toFixed(3)}${a.doubt ? ` (doubt: ${a.doubt})` : ""}; flipped: ratio ${b.mirrorRatio?.toFixed(3)}${b.doubt ? " (doubted)" : ""}`);
+  assert(!a.doubt && a.mirrorRatio! < 0.93, `right pair: ${a.mirrorRatio} ${a.doubt ?? ""}`);
+  assert(/mirror image/.test(b.doubt ?? ""), `flipped scan not doubted: ratio ${b.mirrorRatio}`);
+});

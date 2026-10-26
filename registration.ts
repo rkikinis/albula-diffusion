@@ -33,6 +33,29 @@ const yieldNow = () => new Promise<void>((r) => setTimeout(r, 0));
 export const REGISTRATION_RULE: RegistrationRuleId = 3;
 export type RegistrationRuleId = 1 | 2 | 3;
 
+/**
+ * THE ALIGNMENT'S CHECK under rules 2 and 3 (critic 2026-10-25/26, rule 3 finding 1 and the doubt proposal; NOT the
+ * default until Ron decides). 1: only "the match got worse" -- which rule 1's own path among the candidates makes
+ * impossible, so in effect no check. 2: THE MIRROR TEST -- the same b = 0 mirrored left to right about its brain's
+ * center is aligned to the same T1 the same way; a right pair matches clearly better than its own mirror image, another
+ * person's T1 or a scan flipped left to right does not. Doubtful when cost / mirrored cost > MIRROR_DOUBT. Measured
+ * (scores, uncorrected b = 0 means): right pairs 0.585-0.883 (ds001226 22, ds005123 28, Martinos Prisma 1; also checked on scans made sessions apart),
+ * another person's T1 0.966-1.028 (63), the scan flipped 1.13-1.71 (63). Costs one more alignment.
+ */
+export const ALIGNMENT_CHECK: AlignmentCheckId = 1;
+export type AlignmentCheckId = 1 | 2;
+export const MIRROR_DOUBT = 0.93;
+
+/** The b = 0 mirrored left to right (world x) about its brain's center: only the grid's matrix changes. */
+export function mirroredLeftRight(g: Grid3, mask: Uint8Array): Grid3 {
+  const M = g.ijkToRAS.length === 16 ? [...g.ijkToRAS] : [...g.ijkToRAS.slice(0, 12), 0, 0, 0, 1], [nx, ny] = g.dims;
+  let cx = 0, k = 0;
+  for (let v = 0; v < mask.length; v++) if (mask[v]) { const i = v % nx, j = Math.floor(v / nx) % ny, z = Math.floor(v / (nx * ny)); cx += M[0] * i + M[1] * j + M[2] * z + M[3]; k++; }
+  cx /= Math.max(1, k);
+  const Mm = M.map((x, i) => (i < 4 ? -x : x)); Mm[3] += 2 * cx;     // x' = 2 cx - x
+  return { dims: g.dims, ijkToRAS: Mm, data: g.data };
+}
+
 /** A 3D image on a grid: x fastest, ijkToRAS row-major 4×4 (or 3×4). */
 export interface Grid3 { dims: [number, number, number]; ijkToRAS: number[]; data: ArrayLike<number> }
 
@@ -467,15 +490,18 @@ export async function alignToT1(dwi: DiffusionSeries, t1: Grid3, field?: { fit: 
   /** The rule (default REGISTRATION_RULE), and SynthStrip's brain on the T1: rule 2 starts from its center (without it,
    *  from the scanner's placement); rule 3 aligns to the T1 inside it, and without it is rule 2 -- said in the record and
    *  in `rule` (the import job refuses a case without the brain, so this is the module's path). */
-  opts: { rule?: RegistrationRuleId; brainT1?: Grid3 } = {}): Promise<{ dwi: DiffusionSeries; T: Rigid; result: RigidResult & { candidates?: Candidate[] }; said: string; doubt?: string; rule: RegistrationRuleId }> {
+  opts: { rule?: RegistrationRuleId; brainT1?: Grid3; /** ALIGNMENT_CHECK by default. */ check?: AlignmentCheckId } = {}): Promise<{ dwi: DiffusionSeries; T: Rigid; result: RigidResult & { candidates?: Candidate[] }; said: string; doubt?: string; rule: RegistrationRuleId; /** Check 2: cost / mirrored cost. */ mirrorRatio?: number }> {
   const t0 = performance.now(), src = dwi.volumes[0];
   let b0: Float32Array, mask: Uint8Array;
   if (motion) ({ b0, mask } = motion);
   else ({ b0, mask } = scanBrain(dwi, field));
   const asked = opts.rule ?? REGISTRATION_RULE, rule: RegistrationRuleId = asked === 3 && !opts.brainT1 ? 2 : asked;
   const moving: Grid3 = { dims: src.dims as [number, number, number], ijkToRAS: src.ijkToRAS, data: b0 };
-  const result = rule === 3 ? await rigidToT1Wide(moving, brainOnlyT1(t1, opts.brainT1!), mask, opts.brainT1)
-    : rule === 2 ? await rigidToT1Wide(moving, t1, mask, opts.brainT1) : await rigidToT1(moving, t1, mask);
+  const target = rule === 3 ? brainOnlyT1(t1, opts.brainT1!) : t1;
+  const result = rule === 1 ? await rigidToT1(moving, t1, mask) : await rigidToT1Wide(moving, target, mask, opts.brainT1);
+  // Check 2, the mirror test: the same alignment of the same b = 0 mirrored left to right.
+  const check = opts.check ?? ALIGNMENT_CHECK;
+  const mirrorRatio = rule !== 1 && check === 2 ? result.cost / (await rigidToT1Wide(mirroredLeftRight(moving, mask), target, mask, opts.brainT1)).cost : undefined;
   const t1Done = performance.now();
   if (times) times.register = t1Done - t0;
   const out = await resampleOntoT1(dwi, result.T, t1, field, { cover: mask, rule, ...(motion ? { motion: motion.moves } : {}) });
@@ -486,6 +512,7 @@ export async function alignToT1(dwi: DiffusionSeries, t1: Grid3, field?: { fit: 
   // the match improved does not separate -- same-session cases improve 2.7-30%, the failure 6%).
   const tooFar = rule === 1 && (sz.mm > DOUBTFUL.mm || sz.degrees > DOUBTFUL.degrees);
   const doubt = tooFar ? `it had to move ${sz.mm.toFixed(0)} mm and ${sz.degrees.toFixed(0)}°, more than within one visit`
+    : mirrorRatio !== undefined && mirrorRatio > MIRROR_DOUBT ? `the scan matches its own mirror image about as well (${mirrorRatio.toFixed(2)}): the MRI of the anatomy may be another person's, or one of the two is flipped left to right`
     : result.cost > result.costAtStart + 1e-4 ? "the match got worse" : undefined;     // equal: the scan was already in place (critic, finding 18)
-  return { dwi: out, T: result.T, result, rule, said: `aligned to the MRI of the anatomy (moved ${sz.mm.toFixed(1)} mm and ${sz.degrees.toFixed(1)}°${rule !== asked ? "; to the whole MRI: its brain was not available" : ""})`, ...(doubt ? { doubt } : {}) };
+  return { dwi: out, T: result.T, result, rule, ...(mirrorRatio !== undefined ? { mirrorRatio } : {}), said: `aligned to the MRI of the anatomy (moved ${sz.mm.toFixed(1)} mm and ${sz.degrees.toFixed(1)}°${rule !== asked ? "; to the whole MRI: its brain was not available" : ""})`, ...(doubt ? { doubt } : {}) };
 }

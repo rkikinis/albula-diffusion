@@ -17,7 +17,7 @@ import { DIRECTION_CHECK_RULE } from "./gradient-check.ts";
 import { wholeBrainTracts, PIPELINE_MAX_B } from "./pipeline.ts";
 import { DISTORTION_RULE } from "./distortion.ts";
 import { MOTION_RULE } from "./motion.ts";
-import { REGISTRATION_RULE, type RegistrationRuleId } from "./registration.ts";
+import { ALIGNMENT_CHECK, REGISTRATION_RULE, type RegistrationRuleId } from "./registration.ts";
 import { TRACKING_RULE } from "./tracking-rules.ts";
 import { OUTSIDE_RULE } from "./outside-brain.ts";
 import { recordedReversed, stageText, type StageTimes } from "./planning.ts";
@@ -53,7 +53,7 @@ const MAX_SERIES_FILES = 4000;
  * had.) A change in the core that changes the tracts is announced by raising the rule of the step it changes.
  */
 export function jobRules(versions: { code: string; labeler: string; synthstrip: string; headTemplate?: string }): Record<string, string | number> {
-  return { directions: DIRECTION_CHECK_RULE, distortion: DISTORTION_RULE, motion: MOTION_RULE, registration: REGISTRATION_RULE, tracking: TRACKING_RULE,
+  return { directions: DIRECTION_CHECK_RULE, distortion: DISTORTION_RULE, motion: MOTION_RULE, registration: REGISTRATION_RULE, alignmentCheck: ALIGNMENT_CHECK, tracking: TRACKING_RULE,
     outside: OUTSIDE_RULE.on ? OUTSIDE_RULE.id : 0, maxB: PIPELINE_MAX_B, tractColors: TRACT_COLORS_VERSION,
     headFrame: HEAD_FRAME_RULE, code: versions.code, labeler: versions.labeler, synthstrip: versions.synthstrip,
     ...(versions.headTemplate ? { headTemplate: versions.headTemplate } : {}) };
@@ -92,6 +92,8 @@ export function upgradeRules(stored: Record<string, unknown>, current: Record<st
     out.labeler = current.labeler;
     if (old[3] && out.headTemplate === undefined) out.headTemplate = old[3];
   }
+  // The alignment's check before it was recorded (2026-10-26): check 1, the only one there was.
+  if (out.alignmentCheck === undefined && current.alignmentCheck !== undefined) out.alignmentCheck = 1;
   return out;
 }
 /** The inputs a case was made from: a reversed scan or a T1 that arrives later makes the case stale (finding 11). */
@@ -473,6 +475,8 @@ export async function makeTracts(dbDir: string, dbId: string, server: string, pl
   const seconds = (performance.now() - t0) / 1000;
   const provenance = { rules, madeWith: madeWith(versions), inputs, made: new Date().toISOString(), seconds: +seconds.toFixed(1), stages: stageText(stages), ...(headFrame ? { headFrame } : {}),
     streamlines: r.sl.length, onePointLeftOut: r.sl.filter((p) => p.length < 6).length, corrected: r.corrected, alignedToT1: aligned,
+    // The alignment as made: the rule applied (3 falls back to 2 without a brain), its cost, the mirror test's ratio, the doubt.
+    ...(r.prep.alignment ? { alignment: { rule: r.prep.alignment.rule, cost: +(r.prep.alignment.cost ?? NaN).toFixed(4), ...(r.prep.alignment.mirrorRatio !== undefined ? { mirrorRatio: +r.prep.alignment.mirrorRatio.toFixed(3) } : {}), ...(r.prep.alignment.doubt ? { doubt: r.prep.alignment.doubt } : {}) } } : {}),
     trackingRuleApplied: r.rule.id, motionRuleApplied: r.prep.motionRule, ...(r.prep.directions ? { directions: { rule: r.prep.directions.rule, verdict: r.prep.directions.verdict, used: r.prep.directions.best.label, Q: r.prep.directions.best.Q, recordOverBest: r.prep.directions.recordOverBest } } : {}), ...(r.alignment ? { alignment: r.alignment } : {}), brain: r.fit.seedMaskRule ?? r.fit.maskRule };
   // Several objects can follow each other under one scan (remade after a change): numbered from 900 by their time -- one
   // above the highest stored, so a deleted older one never makes the newest share a number (critic 2026-10-06, R2-7).

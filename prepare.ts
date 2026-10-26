@@ -17,7 +17,7 @@ export interface Prepared {
   movementSaid?: string; alignmentSaid?: string;
   /** The move onto the T1, and a doubt (then not used: the scanner's placement stands); the rule that made it, and rule 2's
    *  candidates (where each started, its cost, how far from the chosen one). */
-  alignment?: { T: Rigid; doubt?: string; rule?: RegistrationRuleId; candidates?: Candidate[] };
+  alignment?: { T: Rigid; doubt?: string; rule?: RegistrationRuleId; candidates?: Candidate[]; cost?: number; mirrorRatio?: number };
   motion?: MotionResult;
   /** The head-movement rule actually applied (0 when it was off, or could not run: no b = 0, too few images). */
   motionRule: MotionRuleId;
@@ -77,7 +77,7 @@ export async function prepareScan(dwi: DiffusionSeries, opts: { field?: { fit: F
   if (!opts.t1) return { dwi: await inPlace(), said: said.join("; "), ...done };
   opts.say?.("Aligning the diffusion scan to the MRI of the anatomy…");
   const a = await alignToT1(dwi, opts.t1, field, opts.times, motion, { ...(opts.registrationRule ? { rule: opts.registrationRule } : {}), ...(opts.brainT1 ? { brainT1: opts.brainT1 } : {}) });
-  const alignment = { T: a.T, ...(a.doubt ? { doubt: a.doubt } : {}), rule: a.rule, ...(a.result.candidates ? { candidates: a.result.candidates } : {}) };
+  const alignment = { T: a.T, ...(a.doubt ? { doubt: a.doubt } : {}), rule: a.rule, ...(a.result.candidates ? { candidates: a.result.candidates } : {}), cost: a.result.cost, ...(a.mirrorRatio !== undefined ? { mirrorRatio: a.mirrorRatio } : {}) };
   // A DOUBTFUL ALIGNMENT IS NOT USED (until aligning by hand is built): the scanner's placement stands.
   if (a.doubt) {
     const alignmentSaid = `not aligned to the MRI of the anatomy: the automatic alignment looked wrong (${a.doubt}), so the scanner's placement is used`;
