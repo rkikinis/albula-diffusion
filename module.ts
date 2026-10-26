@@ -522,8 +522,20 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     // Head movement, the field and the alignment to the MRI of the anatomy in one resampling (prepare.ts, the case runs'
     // path too). A doubtful alignment is not used (until aligning by hand is built): the scanner's placement stands.
     const z = anatOk ? await fetchZarrVolumeNative(live.blobBase(), anatOk.zarr as ZarrDesc) : undefined;
+    // SYNTHSTRIP'S BRAIN BEFORE THE ALIGNMENT (critic 2026-10-25, registration rule 3, finding 3): rule 3 aligns to the T1
+    // inside it, as the import job does; asked once here and kept for the tracking (brainFor). Without it the alignment is
+    // rule 2 against the whole MRI, and the record says why.
+    const brainAsk = anatOk && z ? askBrain(anatOk.id) : undefined;
+    let brainT1: { dims: [number, number, number]; ijkToRAS: number[]; data: Uint8Array } | undefined;
+    if (brainAsk) {
+      waitingForBrain = true;
+      say(`Finding the brain on the MRI of the anatomy${brainLine ? `: ${brainLine}` : ""}…`);
+      const b = await brainAsk.finally(() => { waitingForBrain = false; });
+      if (b.ok) brainT1 = b.mask;
+    }
     const prep = await prepareScan(dwi, { ...(field.fit ? { field: { fit: field.fit, sign: field.sign ?? -1 } } : {}),
       ...(anatOk && z ? { t1: { dims: anatOk.dims as [number, number, number], ijkToRAS: anatOk.ijkToRAS as number[], data: z.data as ArrayLike<number> } } : {}),
+      ...(brainT1 ? { brainT1 } : {}),
       motionRule, ...(scan.phaseEncoding ? { phaseEncoding: scan.phaseEncoding } : {}), times, say,
       ...(directionsChecked.has(scan.browserId) ? { directions: directionsChecked.get(scan.browserId) } : {}) });
     if (prep.directions) directionsChecked.set(scan.browserId, prep.directions);
@@ -544,7 +556,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       : !anat ? { note: fromScan + "no MRI of the anatomy is loaded", reason: "no-anatomy" }
       : !anatOk ? { note: fromScan + "the MRI of the anatomy has a transform (Transforms module): harden or remove it", reason: "moved" }
       : !aligned ? { note: fromScan + "the scan could not be aligned to the MRI of the anatomy", reason: "doubt" }
-      : { note: "", ask: askBrain(anatOk.id) };
+      : { note: "", ask: brainAsk ?? askBrain(anatOk.id) };
     const c: Computed = { dwi, fit, maxB: adv.maxB, corrected, motionAsked: motionRule, motionRule: prep.motionRule, ...(prep.movementSaid ? { movement: prep.movementSaid } : {}), ...(prep.directionsSaid ? { directions: prep.directionsSaid } : {}), partnerId: partner?.id ?? "", anatomyId: anatOk?.id ?? "", rule: wantT1 ? 2 : TRACKING_RULE, brain };
     computed.set(scan.browserId, c);
     say(`Maps made from ${fit.used.length} volumes up to b = ${adv.maxB}${c.directions ? `; ${c.directions}` : ""}; distortion ${corrected}${c.movement ? `; ${c.movement}` : ""}. ${stageText(times)}.`);

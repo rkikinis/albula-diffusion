@@ -25,11 +25,11 @@ const yieldNow = () => new Promise<void>((r) => setTimeout(r, 0));
 /** The default rule. 1: from the scanner's placement, against the whole T1 (same session). 2: brain centers, the shift, 27
  *  starting tilts, and rule 1's path as a candidate (rigidToT1Wide), against the whole T1. 3: rule 2 against the T1 with
  *  only SynthStrip's brain kept (brainOnlyT1) -- THE DEFAULT since 2026-10-25 (Ron: "rule 2 sounds better", against the
- *  brain-only T1; the size limit dropped, "your recommendation"). The known-move test (96 known moves of 10-40 degrees and
- *  mm on two ds001226 and two HCP cases) found rule 1 32/96, rule 2 85/96, rule 3 96/96 (as FLIRT with a brain-extracted
- *  reference); on the 34 real scans rule 3 agrees with brain-only FLIRT (0.5-2.1 mm) and keeps the 22 same-session answers
- *  (0.06-0.28 mm); the tumor outlines lie inside SynthStrip's brain (22 of 25 lose at most 1%, and keeping them changes the
- *  answer by at most 0.02 mm). WORKING-STATE.md, 2026-10-25. */
+ *  brain-only T1). On the public ds001226 cases: PAT16 and PAT25 each moved by 24 known moves of 10-40 degrees and mm,
+ *  rule 3 finds all 48 within 0.27 mm of the trusted same-session answer (rule 1 against the whole T1: 23 of 48; FLIRT
+ *  with a brain-extracted reference 38 of 48 within 2 mm); on the 22 cases as acquired rule 3 keeps rule 1's answers
+ *  (0.06-0.28 mm); the tumor's place does not matter (the outlines added back to the kept region move it 0.00-0.03 mm).
+ *  Also checked on scans made sessions apart, where rule 1 fails. */
 export const REGISTRATION_RULE: RegistrationRuleId = 3;
 export type RegistrationRuleId = 1 | 2 | 3;
 
@@ -165,8 +165,8 @@ export interface Candidate {
 
 /**
  * RULE 2 (Ron, 2026-10-25: DIPY as the roadmap, with "yes" to building it): a large capture range before the fine stage,
- * for a T1 and a diffusion scan made in different sessions (HCP-Aging: 5-42 mm and 1-26 degrees apart; rule 1 settled 26
- * degrees off on HCA9640889). DIPY's order of steps (dipy/align/_public.py affine_registration: centers of mass, then
+ * for a T1 and a diffusion scan made in different sessions (tens of mm and degrees apart, where rule 1 can settle in a
+ * wrong place). DIPY's order of steps (dipy/align/_public.py affine_registration: centers of mass, then
  * translation alone, then rigid), with the brains' centers instead of the whole images' (a T1 with neck against a b = 0
  * of the brain moves the center of mass; mri_robust_register's page warns of it, and DIPY with one mask failed 10 of 12):
  *   1. the b = 0 brain's center onto the center of SynthStrip's brain on the T1 (skipped without it);
@@ -435,7 +435,7 @@ export function brainOnlyT1(t1: Grid3, brainT1: Grid3): Grid3 {
 }
 
 /** A move too large to be the same session's -- under rule 1 the alignment is then shown as doubtful (the person aligns by
- *  hand). Rules 2 and 3 do not use it (HCP-Aging's T1 and diffusion scans are 5-42 mm and 1-26 degrees apart). */
+ *  hand). Rules 2 and 3 do not use it (scans made sessions apart move further than that). */
 export const DOUBTFUL = { mm: 10, degrees: 10 };
 
 /** The b = 0 images' mean, the field applied to each, and the brain in it (median_otsu, grown by 2 voxels: the edge
@@ -487,5 +487,5 @@ export async function alignToT1(dwi: DiffusionSeries, t1: Grid3, field?: { fit: 
   const tooFar = rule === 1 && (sz.mm > DOUBTFUL.mm || sz.degrees > DOUBTFUL.degrees);
   const doubt = tooFar ? `it had to move ${sz.mm.toFixed(0)} mm and ${sz.degrees.toFixed(0)}°, more than within one visit`
     : result.cost > result.costAtStart + 1e-4 ? "the match got worse" : undefined;     // equal: the scan was already in place (critic, finding 18)
-  return { dwi: out, T: result.T, result, rule, said: `aligned to the MRI of the anatomy (moved ${sz.mm.toFixed(1)} mm and ${sz.degrees.toFixed(1)}°${rule !== asked ? "; to the whole MRI: no brain was found on it" : ""})`, ...(doubt ? { doubt } : {}) };
+  return { dwi: out, T: result.T, result, rule, said: `aligned to the MRI of the anatomy (moved ${sz.mm.toFixed(1)} mm and ${sz.degrees.toFixed(1)}°${rule !== asked ? "; to the whole MRI: its brain was not available" : ""})`, ...(doubt ? { doubt } : {}) };
 }

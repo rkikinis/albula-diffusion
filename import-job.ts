@@ -17,7 +17,7 @@ import { DIRECTION_CHECK_RULE } from "./gradient-check.ts";
 import { wholeBrainTracts, PIPELINE_MAX_B } from "./pipeline.ts";
 import { DISTORTION_RULE } from "./distortion.ts";
 import { MOTION_RULE } from "./motion.ts";
-import { REGISTRATION_RULE } from "./registration.ts";
+import { REGISTRATION_RULE, type RegistrationRuleId } from "./registration.ts";
 import { TRACKING_RULE } from "./tracking-rules.ts";
 import { OUTSIDE_RULE } from "./outside-brain.ts";
 import { recordedReversed, stageText, type StageTimes } from "./planning.ts";
@@ -521,7 +521,11 @@ export async function makeTracts(dbDir: string, dbId: string, server: string, pl
  * missing maps written beside the existing set. The tracts and their record stay as they are.
  */
 export async function makeMaps(dbDir: string, server: string, plan: { dwi: ReadSeries; partner?: ReadSeries; t1?: ReadSeries }, tractsUID: string, device: GPUDevice, model: TractTable,
-  labeler: RapidParcModel, onProgress?: (line: string) => void): Promise<CaseOutcome> {
+  labeler: RapidParcModel, onProgress?: (line: string) => void,
+  /** How the kept set was made: its registration rule and whether it was aligned to the T1 (critic 2026-10-25, registration
+   *  rule 3, finding 2). The maps are made under THAT rule, and are not written when they would not be aligned as the
+   *  tracts are: a map on another grid than its tracts is worse than none. */
+  made?: { registration: number; alignedToT1?: boolean }): Promise<CaseOutcome> {
   const exists = (p: string) => Deno.stat(`${dbDir}/${p}`).then(() => true, () => false);
   const missing = (await Promise.all(MAP_PATHS.map(async (p) => (await exists(p(tractsUID))) ? undefined : p))).filter((p): p is (typeof MAP_PATHS)[number] => !!p);
   if (!missing.length) return { state: "current", seriesUID: tractsUID };
@@ -537,7 +541,10 @@ export async function makeMaps(dbDir: string, server: string, plan: { dwi: ReadS
     ...(plan.partner ? { partner: { b0s: plan.partner.frames.filter((v) => Number(diffusionOf(v)?.bValue ?? 0) < 50).map((v) => v.data as ArrayLike<number>), grid: { dims: plan.partner.frames[0].dims, ijkToRAS: plan.partner.frames[0].ijkToRAS }, name: plan.partner.facts.description } } : {}),
     phaseEncoding: { scan: plan.dwi.facts.phaseEncoding, partner: plan.partner?.facts.phaseEncoding },
     t1: { dims: t1v.dims as [number, number, number], ijkToRAS: t1v.ijkToRAS, data: t1v.data as ArrayLike<number> },
-    brainT1: brain.mask }, device, model, { labeler, fitOnly: true });
+    brainT1: brain.mask }, device, model, { labeler, fitOnly: true, ...(made ? { registrationRule: made.registration as RegistrationRuleId } : {}) });
+  const alignedNow = !!r.alignment && !r.alignment.doubt;
+  if (made?.alignedToT1 !== undefined && alignedNow !== made.alignedToT1)
+    return { state: "failed", why: `the maps would ${alignedNow ? "" : "not "}be on the T1's axes, the kept tracts are ${made.alignedToT1 ? "" : "not "}(registration rule ${made.registration}); no maps written` };
   const has = (p: (u: string) => string) => missing.includes(p as (typeof MAP_PATHS)[number]);
   if (has(colorFaPath)) await writeColorFA(dbDir, tractsUID, r.fit);
   if (has(faPath)) await writeFA(dbDir, tractsUID, r.fit);

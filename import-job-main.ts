@@ -61,15 +61,21 @@ async function gitState(dir: string): Promise<string> {
  *  the highest series number -- the same rule the Diffusion module uses -- and only that one object read, for its inputs.
  *  The edges are read once per run. */
 let edgesOnce: Promise<{ child: string; parent: string; kind: string }[]> | undefined;
-async function newestStored(dbPath: string, rows: { seriesUID: string; seriesNumber: string }[], dwiUID: string): Promise<{ seriesUID: string; inputs?: { partner?: string | null; t1?: string | null } } | undefined> {
+async function newestStored(dbPath: string, rows: { seriesUID: string; seriesNumber: string }[], dwiUID: string): Promise<{ seriesUID: string; inputs?: { partner?: string | null; t1?: string | null }; made?: { registration: number; alignedToT1?: boolean } } | undefined> {
   edgesOnce ??= provenanceEdges(provenancePathFor(dbPath)).catch(() => []);
   const kids = new Set((await edgesOnce).filter((e) => e.kind === "tracts" && e.parent === dwiUID).map((e) => e.child));
   const top = rows.filter((r) => kids.has(r.seriesUID)).sort((a, b) => (Number(b.seriesNumber) || 0) - (Number(a.seriesNumber) || 0))[0];
   if (!top) return undefined;
   const file = (await seriesFilePaths(dbPath, top.seriesUID))[0];
-  let inputs: { partner?: string | null; t1?: string | null } | undefined;
-  try { const t = await dicomToTracts(await Deno.readFile(file)); inputs = (t.provenance?.inputs as typeof inputs) ?? undefined; } catch { /* unreadable: counts as missing inputs */ }
-  return { seriesUID: top.seriesUID, inputs };
+  let inputs: { partner?: string | null; t1?: string | null } | undefined, made: { registration: number; alignedToT1?: boolean } | undefined;
+  try {
+    const t = await dicomToTracts(await Deno.readFile(file)), p = t.provenance as { inputs?: typeof inputs; rules?: { registration?: number }; alignedToT1?: boolean } | undefined;
+    inputs = p?.inputs ?? undefined;
+    // How the set was aligned, for maps added beside it (critic 2026-10-25, registration rule 3, finding 2): its recorded
+    // registration rule (a record from before the rule was recorded: rule 1, the only one then) and whether it was aligned.
+    made = { registration: Number(p?.rules?.registration ?? 1), ...(typeof p?.alignedToT1 === "boolean" ? { alignedToT1: p.alignedToT1 } : {}) };
+  } catch { /* unreadable: counts as missing inputs */ }
+  return { seriesUID: top.seriesUID, inputs, ...(made ? { made } : {}) };
 }
 
 // THE PARENT (finding 10): when Albula's server goes, so does this run -- its result could not be stored anyway.
@@ -173,7 +179,7 @@ try {
       // THERE = the newest set, made from the inputs the database holds now (the reversed scan, the T1), with its maps
       // (MAP_PATHS) beside it. Its maps missing: they alone are added, no tracking (finding 5). Older inputs, or no set:
       // a new set is made beside the old, which stays.
-      let mapsFor: string | undefined;
+      let mapsFor: { uid: string; made?: { registration: number; alignedToT1?: boolean } } | undefined;
       if (args["only-missing"]) {
         const s = await newestStored(db.path, await (rowsOnce ??= indexSeries(db.path)), plan.dwi.facts.uid).catch(() => undefined);
         const sameInputs = !!s?.inputs && (s.inputs.partner ?? null) === (plan.partner?.facts.uid ?? null) && (s.inputs.t1 ?? null) === (plan.t1?.facts.uid ?? null);
@@ -185,7 +191,7 @@ try {
             await logCase(plan, { state: "kept", result: s.seriesUID, said: "made earlier from the same scans; kept" });
             continue;
           }
-          mapsFor = s.seriesUID;
+          mapsFor = { uid: s.seriesUID, ...(s.made ? { made: s.made } : {}) };
         }
         // NEVER REPLACED BY ONE MADE FROM LESS (critic 2026-10-22, reversed-scan regression, finding 7): the newest set was
         // made with a reversed scan or a T1 this run does not find. Making a new set without it would hide the loss behind
@@ -203,7 +209,7 @@ try {
         const m = await ready();
         const progress = (line: string) => say({ event: "progress", case: k, series: plan.dwi.facts.uid, said: line });
         const out = mapsFor && !args["dry-run"]
-          ? await makeMaps(db.path, server, plan, mapsFor, m.device, m.model, m.labeler, progress)
+          ? await makeMaps(db.path, server, plan, mapsFor.uid, m.device, m.model, m.labeler, progress, mapsFor.made)
           : await makeTracts(db.path, db.id, server, plan, m.device, m.model, m.labeler, m.versions, progress, { force: args.force, dryRun: args["dry-run"], template: m.template });
         if (out.state === "made") n.made++; else if (out.state === "would be made") n.wouldBeMade++; else if (out.state === "current") n.current++; else n[out.state]++;
         if (out.state === "failed") exitCode = 1;
