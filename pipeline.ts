@@ -46,7 +46,7 @@ export interface PipelineOptions {
   labeler: RapidParcModel | "tractcloud";
   /** distortion.ts DISTORTION_RULE; tracking-rules.ts TRACKING_RULE; motion.ts MOTION_RULE and its rounds. */
   distortionRule?: 1 | 2; trackingRule?: TrackingRuleId; motionRule?: MotionRuleId; motionRounds?: number;
-  /** registration.ts REGISTRATION_RULE (rule 2 uses SynthStrip's brain on the T1, `brainT1`, for its start). */
+  /** registration.ts REGISTRATION_RULE (rules 2 and 3 use SynthStrip's brain on the T1, `brainT1`: rule 2 for its start, rule 3 also as the T1 it aligns to). */
   registrationRule?: RegistrationRuleId;
   /** How the brain mask is made when not from the T1 (tensor.ts), and seeds anywhere in the head (false). */
   maskMethod?: "head" | "median-otsu"; seedMask?: boolean;

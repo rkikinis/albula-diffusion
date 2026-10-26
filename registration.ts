@@ -22,11 +22,16 @@ import { medianOtsuMask } from "./median-otsu.ts";
 /** Let the page answer (a long step in the app; nothing in Deno). */
 const yieldNow = () => new Promise<void>((r) => setTimeout(r, 0));
 
-/** The default rule. 1: from the scanner's placement (same session). 2: brain centers, the shift, 27 starting tilts, and rule
- *  1's path as a candidate (rigidToT1Wide; sessions apart). Rule 2 is built and under test (2026-10-25); the default
- *  changes on Ron's word. */
-export const REGISTRATION_RULE: RegistrationRuleId = 1;
-export type RegistrationRuleId = 1 | 2;
+/** The default rule. 1: from the scanner's placement, against the whole T1 (same session). 2: brain centers, the shift, 27
+ *  starting tilts, and rule 1's path as a candidate (rigidToT1Wide), against the whole T1. 3: rule 2 against the T1 with
+ *  only SynthStrip's brain kept (brainOnlyT1) -- THE DEFAULT since 2026-10-25 (Ron: "rule 2 sounds better", against the
+ *  brain-only T1; the size limit dropped, "your recommendation"). The known-move test (96 known moves of 10-40 degrees and
+ *  mm on two ds001226 and two HCP cases) found rule 1 32/96, rule 2 85/96, rule 3 96/96 (as FLIRT with a brain-extracted
+ *  reference); on the 34 real scans rule 3 agrees with brain-only FLIRT (0.5-2.1 mm) and keeps the 22 same-session answers
+ *  (0.06-0.28 mm); the tumor outlines lie inside SynthStrip's brain (22 of 25 lose at most 1%, and keeping them changes the
+ *  answer by at most 0.02 mm). WORKING-STATE.md, 2026-10-25. */
+export const REGISTRATION_RULE: RegistrationRuleId = 3;
+export type RegistrationRuleId = 1 | 2 | 3;
 
 /** A 3D image on a grid: x fastest, ijkToRAS row-major 4×4 (or 3×4). */
 export interface Grid3 { dims: [number, number, number]; ijkToRAS: number[]; data: ArrayLike<number> }
@@ -409,7 +414,28 @@ export async function resampleOntoT1(dwi: DiffusionSeries, T: Rigid, t1: Pick<Gr
   return { ...dwi, volumes, ijkToRAS: M, gradients, source: `${dwi.source}; onto the T1 (registration rule ${opts.rule ?? REGISTRATION_RULE})` };
 }
 
-/** A move too large to be the same session's -- the alignment is then shown as doubtful (the person aligns by hand). */
+/** Rule 3's target: the T1 with everything outside SynthStrip's brain set to zero (FSL asks for a brain-extracted reference
+ *  for FLIRT; the T1's scalp, skull and neck were what pulled rules 1 and 2 to wrong answers). The brain mask is read on
+ *  the T1's own grid, or by nearest voxel through world coordinates when its grid differs. */
+export function brainOnlyT1(t1: Grid3, brainT1: Grid3): Grid3 {
+  const [nx, ny, nz] = t1.dims, out = new Float32Array(nx * ny * nz), same = brainT1.dims.join() === t1.dims.join() && brainT1.ijkToRAS.slice(0, 12).every((v, i) => Math.abs(v - t1.ijkToRAS[i]) < 1e-3);
+  const M = t1.ijkToRAS, Bi = inv4(brainT1.ijkToRAS), [bx, by, bz] = brainT1.dims;
+  for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+    const v = (k * ny + j) * nx + i;
+    let inside: boolean;
+    if (same) inside = Number(brainT1.data[v]) > 0.5;
+    else {
+      const w = [0, 1, 2].map((r) => M[4 * r] * i + M[4 * r + 1] * j + M[4 * r + 2] * k + M[4 * r + 3]);
+      const I = Math.round(Bi[0] * w[0] + Bi[1] * w[1] + Bi[2] * w[2] + Bi[3]), J = Math.round(Bi[4] * w[0] + Bi[5] * w[1] + Bi[6] * w[2] + Bi[7]), K = Math.round(Bi[8] * w[0] + Bi[9] * w[1] + Bi[10] * w[2] + Bi[11]);
+      inside = I >= 0 && J >= 0 && K >= 0 && I < bx && J < by && K < bz && Number(brainT1.data[(K * by + J) * bx + I]) > 0.5;
+    }
+    if (inside) out[v] = Number(t1.data[v]);
+  }
+  return { dims: t1.dims, ijkToRAS: t1.ijkToRAS, data: out };
+}
+
+/** A move too large to be the same session's -- under rule 1 the alignment is then shown as doubtful (the person aligns by
+ *  hand). Rules 2 and 3 do not use it (HCP-Aging's T1 and diffusion scans are 5-42 mm and 1-26 degrees apart). */
 export const DOUBTFUL = { mm: 10, degrees: 10 };
 
 /** The b = 0 images' mean, the field applied to each, and the brain in it (median_otsu, grown by 2 voxels: the edge
@@ -438,25 +464,28 @@ export function scanBrain(dwi: DiffusionSeries, field?: { fit: FieldFit; sign: 1
 export async function alignToT1(dwi: DiffusionSeries, t1: Grid3, field?: { fit: FieldFit; sign: 1 | -1 }, times?: { register?: number; resample?: number },
   /** Head movement (motion.ts): each volume's move, and the b = 0 mean and brain it made (corrected for the field and the movement). */
   motion?: { moves: Rigid[]; b0: Float32Array; mask: Uint8Array },
-  /** The rule (default REGISTRATION_RULE), and for rule 2 SynthStrip's brain on the T1 (its center; without it rule 2 starts
-   *  its search from the scanner's placement). */
+  /** The rule (default REGISTRATION_RULE), and SynthStrip's brain on the T1: rule 2 starts from its center (without it,
+   *  from the scanner's placement); rule 3 aligns to the T1 inside it, and without it is rule 2 -- said in the record and
+   *  in `rule` (the import job refuses a case without the brain, so this is the module's path). */
   opts: { rule?: RegistrationRuleId; brainT1?: Grid3 } = {}): Promise<{ dwi: DiffusionSeries; T: Rigid; result: RigidResult & { candidates?: Candidate[] }; said: string; doubt?: string; rule: RegistrationRuleId }> {
   const t0 = performance.now(), src = dwi.volumes[0];
   let b0: Float32Array, mask: Uint8Array;
   if (motion) ({ b0, mask } = motion);
   else ({ b0, mask } = scanBrain(dwi, field));
-  const rule = opts.rule ?? REGISTRATION_RULE, moving: Grid3 = { dims: src.dims as [number, number, number], ijkToRAS: src.ijkToRAS, data: b0 };
-  const result = rule === 2 ? await rigidToT1Wide(moving, t1, mask, opts.brainT1) : await rigidToT1(moving, t1, mask);
+  const asked = opts.rule ?? REGISTRATION_RULE, rule: RegistrationRuleId = asked === 3 && !opts.brainT1 ? 2 : asked;
+  const moving: Grid3 = { dims: src.dims as [number, number, number], ijkToRAS: src.ijkToRAS, data: b0 };
+  const result = rule === 3 ? await rigidToT1Wide(moving, brainOnlyT1(t1, opts.brainT1!), mask, opts.brainT1)
+    : rule === 2 ? await rigidToT1Wide(moving, t1, mask, opts.brainT1) : await rigidToT1(moving, t1, mask);
   const t1Done = performance.now();
   if (times) times.register = t1Done - t0;
   const out = await resampleOntoT1(dwi, result.T, t1, field, { cover: mask, rule, ...(motion ? { motion: motion.moves } : {}) });
   if (times) times.resample = performance.now() - t1Done;
   const sz = rigidSize(result.T);
-  // Rule 1: a move larger than one session's is doubtful. Rule 2 is made for scans sessions apart, so the size says
-  // nothing; its doubt is PROVISIONAL (only "worse") until Ron chooses one from the measurements (2026-10-25: how much the
-  // match improved does not separate -- same-session cases improve 2.7-30%, the failure 6%).
+  // Rule 1: a move larger than one session's is doubtful. Rules 2 and 3 are made for scans sessions apart, so the size says
+  // nothing; their doubt is "the match got worse" (Ron, 2026-10-25: the size limit dropped, "your recommendation"; how much
+  // the match improved does not separate -- same-session cases improve 2.7-30%, the failure 6%).
   const tooFar = rule === 1 && (sz.mm > DOUBTFUL.mm || sz.degrees > DOUBTFUL.degrees);
   const doubt = tooFar ? `it had to move ${sz.mm.toFixed(0)} mm and ${sz.degrees.toFixed(0)}°, more than within one visit`
     : result.cost > result.costAtStart + 1e-4 ? "the match got worse" : undefined;     // equal: the scan was already in place (critic, finding 18)
-  return { dwi: out, T: result.T, result, rule, said: `aligned to the MRI of the anatomy (moved ${sz.mm.toFixed(1)} mm and ${sz.degrees.toFixed(1)}°)`, ...(doubt ? { doubt } : {}) };
+  return { dwi: out, T: result.T, result, rule, said: `aligned to the MRI of the anatomy (moved ${sz.mm.toFixed(1)} mm and ${sz.degrees.toFixed(1)}°${rule !== asked ? "; to the whole MRI: no brain was found on it" : ""})`, ...(doubt ? { doubt } : {}) };
 }
