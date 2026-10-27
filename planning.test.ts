@@ -118,3 +118,16 @@ Deno.test("phase-encoding records are compared as directions in the patient, thr
   const sameLabelOtherLine = await correctWithReversed(dwi, [data], "PA", undefined, { partnerGrid: { dims, ijkToRAS: T }, phaseEncoding: { scan: "COL", partner: "COL" } });
   assert(sameLabelOtherLine.includes("not a reversed pair"), sameLabelOtherLine);
 });
+
+// A REVERSED SCAN THE CALLER CHOSE, REFUSED, STOPS THE RUN BEFORE ANY TRACKING (Ron, 2026-10-27: a run given the Prisma
+// scan's dMRI_dir99_PA -- recorded as the same direction -- tracked for seven minutes and stored two uncorrected sets).
+Deno.test("a given reversed scan that is refused stops the pipeline right after the distortion step", async () => {
+  const { wholeBrainTracts } = await import("./pipeline.ts");
+  const dims: [number, number, number] = [4, 4, 2], data = new Float32Array(32).fill(100), M = [2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 1];
+  const dwi = { volumes: [{ dims, ijkToRAS: M, data, dtype: "<f4" }], bValues: [0], gradients: [[0, 0, 0]], ijkToRAS: M, source: "test", convention: 1 } as unknown as DiffusionSeries;
+  const input = { dwi, partner: { b0s: [data], grid: { dims, ijkToRAS: M }, name: "the reversed scan" }, phaseEncoding: { scan: "j", partner: "j" } };
+  // No graphics card and no naming table are needed: the stop comes first, and touching either would fail the test.
+  const err = await wholeBrainTracts(input as never, undefined as unknown as GPUDevice, undefined as unknown as TractTable, { labeler: "tractcloud", stopWithoutField: true }).then(() => undefined, (e) => e as Error & { noField?: boolean });
+  assert(err?.noField, "stopped with the no-field error");
+  assert(/same direction/.test(err!.message), `said why: ${err!.message}`);
+});

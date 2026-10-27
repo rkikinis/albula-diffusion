@@ -415,7 +415,11 @@ export function trackSets(sl: Float32Array[], tract: Int32Array, side: Int8Array
  * by the same code, rules and inputs are already stored.
  */
 export async function makeTracts(dbDir: string, dbId: string, server: string, plan: { dwi: ReadSeries; partner?: ReadSeries; t1?: ReadSeries }, device: GPUDevice, model: TractTable,
-  labeler: RapidParcModel, versions: { code: string; labeler: string; synthstrip: string; headTemplate?: string; core?: string; extension?: string }, onProgress?: (line: string) => void, opts: { force?: boolean; dryRun?: boolean; template?: { t1: Grid3; brain: Uint8Array } } = {}): Promise<CaseOutcome> {
+  labeler: RapidParcModel, versions: { code: string; labeler: string; synthstrip: string; headTemplate?: string; core?: string; extension?: string }, onProgress?: (line: string) => void, opts: { force?: boolean; dryRun?: boolean;
+    /** The reversed scan was chosen by the caller, not by partnerOf: when it is refused (its record says it is not a reversed
+     *  pair, or no field could be made) nothing is stored and the case ends "cannot", said (Ron, 2026-10-27: a run given
+     *  dMRI_dir99_PA, which is not reversed, stored two sets without distortion correction and said so only inside them). */
+    requirePartner?: boolean; template?: { t1: Grid3; brain: Uint8Array } } = {}): Promise<CaseOutcome> {
   let rules = jobRules(versions);
   const inputs: CaseInputs = { diffusion: plan.dwi.facts.uid, partner: plan.partner?.facts.uid ?? null, t1: plan.t1?.facts.uid ?? null };
   const stored = await storedTracts(dbDir, plan.dwi.facts.uid);
@@ -444,11 +448,16 @@ export async function makeTracts(dbDir: string, dbId: string, server: string, pl
   const dwi = fromDicomVolumes(plan.dwi.frames, plan.dwi.facts.description);
   const t1v = plan.t1.frames[0], stages: StageTimes = { brain: brainMs };
   onProgress?.("correcting, aligning and tracking the whole brain");
-  const r = await wholeBrainTracts({ dwi,
+  let r: Awaited<ReturnType<typeof wholeBrainTracts>>;
+  try { r = await wholeBrainTracts({ dwi,
     ...(plan.partner ? { partner: { b0s: plan.partner.frames.filter((v) => Number(diffusionOf(v)?.bValue ?? 0) < 50).map((v) => v.data as ArrayLike<number>), grid: { dims: plan.partner.frames[0].dims, ijkToRAS: plan.partner.frames[0].ijkToRAS }, name: "the reversed scan" } } : {}),
     phaseEncoding: { scan: plan.dwi.facts.phaseEncoding, partner: plan.partner?.facts.phaseEncoding },
     t1: { dims: t1v.dims as [number, number, number], ijkToRAS: t1v.ijkToRAS, data: t1v.data as ArrayLike<number> },
-    brainT1: brain.mask }, device, model, { labeler }, stages);
+    brainT1: brain.mask }, device, model, { labeler, ...(opts.requirePartner ? { stopWithoutField: true } : {}) }, stages); }
+  catch (e) {
+    if ((e as { noField?: boolean }).noField) return { state: "cannot", why: `the reversed scan ${plan.partner!.facts.description} was given but not used, so nothing was made: ${(e as Error).message}` };
+    throw e;
+  }
   const sets = trackSets(r.sl, r.named.tract, r.named.side, r.outside, model.json.tracts);
   const named = sets.filter((s) => s.label !== UNNAMED).reduce((n, s) => n + s.streamlines.length, 0);
   // On the T1's axes when aligned: the streamlines are in the T1's space, so the T1's frame of reference.

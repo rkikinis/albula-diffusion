@@ -57,6 +57,9 @@ export interface PipelineOptions {
   /** The card tracker's options (checking variants); the naming draw's seed. */
   ukf?: Record<string, unknown>; nameSeed?: number;
   pttWorkerUrl?: URL; csdWorkerUrl?: URL;
+  /** Stop with an error right after the distortion step when a reversed scan was given and no field came of it (the
+   *  caller chose the reversed scan: import-job.ts requirePartner). The error's message is `corrected`. */
+  stopWithoutField?: boolean;
   /** Stop after the tensor fit: the corrected, aligned scan and its fit, no tracking or naming (`sl` empty) -- the maps
    *  of a case whose tracts are kept, made without tracking it again (critic 2026-10-14, import-time jobs, finding 5). */
   fitOnly?: boolean;
@@ -70,6 +73,9 @@ export interface PipelineResult {
   outside: Uint8Array;
   /** What was done, in words: the distortion, the movement, the alignment. */
   corrected: string;
+  /** Whether a distortion field from the reversed scan was applied (false: none given, or the one given was refused --
+   *  `corrected` says why). A caller that handed over its reversed scan stops on false (import-job.ts requirePartner). */
+  distortionCorrected: boolean;
   alignment?: { T: Rigid; doubt?: string };
   /** prepare.ts's result: the movement rule applied and what it found. */
   prep: Prepared;
@@ -90,6 +96,7 @@ export async function wholeBrainTracts(input: PipelineInput, device: GPUDevice, 
       { partnerGrid: { dims: input.partner.grid.dims, ijkToRAS: input.partner.grid.ijkToRAS }, times: stages, rule: opts.distortionRule, apply: false, field,
         ...(input.phaseEncoding ? { phaseEncoding: input.phaseEncoding } : {}) })
     : "not corrected (no reversed phase-encoding scan)";
+  if (opts.stopWithoutField && input.partner && !field.fit) throw Object.assign(new Error(corrected), { noField: true });
   // Head movement, the field and the T1 in one resampling.
   const prep = await prepareScan(dwi, { ...(field.fit ? { field: { fit: field.fit, sign: field.sign ?? -1 } } : {}),
     ...(input.t1 ? { t1: input.t1 } : {}),
@@ -111,7 +118,7 @@ export async function wholeBrainTracts(input: PipelineInput, device: GPUDevice, 
   stages.fit = t1 - tFit;
   if (opts.fitOnly) {
     const none: Named = { tract: new Int32Array(0), side: new Int8Array(0), draws: 0, seconds: 0 };
-    return { dwi, fit, sl: [], named: none, outside: new Uint8Array(0), corrected, ...(alignment ? { alignment } : {}), prep, rule, ...(outsideGridMl !== undefined ? { outsideGridMl } : {}), csdSeconds: 0 };
+    return { dwi, fit, sl: [], named: none, outside: new Uint8Array(0), corrected, distortionCorrected: !!field.fit, ...(alignment ? { alignment } : {}), prep, rule, ...(outsideGridMl !== undefined ? { outsideGridMl } : {}), csdSeconds: 0 };
   }
   const detail: TrackTiming = { prepare: 0, gpu: 0, assemble: 0, between: 0 };
   let shell: number | undefined, sl: Float32Array[], csdSeconds = 0;
@@ -138,5 +145,5 @@ export async function wholeBrainTracts(input: PipelineInput, device: GPUDevice, 
   stages.name = named.seconds * 1000;
   // Streamlines that cross the fluid at the brain's edge would keep no tract's name (outside-brain.ts; off: OUTSIDE_RULE.on).
   const outside = OUTSIDE_RULE.on ? outsideBrain(sl, fit, edgeFluid(fit)) : new Uint8Array(sl.length);
-  return { dwi, fit, sl, named, outside, corrected, ...(alignment ? { alignment } : {}), prep, rule, ...(shell !== undefined ? { shell } : {}), ...(outsideGridMl !== undefined ? { outsideGridMl } : {}), csdSeconds };
+  return { dwi, fit, sl, named, outside, corrected, distortionCorrected: !!field.fit, ...(alignment ? { alignment } : {}), prep, rule, ...(shell !== undefined ? { shell } : {}), ...(outsideGridMl !== undefined ? { outsideGridMl } : {}), csdSeconds };
 }
