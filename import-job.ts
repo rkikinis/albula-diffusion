@@ -22,11 +22,11 @@ import { TRACKING_RULE } from "./tracking-rules.ts";
 import { OUTSIDE_RULE } from "./outside-brain.ts";
 import { recordedReversed, stageText, type StageTimes } from "./planning.ts";
 import { colorFA, type TensorFit } from "./tensor.ts";
-import { SHORT } from "./naming/name-tracts.ts";
+import { MIN_LENGTH_MM, NAME_SEED, SHORT } from "./naming/name-tracts.ts";
 import { tractColor, TRACT_COLORS_VERSION } from "./naming/tract-colors.ts";
 import type { TractTable } from "./naming/table.ts";
 import CODE_EQUIVALENCES from "./code-equivalences.json" with { type: "json" };
-import type { RapidParcModel } from "./rapidparc/rapidparc.ts";
+import { CONTEXT as RAPIDPARC_CONTEXT, POINTS as RAPIDPARC_POINTS, type RapidParcModel } from "./rapidparc/rapidparc.ts";
 import { adPath, b0Path, colorFaBrainstemPath, colorFaPath, colorFaTalairachPath, dicomToTracts, faPath, mdPath, rdPath, tractsToDicom, UNNAMED, type TractSetData } from "./tracts-dicom.ts";
 import { alignTemplate, frames, HEAD_FRAME_RULE, TALAIRACH_RISE_DEG, type M4 } from "./head-frame.ts";
 import type { Grid3 } from "./registration.ts";
@@ -125,6 +125,32 @@ export interface SeriesFacts {
 export const isDiffusionScan = (f: SeriesFacts) => f.volumes >= 7 && f.directions >= 6;
 const isB0Only = (f: SeriesFacts) => f.bValues.length >= 1 && f.bValues.every((b) => Number.isFinite(b) && b < 50);
 const hasB0 = (f: SeriesFacts) => f.bValues.some((b) => Number.isFinite(b) && b < 50);
+
+// WHY EACH INPUT WAS TAKEN, for the tract set's record (Ron, 2026-10-27, item 3 of the facts proposal: "we are not doing
+// well in the facts only and in the consistency domain"; that morning the reversed scan of the Prisma scan was called a
+// wrong choice although partnerOf had chosen right, and the reason was written nowhere).
+/** The reason partnerOf took `p` for `dwi`, in partnerOf's own order of preference. */
+export function partnerReason(dwi: SeriesFacts, p: SeriesFacts): string {
+  const rev = recordedReversed(dwi.phaseEncoding, p.phaseEncoding);
+  if (rev === true && p.volumes === dwi.volumes) return "a full-length scan the scanner recorded with the opposite phase encoding";
+  if (rev === true) return "the scanner recorded it with the opposite phase encoding";
+  if (isB0Only(p)) return "b = 0 images placed like the scan; the scanner did not record the phase-encoding direction";
+  return "placed like the scan; the scanner did not record the phase-encoding direction";
+}
+/** The reason anatomyOf took `t1` for `dwi`. */
+export function anatomyReason(dwi: SeriesFacts, t1: SeriesFacts): string {
+  return t1.studyUID === dwi.studyUID ? "named as a T1, in the same study" : "named as a T1, in another study of the same patient";
+}
+/** The shells of a scan: b-values grouped within 50 of each other, with their volume counts (b = 0 as 0). */
+export function shellsOf(bValues: number[]): { b: number; volumes: number }[] {
+  const out: { b: number; volumes: number }[] = [];
+  for (const raw of bValues) {
+    if (!Number.isFinite(raw)) continue;
+    const b = raw < 50 ? 0 : raw, s = out.find((x) => Math.abs(x.b - b) < 50);
+    if (s) s.volumes++; else out.push({ b: Math.round(b), volumes: 1 });
+  }
+  return out.sort((x, y) => x.b - y.b);
+}
 /** Placed as the scan is: origin within 30 mm, each axis within 15° (module.ts partnerFor). */
 export function samePlacement(A: number[], B: number[]): boolean {
   if (Math.hypot(A[3] - B[3], A[7] - B[7], A[11] - B[11]) > 30) return false;
@@ -414,7 +440,7 @@ export function trackSets(sl: Float32Array[], tract: Int32Array, side: Int8Array
  * ONE CASE: the pipeline on the planned scan, its tracts written and indexed through the server -- unless tracts made
  * by the same code, rules and inputs are already stored.
  */
-export async function makeTracts(dbDir: string, dbId: string, server: string, plan: { dwi: ReadSeries; partner?: ReadSeries; t1?: ReadSeries }, device: GPUDevice, model: TractTable,
+export async function makeTracts(dbDir: string, dbId: string, server: string, plan: { dwi: ReadSeries; partner?: ReadSeries; t1?: ReadSeries; partnerRefusals?: { uid: string; description: string; why: string }[] }, device: GPUDevice, model: TractTable,
   labeler: RapidParcModel, versions: { code: string; labeler: string; synthstrip: string; headTemplate?: string; core?: string; extension?: string }, onProgress?: (line: string) => void, opts: { force?: boolean; dryRun?: boolean;
     /** The reversed scan was chosen by the caller, not by partnerOf: when it is refused (its record says it is not a reversed
      *  pair, or no field could be made) nothing is stored and the case ends "cannot", said (Ron, 2026-10-27: a run given
@@ -484,6 +510,18 @@ export async function makeTracts(dbDir: string, dbId: string, server: string, pl
   const seconds = (performance.now() - t0) / 1000;
   const provenance = { rules, madeWith: madeWith(versions), inputs, made: new Date().toISOString(), seconds: +seconds.toFixed(1), stages: stageText(stages), ...(headFrame ? { headFrame } : {}),
     streamlines: r.sl.length, onePointLeftOut: r.sl.filter((p) => p.length < 6).length, corrected: r.corrected, alignedToT1: aligned,
+    // WHY THESE INPUTS, WHAT OF THE SCANNER'S RECORD WAS RELIED ON, AND THE NAMER'S OWN SETTINGS (item 3, 2026-10-27).
+    choices: {
+      partner: plan.partner ? { uid: plan.partner.facts.uid, description: plan.partner.facts.description, why: opts.requirePartner ? "given by the caller" : partnerReason(plan.dwi.facts, plan.partner.facts) } : null,
+      partnerRefused: plan.partnerRefusals ?? [],
+      t1: { uid: plan.t1.facts.uid, description: plan.t1.facts.description, why: anatomyReason(plan.dwi.facts, plan.t1.facts) },
+    },
+    scannerFacts: {
+      phaseEncoding: { scan: plan.dwi.facts.phaseEncoding ?? null, partner: plan.partner?.facts.phaseEncoding ?? null },
+      shells: shellsOf(plan.dwi.facts.bValues), shellTracked: r.shell ?? null, tensorMaxB: PIPELINE_MAX_B,
+      distortionCorrected: r.distortionCorrected,
+    },
+    namer: { network: "RapidParc", points: RAPIDPARC_POINTS, context: RAPIDPARC_CONTEXT, minLengthMm: MIN_LENGTH_MM, draws: r.named.draws, seed: NAME_SEED },
     trackingRuleApplied: r.rule.id, motionRuleApplied: r.prep.motionRule, ...(r.prep.directions ? { directions: { rule: r.prep.directions.rule, verdict: r.prep.directions.verdict, used: r.prep.directions.best.label, Q: r.prep.directions.best.Q, recordOverBest: r.prep.directions.recordOverBest } } : {}), ...(r.alignment ? { alignment: r.alignment } : {}) /* the move, the rule applied, its cost, the mirror test's ratio, the doubt */, brain: r.fit.seedMaskRule ?? r.fit.maskRule };
   // Several objects can follow each other under one scan (remade after a change): numbered from 900 by their time -- one
   // above the highest stored, so a deleted older one never makes the newest share a number (critic 2026-10-06, R2-7).

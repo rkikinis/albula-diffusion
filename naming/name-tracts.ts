@@ -12,6 +12,8 @@ import { CONTEXT, groupRows, normalizeCube, resampleByIndex, shuffle, type Rapid
 import { rapidParcGpu } from "../rapidparc/rapidparc-gpu.ts";
 
 export const MIN_LENGTH_MM = 40;
+/** The seed of the naming's random draws when none is given (the same streamlines always get the same names). */
+export const NAME_SEED = 20260930;
 /** A streamline's tract: an index into model.json.tracts, or SHORT. */
 export const SHORT = -1;
 
@@ -48,7 +50,7 @@ export async function nameTracts(device: GPUDevice, model: TractTable, streamlin
 export async function nameAgainst(device: GPUDevice, model: TractTable, context: Float32Array[], added: Float32Array[], opts: NameOptions = {}): Promise<{ context: Named; added: Named }> {
   const tc = opts.rapidParc ? undefined : opts.tractCloud ?? (isTractCloud(model) ? model : undefined);
   if (!opts.rapidParc && !tc) throw new Error("no tract-naming network was given (RapidParc, or TractCloud for a validation run)");
-  const t0 = performance.now(), draws = opts.draws ?? 1, seed = opts.seed ?? 20260930;
+  const t0 = performance.now(), draws = opts.draws ?? 1, seed = opts.seed ?? NAME_SEED;
   const kept = (set: Float32Array[]) => set.map((s, i) => [s, i] as const).filter(([s]) => lengthOf(s) >= MIN_LENGTH_MM);
   const keepC = kept(context), keepA = kept(added), Nc = keepC.length;
   const out = (n: number): Named => ({ tract: new Int32Array(n).fill(SHORT), side: new Int8Array(n), draws, seconds: 0, margin: new Float32Array(n).fill(NaN) });
