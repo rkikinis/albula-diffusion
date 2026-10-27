@@ -29,6 +29,7 @@ import CODE_EQUIVALENCES from "./code-equivalences.json" with { type: "json" };
 import { CONTEXT as RAPIDPARC_CONTEXT, POINTS as RAPIDPARC_POINTS, type RapidParcModel } from "./rapidparc/rapidparc.ts";
 import { adPath, b0Path, colorFaBrainstemPath, colorFaPath, colorFaTalairachPath, dicomToTracts, faPath, mdPath, rdPath, tractsToDicom, UNNAMED, type TractSetData } from "./tracts-dicom.ts";
 import { alignTemplate, frames, HEAD_FRAME_RULE, TALAIRACH_RISE_DEG, type M4 } from "./head-frame.ts";
+import { describeTractSet, DISPLAY_KEYS } from "./tract-set-description.ts";
 import type { Grid3 } from "./registration.ts";
 
 /** The description every stored tracts object carries: how the job finds its own objects in the index. */
@@ -141,6 +142,23 @@ export function partnerReason(dwi: SeriesFacts, p: SeriesFacts): string {
 export function anatomyReason(dwi: SeriesFacts, t1: SeriesFacts): string {
   return t1.studyUID === dwi.studyUID ? "named as a T1, in the same study" : "named as a T1, in another study of the same patient";
 }
+/** The motor pathway's (corticospinal tract's) streamline counts in a set's groups, left and right. */
+export function motorCounts(sets: { label: string; side: number; streamlines: unknown[] }[]): { left: number; right: number } | undefined {
+  const c = sets.filter((s) => /cortico-?spinal/i.test(s.label));
+  if (!c.length) return undefined;
+  return { left: c.filter((s) => s.side === -1).reduce((n, s) => n + s.streamlines.length, 0), right: c.filter((s) => s.side === 1).reduce((n, s) => n + s.streamlines.length, 0) };
+}
+/** A tract set's title, line and tooltip written as its series attributes (the DICOM browser shows them). */
+export async function writeDescription(server: string, dbId: string, uid: string, record: Record<string, unknown>, sets: { label: string; side: number; streamlines: unknown[] }[]): Promise<void> {
+  const d = describeTractSet(record, motorCounts(sets));
+  for (const [k, key] of Object.entries(DISPLAY_KEYS) as [keyof typeof d, string][]) {
+    const r = await fetch(`${server.replace(/\/+$/, "")}/_db/${encodeURIComponent(dbId)}/_attribute`, { method: "PUT", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ uid, key, value: d[k], source: "albula-diffusion" }) });
+    await r.body?.cancel();
+    if (!r.ok) throw new Error(`the attribute ${key} was not stored (${r.status})`);
+  }
+}
+
 /** The shells of a scan: b-values grouped within 50 of each other, with their volume counts (b = 0 as 0). */
 export function shellsOf(bValues: number[]): { b: number; volumes: number }[] {
   const out: { b: number; volumes: number }[] = [];
@@ -545,6 +563,9 @@ export async function makeTracts(dbDir: string, dbId: string, server: string, pl
   const res = await fetch(`${server.replace(/\/+$/, "")}/_db/${encodeURIComponent(dbId)}/_write/${encodeURIComponent(`tracts-${written.seriesInstanceUID}.dcm`)}`,
     { method: "POST", body: written.bytes as unknown as BodyInit, headers: { "content-type": "application/dicom", "x-albula-index": encodeURIComponent(JSON.stringify(meta)) } });
   if (!res.ok) return { state: "failed", why: `the server did not store the tracts (${res.status})` };
+  // WHAT THE SET IS, FOR THE DICOM BROWSER (tract-set-description.ts; Ron, 2026-10-27): its title, a line with the method
+  // and the motor pathway's counts, and a tooltip, as the series' attributes. A failure here costs only the wording.
+  await writeDescription(server, dbId, written.seriesInstanceUID, provenance, sets).catch(() => {});
   // THE DIRECTION-COLORED MAP BESIDE THEM (the tract review, Contents/docs/TRACT-REVIEW.md, Ron's "1 a"): on the grid the
   // tracts are on, after every correction, so a viewer needs no fit. A display aid, regenerable from the scan: the
   // database's cache folder, named by the tracts' series. Its failure does not undo the tracts.
