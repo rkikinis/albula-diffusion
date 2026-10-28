@@ -51,6 +51,9 @@ export const rdPath = (tractsSeriesUID: string) => `SlicerAlbula-Cache/rd-${trac
 /** The b = 0 image beside them (Ron, 2026-10-06: "substantia nigra should be visible on the B0 images, which are heavily
  *  T2 weighted"), on the same grid -- the fit's S0, after every correction. */
 export const b0Path = (tractsSeriesUID: string) => `SlicerAlbula-Cache/b0-${tractsSeriesUID}.nrrd`;
+/** What the import did to the scan before tracking -- its distortion field, the per-image movements, the direction check --
+ *  so the module reads them instead of doing them again in the window (prepared.ts; SPEED-2026-10-28.md, A5). */
+export const preparedPath = (tractsSeriesUID: string) => `SlicerAlbula-Cache/prepared-${tractsSeriesUID}.json`;
 /** The Track Set holding the streamlines no tract name fits (Ron, 2026-10-01). */
 export const UNNAMED = "Unnamed";
 

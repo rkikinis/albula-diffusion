@@ -41,7 +41,10 @@ export function recordDiff(a: Record<string, unknown>, b: Record<string, unknown
     const va = fa.get(path), vb = fb.get(path);
     if (JSON.stringify(va) === JSON.stringify(vb)) continue;
     const top = path.split(/[.[]/)[0];
-    out.push({ group: GROUP_OF.get(top) ?? "other", path, a: va, b: vb });
+    // A head frame's own time, and that it was taken from an earlier scan of the same T1, are times, not corrections
+    // (the critic, 2026-10-28, speed part A, finding 7).
+    const timeInside = path === "headFrame.seconds" || path === "headFrame.takenFrom" || path === "secondOpinion.ms";
+    out.push({ group: timeInside ? "times" : GROUP_OF.get(top) ?? "other", path, a: va, b: vb });
   }
   const order = [...Object.keys(RECORD_GROUPS).filter((g) => g !== "times"), "other", "times"];
   return out.sort((x, y) => order.indexOf(x.group) - order.indexOf(y.group) || x.path.localeCompare(y.path));

@@ -84,6 +84,8 @@ export interface PipelineResult {
   /** The tracking rule actually applied (rule 3 falls back to 2 without SynthStrip's brain or after a doubtful alignment). */
   rule: (typeof TRACKING_RULES)[TrackingRuleId];
   shell?: number; outsideGridMl?: number; csdSeconds: number;
+  /** The distortion field applied (SPEED-2026-10-28.md, A5: kept with the set, so the module need not fit it again). */
+  field?: { fit: FieldFit; sign: 1 | -1 };
 }
 
 /** The whole pipeline; `stages` collects the step times (planning.ts stageText). */
@@ -123,7 +125,7 @@ export async function wholeBrainTracts(input: PipelineInput, device: GPUDevice, 
   stages.fit = t1 - tFit;
   if (opts.fitOnly) {
     const none: Named = { tract: new Int32Array(0), side: new Int8Array(0), draws: 0, seconds: 0 };
-    return { dwi, fit, sl: [], named: none, outside: new Uint8Array(0), corrected, distortionCorrected: !!field.fit, ...(alignment ? { alignment } : {}), prep, rule, ...(outsideGridMl !== undefined ? { outsideGridMl } : {}), csdSeconds: 0 };
+    return { dwi, fit, sl: [], named: none, outside: new Uint8Array(0), corrected, distortionCorrected: !!field.fit, ...(alignment ? { alignment } : {}), prep, rule, ...(outsideGridMl !== undefined ? { outsideGridMl } : {}), csdSeconds: 0, ...(field.fit ? { field: { fit: field.fit, sign: field.sign ?? -1 } } : {}) };
   }
   const detail: TrackTiming = { prepare: 0, gpu: 0, assemble: 0, between: 0 };
   let shell: number | undefined, sl: Float32Array[], csdSeconds = 0;
@@ -150,5 +152,5 @@ export async function wholeBrainTracts(input: PipelineInput, device: GPUDevice, 
   stages.name = named.seconds * 1000;
   // Streamlines that cross the fluid at the brain's edge would keep no tract's name (outside-brain.ts; off: OUTSIDE_RULE.on).
   const outside = OUTSIDE_RULE.on ? outsideBrain(sl, fit, edgeFluid(fit)) : new Uint8Array(sl.length);
-  return { dwi, fit, sl, named, outside, corrected, distortionCorrected: !!field.fit, ...(alignment ? { alignment } : {}), prep, rule, ...(shell !== undefined ? { shell } : {}), ...(outsideGridMl !== undefined ? { outsideGridMl } : {}), csdSeconds };
+  return { dwi, fit, sl, named, outside, corrected, distortionCorrected: !!field.fit, ...(alignment ? { alignment } : {}), prep, rule, ...(shell !== undefined ? { shell } : {}), ...(outsideGridMl !== undefined ? { outsideGridMl } : {}), csdSeconds, ...(field.fit ? { field: { fit: field.fit, sign: field.sign ?? -1 } } : {}) };
 }

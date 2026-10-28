@@ -27,7 +27,8 @@ import { tractColor, TRACT_COLORS_VERSION } from "./naming/tract-colors.ts";
 import type { TractTable } from "./naming/table.ts";
 import CODE_EQUIVALENCES from "./code-equivalences.json" with { type: "json" };
 import { CONTEXT as RAPIDPARC_CONTEXT, POINTS as RAPIDPARC_POINTS, type RapidParcModel } from "./rapidparc/rapidparc.ts";
-import { adPath, b0Path, colorFaBrainstemPath, colorFaPath, colorFaTalairachPath, dicomToTracts, faPath, mdPath, rdPath, tractsToDicom, UNNAMED, type TractSetData } from "./tracts-dicom.ts";
+import { preparedJson } from "./prepared.ts";
+import { adPath, b0Path, colorFaBrainstemPath, colorFaPath, colorFaTalairachPath, dicomToTracts, faPath, mdPath, rdPath, preparedPath, tractsToDicom, UNNAMED, type TractSetData } from "./tracts-dicom.ts";
 import { alignTemplate, frames, HEAD_FRAME_RULE, TALAIRACH_RISE_DEG, type M4 } from "./head-frame.ts";
 import { besideThisFile, DCM2NIIX_VERSION, secondOpinion } from "./second-opinion.ts";
 import { describeTractSet, DISPLAY_KEYS, DISPLAY_VERSION_KEY, DESCRIPTION_VERSION } from "./tract-set-description.ts";
@@ -485,9 +486,14 @@ export function trackSets(sl: Float32Array[], tract: Int32Array, side: Int8Array
  */
 /** SHA-256 of a result's numbers (the dry run's fingerprint): the streamlines' float32 bytes in order, the names and sides,
  *  then the JSON of the head frame and the alignment (their times left out). */
-export async function resultDigest(sl: Float32Array[], tract: Int32Array, side: Int8Array, headFrame: unknown, alignment: unknown): Promise<string> {
+export async function resultDigest(sl: Float32Array[], tract: Int32Array, side: Int8Array, headFrame: unknown, alignment: unknown, maps: ArrayBufferView[] = []): Promise<string> {
   const parts: Uint8Array[] = [];
+  // Where each streamline begins and ends, then the points (the critic, 2026-10-28, speed part A, finding 4); the fit's
+  // maps after them (finding 5).
+  const lengths = Int32Array.from(sl, (p) => p.length);
+  parts.push(new Uint8Array(lengths.buffer));
   for (const p of sl) parts.push(new Uint8Array(p.buffer, p.byteOffset, p.byteLength));
+  for (const m of maps) parts.push(new Uint8Array(m.buffer, m.byteOffset, m.byteLength));
   parts.push(new Uint8Array(tract.buffer, tract.byteOffset, tract.byteLength), new Uint8Array(side.buffer, side.byteOffset, side.byteLength));
   const strip = (o: unknown) => JSON.stringify(o, (k, v) => (k === "ms" || k === "seconds" ? undefined : v));
   parts.push(new TextEncoder().encode(strip(headFrame) + strip(alignment)));
@@ -613,7 +619,7 @@ export async function makeTracts(dbDir: string, dbId: string, server: string, pl
   const out = { seriesUID: written.seriesInstanceUID, streamlines: r.sl.length, stored: written.tracks, named, seconds, said, stages: stageText(stages) };
   // A DRY RUN'S FINGERPRINT of the result (SPEED-2026-10-28.md: "same numbers" is checked, not assumed): every
   // streamline's coordinates, every name and side, the head frame and the alignment, as SHA-256. No identifier in it.
-  if (opts.dryRun) return { state: "would be made", ...out, digest: await resultDigest(r.sl, r.named.tract, r.named.side, headFrame ? { ...headFrame, seconds: 0, takenFrom: undefined } : null, r.alignment ?? null) };
+  if (opts.dryRun) return { state: "would be made", ...out, digest: await resultDigest(r.sl, r.named.tract, r.named.side, headFrame ? { ...headFrame, seconds: 0, takenFrom: undefined } : null, r.alignment ?? null, [r.fit.fa, r.fit.md, r.fit.mask, ...(r.fit.seedMask ? [r.fit.seedMask] : [])]) };
   const now = new Date(), d2 = (n: number) => String(n).padStart(2, "0");
   const meta = { sopInstanceUID: written.sopInstanceUID, seriesInstanceUID: written.seriesInstanceUID, studyInstanceUID: plan.dwi.facts.studyUID, modality: "MR",
     seriesNumber, seriesDate: `${now.getFullYear()}${d2(now.getMonth() + 1)}${d2(now.getDate())}`, seriesTime: `${d2(now.getHours())}${d2(now.getMinutes())}${d2(now.getSeconds())}`,
@@ -638,6 +644,11 @@ export async function makeTracts(dbDir: string, dbId: string, server: string, pl
     await writeB0(dbDir, written.seriesInstanceUID, r.dwi, r.fit);
     await writeFA(dbDir, written.seriesInstanceUID, r.fit);
     await writeDiffusivities(dbDir, written.seriesInstanceUID, r.fit);
+    // WHAT WAS DONE TO THE SCAN BEFORE TRACKING (prepared.ts), so the module does not do it again in the window.
+    await writeCacheFile(dbDir, preparedPath(written.seriesInstanceUID), new TextEncoder().encode(preparedJson({
+      rules: { distortion: DISTORTION_RULE, motion: MOTION_RULE, directions: DIRECTION_CHECK_RULE }, partner: plan.partner?.facts.uid ?? null,
+      ...(r.field ? { field: r.field } : {}), ...(r.prep.motion ? { moves: r.prep.motion.moves } : {}), motionRule: r.prep.motionRule,
+      ...(r.prep.movementSaid ? { movementSaid: r.prep.movementSaid } : {}), ...(r.prep.directions ? { directions: r.prep.directions } : {}) })));
   }
   catch (e) { return { state: "made", ...out, said: `${out.said}; the direction-colored map or the b = 0 image was not stored (${(e as Error).message})` }; }
   return { state: "made", ...out };

@@ -563,23 +563,30 @@ export async function motionPool(url: URL, init: { full: { dims: [number, number
     const a = new C(new SharedArrayBuffer(bytes)); a.set(v); return a;
   });
   const workers = Array.from({ length: size }, () => new Worker(url, { type: "module" }));
-  await Promise.all(workers.map((w) => new Promise<void>((ok, fail) => {
-    w.onmessage = () => ok(); w.onerror = (e) => { e.preventDefault?.(); fail(new Error(e.message)); };
-    w.postMessage({ init: { ...init, volumes: shared } });
-  })));
+  const close = () => workers.forEach((w) => w.terminate());
+  // A pool that does not start (one thread failing, or none answering in a minute) is closed whole.
+  try {
+    await Promise.all(workers.map((w) => new Promise<void>((ok, fail) => {
+      const t = setTimeout(() => fail(new Error("a head-movement thread did not start")), 60_000);
+      w.onmessage = () => { clearTimeout(t); ok(); }; w.onerror = (e) => { clearTimeout(t); e.preventDefault?.(); fail(new Error(e.message)); };
+      w.postMessage({ init: { ...init, volumes: shared } });
+    })));
+  } catch (e) { close(); throw e; }
   const idle = [...workers], waiting: (() => void)[] = [];
   const run = async <T>(task: Record<string, unknown>): Promise<T> => {
     while (!idle.length) await new Promise<void>((r) => waiting.push(r));
     const w = idle.pop()!;
     try {
       return await new Promise<T>((ok, fail) => {
-        w.onmessage = (e) => { const d = e.data as { ok?: T; error?: string }; if (d.error !== undefined) fail(new Error(d.error)); else ok(d.ok as T); };
-        w.onerror = (e) => { e.preventDefault?.(); fail(new Error(e.message)); };
+        // One image's piece takes well under a second; a thread silent for five minutes is given up.
+        const t = setTimeout(() => fail(new Error("a head-movement thread gave no answer in 300 s")), 300_000);
+        w.onmessage = (e) => { clearTimeout(t); const d = e.data as { ok?: T; error?: string }; if (d.error !== undefined) fail(new Error(d.error)); else ok(d.ok as T); };
+        w.onerror = (e) => { clearTimeout(t); e.preventDefault?.(); fail(new Error(e.message)); };
         w.postMessage(task);
       });
     } finally { idle.push(w); waiting.shift()?.(); }
   };
-  return { run, close: () => workers.forEach((w) => w.terminate()) };
+  return { run, close };
 }
 
 /** The scan with each image put back (field and movement, one interpolation) on its own grid: for a case without a T1. */

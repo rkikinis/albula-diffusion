@@ -118,11 +118,13 @@ export async function alignTemplate(t1: Grid3, template: Grid3, templateBrain: U
   let best: { cost: number; M: M4; s: Awaited<ReturnType<typeof rigidToT1>> } | undefined;
   const starts = PITCH_STARTS.map((tilt) => mul4(translate4(pc), mul4(pitch4(tilt), translate4(tc.map((x) => -x)))));
   const wholeOpts = { fwhmMm: [12, 8, 4], fixedMm: 2 }, wholeMask = keep(templateBrain);
+  // A thread that fails or does not answer is not an anatomical failure: that tilt is aligned in turn instead, so the
+  // frame is the same either way (the critic, 2026-10-28, speed part A, finding 2).
   const results = par
-    ? await Promise.all(starts.map((start) => inThread(par.workerUrl, moved(start), t1, wholeMask, wholeOpts)))
+    ? await Promise.all(starts.map((start) => inThread(par.workerUrl, moved(start), t1, wholeMask, wholeOpts).catch(() => undefined)))
     : [];
   for (let i = 0; i < starts.length; i++) {
-    const s = par ? results[i] : await rigidToT1(moved(starts[i]), t1, wholeMask, wholeOpts);
+    const s = (par ? results[i] : undefined) ?? await rigidToT1(moved(starts[i]), t1, wholeMask, wholeOpts);
     if (!best || s.cost < best.cost) best = { cost: s.cost, M: mul4(rigidM4(s.T), starts[i]), s };
   }
   const s1 = best!.s, after1 = best!.M;
@@ -134,15 +136,20 @@ export async function alignTemplate(t1: Grid3, template: Grid3, templateBrain: U
 }
 
 /** One rigidToT1 in a thread of its own (rigid-worker.ts): the same function on exact copies of the same numbers. */
-export async function inThread(url: URL, moving: Grid3, fixed: Grid3, mask: Uint8Array, opts: Parameters<typeof rigidToT1>[3], wide?: { brainT1?: Grid3 }): Promise<Awaited<ReturnType<typeof rigidToT1>>> {
+/** A thread that does not answer within this is given up (the alignments it runs take 10-30 s on the Prisma scan); the
+ *  caller then does the work in turn (the critic, 2026-10-28, speed part A, finding 3). */
+export const THREAD_LIMIT_MS = 10 * 60_000;
+export async function inThread(url: URL, moving: Grid3, fixed: Grid3, mask: Uint8Array, opts: Parameters<typeof rigidToT1>[3], wide?: { brainT1?: Grid3 }, limitMs = THREAD_LIMIT_MS): Promise<Awaited<ReturnType<typeof rigidToT1>>> {
   const w = new Worker(url, { type: "module" });
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await new Promise((ok, fail) => {
+      timer = setTimeout(() => fail(new Error(`the alignment thread gave no answer in ${limitMs / 1000} s`)), limitMs);
       w.onmessage = (e) => { const d = e.data as { ok?: Awaited<ReturnType<typeof rigidToT1>>; error?: string }; if (d.ok) ok(d.ok); else fail(new Error(d.error ?? "the alignment thread gave no answer")); };
       w.onerror = (e) => { e.preventDefault?.(); fail(new Error(e.message)); };
       w.postMessage({ moving, fixed, mask, opts, ...(wide ? { wide: true, brainT1: wide.brainT1 } : {}) });
     });
-  } finally { w.terminate(); }
+  } finally { clearTimeout(timer); w.terminate(); }
 }
 
 /** A frame: its origin and its three axes (the patient's left-right, back-front, down-up; unit vectors in the patient's

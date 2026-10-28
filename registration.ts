@@ -522,9 +522,12 @@ export async function alignToT1(dwi: DiffusionSeries, t1: Grid3, field?: { fit: 
   // Check 2, the mirror test: the same alignment of the same b = 0 mirrored left to right -- an alignment of its own,
   // started beside the main one when threads are given.
   const check = opts.check ?? ALIGNMENT_CHECK, mirrored = rule !== 1 && check === 2;
-  const mirrorRun = mirrored && opts.threads ? (await import("./head-frame.ts")).inThread(opts.threads.workerUrl, mirroredLeftRight(moving, mask), target, mask, {}, { brainT1: opts.brainT1 }) : undefined;
+  // Its failure is caught at once (an unhandled one ended the whole import program: the critic, 2026-10-28, speed part A,
+  // finding 1); it is then made in turn.
+  const mirrorRun = mirrored && opts.threads ? (await import("./head-frame.ts")).inThread(opts.threads.workerUrl, mirroredLeftRight(moving, mask), target, mask, {}, { brainT1: opts.brainT1 }).catch(() => undefined) : undefined;
   const result = rule === 1 ? await rigidToT1(moving, t1, mask) : await rigidToT1Wide(moving, target, mask, opts.brainT1);
-  const mirrorRatio = mirrored ? result.cost / (mirrorRun ? await mirrorRun : await rigidToT1Wide(mirroredLeftRight(moving, mask), target, mask, opts.brainT1)).cost : undefined;
+  const mirrorResult = mirrored ? (mirrorRun ? await mirrorRun : undefined) ?? await rigidToT1Wide(mirroredLeftRight(moving, mask), target, mask, opts.brainT1) : undefined;
+  const mirrorRatio = mirrorResult ? result.cost / mirrorResult.cost : undefined;
   const t1Done = performance.now();
   if (times) times.register = t1Done - t0;
   const out = await resampleOntoT1(dwi, result.T, t1, field, { cover: mask, rule, ...(motion ? { motion: motion.moves } : {}) });

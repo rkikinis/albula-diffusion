@@ -34,7 +34,9 @@ export const motionHelped = (r: { before: number; after: number }): boolean => N
 
 export async function prepareScan(dwi: DiffusionSeries, opts: { field?: { fit: FieldFit; sign: 1 | -1 }; t1?: Grid3; /** registration.ts: the rule (default REGISTRATION_RULE), and SynthStrip's brain on the T1 for rules 2 and 3. */ registrationRule?: RegistrationRuleId; brainT1?: Grid3; /** registration.ts ALIGNMENT_CHECK by default. */ alignmentCheck?: AlignmentCheckId; /** The import's alignment of this scan to this T1, taken instead of aligning again (registration.ts alignToT1 `given`). */ givenAlignment?: GivenAlignment; motionRule?: MotionRuleId; /** The scanner's record of the phase-encoding direction ("j-", or DICOM's "ROW" / "COL"), for the eddy currents when no field gives the axis. */ phaseEncoding?: string; /** motion.ts rounds (default two). */ motionRounds?: number; times?: StageTimes; say?: (s: string) => void; /** false: the directions are used as recorded, unchecked (for checking tools only). */ checkDirections?: boolean; /** The check already made for this scan (the module keeps it per scan: it depends on nothing the person can change; critic finding 8). */ directions?: GradientCheck;
   /** Independent pieces in threads of their own (SPEED-2026-10-28.md): alignments (rigid-worker.ts) and the head
-   *  movement's per-image pieces (motion-worker.ts); the import job's; the module runs them in turn. */ threads?: { rigid: URL; motion: URL } } = {}): Promise<Prepared> {
+   *  movement's per-image pieces (motion-worker.ts); the import job's; the module runs them in turn. */ threads?: { rigid: URL; motion: URL };
+  /** THE IMPORT'S MOVEMENT, taken instead of estimating it again (prepared.ts; SPEED-2026-10-28.md, A5): its moves (null:
+   *  not corrected, or undone -- `said` says which), the rule it was made under. */ givenMotion?: { moves: Move[] | null; rule: number; said?: string } } = {}): Promise<Prepared> {
   const rule = opts.motionRule ?? MOTION_RULE, field = opts.field, said: string[] = [];
   // THE DIRECTIONS FIRST: everything after (the movement's predictions, the tensors, the tracts) uses them. A table that
   // does not fit the images is replaced by the one that does, and that is said; "undecided" keeps the record and says so.
@@ -51,11 +53,24 @@ export async function prepareScan(dwi: DiffusionSeries, opts: { field?: { fit: F
     if (directions.verdict !== "as recorded") { directionsSaid = directions.said; said.push(directions.said); }
   }
   let motion: MotionResult | undefined, stepBack: string | undefined;
-  if (rule === 1 || rule === 2 || rule === 3) {
+  if (opts.givenMotion && (rule === 1 || rule === 2 || rule === 3)) {
+    const g = opts.givenMotion;
+    if (g.moves) {
+      // The moves as the import found and kept them; the brain region the alignment and the resampling read, from the
+      // scan itself as estimateMotion makes it (scanBrain). Sizes and residuals are the import's, in its record.
+      const { mask } = scanBrain(dwi, field);
+      motion = { rule: g.rule as MotionRuleId, moves: g.moves, b0: new Float32Array(0), mask, sizes: [], largest: { mm: NaN, degrees: NaN }, residual: { before: NaN, after: NaN }, ms: 0, said: g.said ?? "head movement corrected as the import did" };
+      said.push(motion.said);
+    } else if (g.said) { stepBack = g.said; said.push(g.said); }
+  } else if (rule === 1 || rule === 2 || rule === 3) {
     opts.say?.(rule >= 2 ? "Correcting the head's movement and the eddy-current distortion between the images…" : "Correcting the head's movement between the images…");
     const t = performance.now(), pe = opts.phaseEncoding;
     const peAxis = pe === "ROW" ? 0 : pe === "COL" ? 1 : pe && /^[ijk]/.test(pe) ? "ijk".indexOf(pe[0]) as 0 | 1 | 2 : undefined;
-    motion = await estimateMotion(dwi, field, { rule, ...(peAxis !== undefined ? { peAxis } : {}), ...(opts.motionRounds ? { rounds: opts.motionRounds } : {}), ...(opts.threads ? { threads: { workerUrl: opts.threads.motion } } : {}) });
+    const mopts = { rule, ...(peAxis !== undefined ? { peAxis } : {}), ...(opts.motionRounds ? { rounds: opts.motionRounds } : {}) };
+    // With threads, and in turn if they fail: the same numbers either way (the critic, 2026-10-28, speed part A, 1-3).
+    motion = opts.threads
+      ? await estimateMotion(dwi, field, { ...mopts, threads: { workerUrl: opts.threads.motion } }).catch(() => estimateMotion(dwi, field, mopts))
+      : await estimateMotion(dwi, field, mopts);
     if (opts.times) opts.times.motion = performance.now() - t;
     // A CORRECTION THAT DID NOT HELP IS UNDONE (Ron, 2026-10-06: robust, as a site with nobody to look needs it; "4 yes"):
     // the images must agree with each other better after it than as acquired, or the scan is used as acquired, and said.
