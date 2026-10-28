@@ -1746,6 +1746,10 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
         try { if (e.tracts) askDerived("tracts", e.series, e.tracts); await findStored(s).catch(() => null); }
         finally { restoring = false; reshowAfterSwitch.delete(s.browserId); }
         if (e.tracts && storedState.get(s.browserId)?.seriesUID !== e.tracts) missing.push("the tract set the scene showed is no longer in the database; the newest is shown");
+        // A SCENE SAVED BEFORE SCENES RECORDED THEIR TRACT SET (before 2026-10-21 20:13, albula-diffusion 80914f2): said, so
+        // the person knows the set is the newest, not the one they saved with (Ron, 2026-10-28: "the scene should record
+        // the tract set it was saved with"; the Prisma scene of 10-21 16:49 opened set 907, tractline's, without a word).
+        if (!e.tracts && storedState.get(s.browserId)?.seriesUID) missing.push("this scene was saved before scenes recorded which fiber tracts they showed: the newest set of the scan is shown; save the scene again to keep the one on screen");
         if (e.way) wayBy.set(s.browserId, { way: e.way, touched: true });
         const n = await showNamed(s, e.byName ?? []);
         if (n) applied.push(`${n} tract${n === 1 ? "" : "s"} by name`);
