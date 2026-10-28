@@ -32,23 +32,23 @@ export const SECOND_OPINION_KEY = "dcm2niix_check";
 
 type Converted = { name: string; arrayBuffer(): Promise<ArrayBuffer> };
 interface Dcm2niixClass { new(): { worker: Worker | null; init(): Promise<void>; input(files: unknown): { run(): Promise<Converted[]> } } }
-const libs = new Map<string, Promise<Dcm2niixClass>>();
-async function dcm2niix(url: URL): Promise<Dcm2niixClass> {
-  if (!libs.has(url.href)) libs.set(url.href, import(url.href).then((m) => m.Dcm2niix as Dcm2niixClass));
-  return await libs.get(url.href)!;
+let lib: Promise<Dcm2niixClass> | undefined;
+async function dcm2niix(): Promise<Dcm2niixClass> {
+  // The package's own loader, served beside the app; it starts its worker beside itself.
+  lib ??= import(assetUrl("diffusion", "dcm2niix/index.js").href).then((m) => m.Dcm2niix as Dcm2niixClass);
+  return await lib;
 }
 
 /** Where the program runs: the page (the package's own loader, served beside the app, starting its worker beside
- *  itself), or the import-time job under Deno (the extension's own folder, the worker started SILENT:
- *  second-opinion-worker.js -- its console is the job's standard output). */
-export interface SecondOpinionPlace { lib: URL; quietWorker?: URL }
-/** The job's place: the files beside this one, as the extension's folder holds them. */
-export const besideThisFile = (): SecondOpinionPlace => ({ lib: new URL("./vendor/dcm2niix/index.js", import.meta.url), quietWorker: new URL("./second-opinion-worker.js", import.meta.url) });
+ *  itself), or the import-time job under Deno: the loader imported by the job's own module (second-opinion-job.ts, so the
+ *  page's bundle never carries it), its worker started SILENT (second-opinion-worker.js: its console is the job's
+ *  standard output). */
+export interface SecondOpinionPlace { Cls: unknown; quietWorker?: URL }
 
 /** Run dcm2niix on these DICOM files and compare its diffusion reading with `ours`. */
 export async function secondOpinion(files: ArrayBuffer[], ours: DiffusionSeries, place?: SecondOpinionPlace): Promise<SecondOpinion> {
   const t0 = performance.now();
-  const Cls = await dcm2niix(place?.lib ?? assetUrl("diffusion", "dcm2niix/index.js"));
+  const Cls = (place?.Cls as Dcm2niixClass | undefined) ?? await dcm2niix();
   const d = new Cls();
   if (place?.quietWorker) {
     d.worker = new Worker(place.quietWorker, { type: "module" });
