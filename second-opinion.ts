@@ -24,23 +24,39 @@ export interface SecondOpinion {
   ms: number;
 }
 
+/** The answer as a record keeps it (import-job.ts secondOpinionOf): the comparison, or why there is none. */
+export type StoredSecondOpinion = { program?: "dcm2niix"; version?: string; agree?: boolean; said?: string; volumes?: number; worstDeg?: number | null; worstB?: number | null; error?: string };
+/** The series attribute, on the DIFFUSION SCAN, that holds the answer for a set made before the import job ran the
+ *  second opinion (second-opinion-sweep.ts). A set's own record wins over it. */
+export const SECOND_OPINION_KEY = "dcm2niix_check";
+
 type Converted = { name: string; arrayBuffer(): Promise<ArrayBuffer> };
-interface Dcm2niixClass { new(): { init(): Promise<void>; input(files: unknown): { run(): Promise<Converted[]> } } }
-let lib: Promise<Dcm2niixClass> | undefined;
-async function dcm2niix(): Promise<Dcm2niixClass> {
-  // The package's own loader, served beside the app; it starts its worker beside itself.
-  lib ??= import(assetUrl("diffusion", "dcm2niix/index.js").href).then((m) => m.Dcm2niix as Dcm2niixClass);
-  return await lib;
+interface Dcm2niixClass { new(): { worker: Worker | null; init(): Promise<void>; input(files: unknown): { run(): Promise<Converted[]> } } }
+const libs = new Map<string, Promise<Dcm2niixClass>>();
+async function dcm2niix(url: URL): Promise<Dcm2niixClass> {
+  if (!libs.has(url.href)) libs.set(url.href, import(url.href).then((m) => m.Dcm2niix as Dcm2niixClass));
+  return await libs.get(url.href)!;
 }
 
+/** Where the program runs: the page (the package's own loader, served beside the app, starting its worker beside
+ *  itself), or the import-time job under Deno (the extension's own folder, the worker started SILENT:
+ *  second-opinion-worker.js -- its console is the job's standard output). */
+export interface SecondOpinionPlace { lib: URL; quietWorker?: URL }
+/** The job's place: the files beside this one, as the extension's folder holds them. */
+export const besideThisFile = (): SecondOpinionPlace => ({ lib: new URL("./vendor/dcm2niix/index.js", import.meta.url), quietWorker: new URL("./second-opinion-worker.js", import.meta.url) });
+
 /** Run dcm2niix on these DICOM files and compare its diffusion reading with `ours`. */
-export async function secondOpinion(files: ArrayBuffer[], ours: DiffusionSeries): Promise<SecondOpinion> {
+export async function secondOpinion(files: ArrayBuffer[], ours: DiffusionSeries, place?: SecondOpinionPlace): Promise<SecondOpinion> {
   const t0 = performance.now();
-  const Cls = await dcm2niix();
+  const Cls = await dcm2niix(place?.lib ?? assetUrl("diffusion", "dcm2niix/index.js"));
   const d = new Cls();
-  await d.init();
+  if (place?.quietWorker) {
+    d.worker = new Worker(place.quietWorker, { type: "module" });
+    await new Promise<void>((ok, fail) => { d.worker!.onmessage = (e) => { if ((e.data as { type?: string })?.type === "ready") ok(); }; d.worker!.onerror = (e) => fail(new Error(`dcm2niix did not start: ${e.message}`)); });
+  } else await d.init();
   const list = files.map((b, i) => { const f = new File([b], `f${i}.dcm`); (f as unknown as { _webkitRelativePath: string })._webkitRelativePath = `in/f${i}.dcm`; return f; });
-  const out = await d.input(list).run();
+  // The worker ends with the run (under Deno a live worker keeps the program from ending).
+  const out = await d.input(list).run().finally(() => d.worker?.terminate());
   const pick = (ext: string) => out.filter((f) => f.name.endsWith(ext));
   const niis = pick(".nii"), bvals = pick(".bval"), bvecs = pick(".bvec");
   if (!niis.length || !bvals.length || !bvecs.length) throw new Error(`dcm2niix found no diffusion series in these files (it wrote ${out.map((f) => f.name.split(".").pop()).join(", ") || "nothing"})`);

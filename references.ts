@@ -20,7 +20,9 @@
 // v10 (2026-10-15): SlicerDMRI's FiberTractMeasurements, the rule the tract means follow (Ron: "use and reference the
 // slicer approach"), read in its source (Modules/CLI/FiberTractMeasurements/FiberTractMeasurements.cxx: the sum over
 // every point of the bundle, divided by the points).
-export const REFERENCES_VERSION = 10;
+// v11 (2026-10-28): the directions' check (Jeurissen, Leemans and Sijbers 2014), named in the module's lines since
+// methods.ts version 3, checked against Crossref; dcm2niix's entry says it runs at import too.
+export const REFERENCES_VERSION = 11;
 
 export interface Reference { cite: string; link?: string; usedFor: string; verified: boolean }
 
@@ -51,7 +53,8 @@ export const DIFFUSION_REFERENCES: Reference[] = [
   { cite: "Ruthotto L, Kugel H, Olesch J, Fischer B, Modersitzki J, Burger M, Wolters CH. Diffeomorphic susceptibility artifact correction of diffusion-weighted magnetic resonance images. Physics in Medicine and Biology 57(18):5715-5731, 2012.", link: "https://iopscience.iop.org/article/10.1088/0031-9155/57/18/5715", usedFor: "the variational model with the Jacobian barrier (distortion.ts)", verified: true },
   { cite: "Macdonald J, Ruthotto L. Improved susceptibility artifact correction of echo-planar MRI using the alternating direction method of multipliers. Journal of Mathematical Imaging and Vision, 2018. arXiv:1607.00531.", link: "https://arxiv.org/abs/1607.00531", usedFor: "the full formulation, solver and parameters implemented (distortion.ts)", verified: true },
   // Reading the scan: the second opinion.
-  { cite: "Li X, Morgan PS, Ashburner J, Smith J, Rorden C. The first step for neuroimaging data analysis: DICOM to NIfTI conversion. J Neurosci Methods 264:47-56, 2016.", link: "https://doi.org/10.1016/j.jneumeth.2016.03.001", usedFor: "dcm2niix, run on every diffusion scan from the database as a second opinion (vendor/dcm2niix/)", verified: true },
+  { cite: "Li X, Morgan PS, Ashburner J, Smith J, Rorden C. The first step for neuroimaging data analysis: DICOM to NIfTI conversion. J Neurosci Methods 264:47-56, 2016.", link: "https://doi.org/10.1016/j.jneumeth.2016.03.001", usedFor: "dcm2niix, run on every diffusion scan from the database as a second opinion, in this module and when the tracts are made at import (vendor/dcm2niix/)", verified: true },
+  { cite: "Jeurissen B, Leemans A, Sijbers J. Automated correction of improperly rotated diffusion gradient orientations in diffusion weighted MRI. Medical Image Analysis 18(7):953-962, 2014.", link: "https://doi.org/10.1016/j.media.2014.05.012", usedFor: "the scanner's diffusion directions checked against the images, by how far fibers run with each candidate table (gradient-check.ts)", verified: true },
   // Fiber distributions and parallel transport tracking (csd.ts, responses.ts, ptt.ts; checked in the case library, not
   // yet in the module's buttons).
   { cite: "Tournier JD, Calamante F, Connelly A. Robust determination of the fibre orientation distribution in diffusion MRI: non-negativity constrained super-resolved spherical deconvolution. NeuroImage 35(4):1459-1472, 2007.", link: "https://doi.org/10.1016/j.neuroimage.2007.02.016", usedFor: "constrained spherical deconvolution: the fiber distribution kept non-negative (csd.ts)", verified: true },

@@ -12,7 +12,12 @@ export interface HowMadeRecord { rules?: Record<string, unknown>; inputs?: { par
   /** The job's own sentence on the distortion and movement corrections ("corrected with …" / "not corrected …"). */
   corrected?: string;
   /** Whether the alignment was used, and its doubt when it was not (critic 2026-10-26, mirror test, finding 1). */
-  alignedToT1?: boolean; alignment?: { doubt?: string } }
+  alignedToT1?: boolean; alignment?: { doubt?: string };
+  /** gradient-check.ts: the directions checked against the images (the import job keeps verdict and the table used). */
+  directions?: { verdict?: string; used?: string };
+  /** second-opinion.ts: dcm2niix's reading compared with Albula's (import-job.ts SecondOpinionRecord). Sets made before
+   *  2026-10-28 have none in their record; the sweep's answer for their scan is passed in instead (second-opinion-sweep.ts). */
+  secondOpinion?: { agree?: boolean; said?: string; error?: string } }
 
 const MOTION: Record<number, string> = {
   0: "Head movement: not corrected (the scan came corrected)",
@@ -42,7 +47,32 @@ export function notAligned(rec: HowMadeRecord | undefined): string | undefined {
  *  distortion line said "corrected with the reversed scan (Andersson, Skare and Ashburner 2003)" whenever a partner was
  *  given -- also for the 4 ds005123 sets whose partner was refused -- and named a paper the code does not implement.
  *  2: the line follows the record's own `corrected` sentence, and names the papers distortion.ts is written from. */
-export const METHODS_VERSION = 2;
+export const METHODS_VERSION = 3;
+// 3 (2026-10-28, Ron: "yes, close both gaps"; Lauren O'Donnell: "I hope the user is informed about the outcome of the
+// test"): the two checks of the scanner's diffusion record -- the directions against the images, and dcm2niix's second
+// reading -- are lines of their own, with their outcome, whatever it was.
+
+/** The directions' check in words, from its verdict. */
+export function directionsLine(d: HowMadeRecord["directions"]): string | undefined {
+  if (!d?.verdict) return undefined;
+  const what = "Diffusion directions checked against the images (Jeurissen, Leemans and Sijbers 2014)";
+  switch (d.verdict) {
+    case "as recorded": return `${what}: the scanner's record matches`;
+    case "corrected": return `${what}: the scanner's record did not match, so the directions that do were used (${d.used ?? "another table"})`;
+    case "unconfirmed": return `${what}: the scanner's record could not be fully confirmed and was used as recorded`;
+    case "uncertain": return `${what}: the scanner's record does not match and the closest match was used (${d.used ?? "another table"}); treat these tracts with caution`;
+    case "not checked": return "Diffusion directions: not checked against the images; used as recorded";
+    default: return `${what}: an outcome this version of Albula does not describe (${d.verdict})`;
+  }
+}
+
+/** dcm2niix's second reading in words. */
+export function secondOpinionLine(o: HowMadeRecord["secondOpinion"]): string {
+  const what = "Diffusion values read a second time by dcm2niix (Li et al. 2016)";
+  if (!o) return `${what}: not done when these tracts were made`;
+  if (o.error) return `${what}: could not be done (${o.error})`;
+  return o.agree ? `${what}: the two readings agree` : `${what}: the two readings differ -- ${o.said ?? "see the scan"}`;
+}
 
 /** The distortion step in words, from what the record says was done (never from the partner's presence alone). */
 export function distortionLine(rec: HowMadeRecord): string {
@@ -59,6 +89,11 @@ export function howMade(rec: HowMadeRecord | undefined): string[] {
   const unknown = (what: string, n: number) => `${what}: a method this version of Albula does not describe (rule ${n})`;
   const out: string[] = [];
   const m = num("motion"), d = num("distortion"), g = num("registration"), t = num("tracking");
+  // The scanner's record first: it is read before anything is corrected.
+  const dl = directionsLine(rec?.directions);
+  // Said for every set the import job made (its rules name the directions' check), done or not.
+  if (rec && (r.directions !== undefined || rec.secondOpinion)) out.push(secondOpinionLine(rec.secondOpinion));
+  if (dl) out.push(dl);
   if (m !== undefined) out.push(MOTION[m] ?? unknown("Head movement", m));
   if (d !== undefined) out.push(distortionLine(rec!));
   if (g !== undefined) out.push(!i.t1 ? "Not aligned to a T1 (none in the study)" : notAligned(rec) ?? REGISTRATION[g] ?? unknown("Aligned to the T1", g));

@@ -11,7 +11,9 @@
 /** THE DESCRIPTIONS' VERSION, stored beside them as `display_version` (Ron, 2026-10-28: "Are you keeping track of the
  *  proper versioning?"). 1, 2026-10-27: the tooltip said "Corrected for the scanner's distortion and for head movement"
  *  for every set Albula made. 2, 2026-10-28: what was done is read from the record (`preparation`). */
-export const DESCRIPTION_VERSION = 2;
+export const DESCRIPTION_VERSION = 3;
+// 3, 2026-10-28 (Ron: "yes, close both gaps"): the two checks of the scanner's diffusion record are said when their
+// outcome was not plain -- the directions not confirmed as recorded, or dcm2niix reading the scan differently or not at all.
 
 export interface TractSetDescription { title: string; line: string; tip: string }
 
@@ -59,6 +61,7 @@ export function describeTractSet(rec: Rec, motor?: MotorCounts): TractSetDescrip
     ? "Traced with a second research program, tractline (M. Halle, 2026), inside the brain found on the T1 scan."
     : "Traced with a second research program, tractline (M. Halle, 2026), which finds the brain on the diffusion scan itself; that can leave out part of the brainstem, so fibers may stop at the internal capsule.");
   else tip.push(preparation(rec, t.brainFromT1));
+  tip.push(...recordChecks(rec));
   if (t.stopsAtCortex) tip.push("Each fiber is stopped where it reaches the cortex, so fewer end outside the brain.");
   if (t.secondNamer) tip.push("The fibers are named by a second naming program, to show how much the names depend on the program.");
   if (t.motorChecked) tip.push("Fibers named motor pathway are kept only if they avoid the thalamus and putamen, pass the crus of the cerebral peduncle and end in the motor cortex.");
@@ -83,6 +86,22 @@ export function preparation(rec: Rec, brainFromT1: boolean): string {
   const parts = [distortion, movement, aligned, where].filter(Boolean);
   const s = parts.length > 1 ? `${parts.slice(0, -1).join("; ")}; ${parts.at(-1)}` : parts[0];
   return s[0].toUpperCase() + s.slice(1) + ".";
+}
+
+/** THE CHECKS OF THE SCANNER'S DIFFUSION RECORD, when their outcome was not plain (gradient-check.ts, second-opinion.ts;
+ *  Lauren O'Donnell, 2026-10-28: "I hope the user is informed about the outcome of the test"). Nothing when the directions
+ *  matched the images and dcm2niix agreed: the module's "How these fiber tracts were made" says those outcomes too. */
+export function recordChecks(rec: Rec): string[] {
+  const out: string[] = [];
+  const d = (rec.directions ?? {}) as Rec, v = str(d.verdict);
+  if (v === "corrected") out.push("The scanner's record of the diffusion directions did not match the images, so the directions that do were used; please tell the MRI team.");
+  else if (v === "uncertain") out.push("The scanner's record of the diffusion directions does not match the images, and the closest match was used: treat these tracts with caution and tell the MRI team.");
+  else if (v === "unconfirmed") out.push("The scanner's diffusion directions could not be fully confirmed against the images and were used as recorded.");
+  else if (v === "not checked") out.push("The diffusion directions could not be checked against the images and were used as recorded.");
+  const o = rec.secondOpinion as Rec | undefined;
+  if (o?.error) out.push("The diffusion values could not be read a second time by a second program (dcm2niix).");
+  else if (o && o.agree === false) out.push("A second program (dcm2niix) reads this scan's diffusion values differently: check the scan before relying on these tracts.");
+  return out;
 }
 
 /** The attribute keys the DICOM browser reads (core's load-panel.ts). */

@@ -49,7 +49,7 @@ import type { GradientCheck } from "./gradient-check.ts";
 import { MOTION_RULE, type MotionRuleId } from "./motion.ts";
 /** "Stop below FA"'s default under Advanced (the single-tensor tracker's; the UKF's comes from the tracking rule). */
 const ADV_MIN_FA = 0.15;
-import { DCM2NIIX_VERSION, secondOpinion, type SecondOpinion } from "./second-opinion.ts";
+import { DCM2NIIX_VERSION, SECOND_OPINION_KEY, secondOpinion, type SecondOpinion, type StoredSecondOpinion } from "./second-opinion.ts";
 import { databaseSeries, openDatabaseId } from "albula";
 import { adPath, b0Path, colorFaPath, dicomToTracts, faPath, mdPath, rdPath, UNNAMED as UNNAMED_SET } from "./tracts-dicom.ts";
 import { howMade, notAligned } from "./methods.ts";
@@ -795,7 +795,20 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
   // WHICH ONE: the newest the database holds for the scan. Every object records the version that made it; none is
   // "stale" (Ron, 2026-10-14: "for reproducibility scientists would like to run a specific version of a pipeline on
   // data"): choosing among versions is the versioning design still to come.
-  const storedState = new Map<string, { state: "stored" | "none" | "unknown"; made?: string; seriesUID?: string; tracking?: number; rules?: Record<string, unknown>; inputs?: { partner?: string | null; t1?: string | null }; alignedToT1?: boolean; corrected?: string; alignment?: { doubt?: string } & Partial<GivenAlignment> }>();
+  const storedState = new Map<string, { state: "stored" | "none" | "unknown"; made?: string; seriesUID?: string; tracking?: number; rules?: Record<string, unknown>; inputs?: { partner?: string | null; t1?: string | null }; alignedToT1?: boolean; corrected?: string; alignment?: { doubt?: string } & Partial<GivenAlignment>;
+    directions?: { verdict?: string; used?: string }; secondOpinion?: StoredSecondOpinion; secondOpinionFrom?: "record" | "sweep" }>();
+  /** dcm2niix's answer for a stored set: from its record, or -- for a set made before the job ran it -- the sweep's,
+   *  kept as the scan's series attribute (second-opinion-sweep.ts, SECOND_OPINION_KEY). */
+  async function storedSecondOpinion(inRecord: unknown, scanUid: string | undefined): Promise<{ secondOpinion?: StoredSecondOpinion; secondOpinionFrom?: "record" | "sweep" }> {
+    if (inRecord && typeof inRecord === "object") return { secondOpinion: inRecord as StoredSecondOpinion, secondOpinionFrom: "record" };
+    try {
+      const dbId = await openDatabaseId();
+      if (!dbId || !scanUid) return {};
+      const r = await fetch(`/_db/${encodeURIComponent(dbId)}/_provenance`);
+      const a = ((await r.json()) as { attributes?: { uid: string; key: string; value: string }[] }).attributes?.find((x) => x.uid === scanUid && x.key === SECOND_OPINION_KEY);
+      return a ? { secondOpinion: JSON.parse(a.value) as StoredSecondOpinion, secondOpinionFrom: "sweep" } : {};
+    } catch { return {}; }
+  }
   let jobBusyNow = false;
   // While a loaded scan has no stored tracts: look again every 10 s (the server may be making them right now).
   setInterval(() => {
@@ -956,7 +969,10 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     storedState.set(scan.browserId, { state: "stored", seriesUID: at.seriesUID, made, tracking: rules?.tracking, rules: t.provenance?.rules as Record<string, unknown> | undefined, inputs: t.provenance?.inputs as { partner?: string | null; t1?: string | null } | undefined,
       ...(typeof t.provenance?.alignedToT1 === "boolean" ? { alignedToT1: t.provenance.alignedToT1 as boolean } : {}),
       ...(typeof t.provenance?.corrected === "string" ? { corrected: t.provenance.corrected as string } : {}),
-      ...(t.provenance?.alignment ? { alignment: t.provenance.alignment as { doubt?: string } & Partial<GivenAlignment> } : {}) });
+      ...(t.provenance?.alignment ? { alignment: t.provenance.alignment as { doubt?: string } & Partial<GivenAlignment> } : {}),
+      ...(t.provenance?.directions ? { directions: t.provenance.directions as { verdict?: string; used?: string } } : {}),
+      // dcm2niix's second reading: the record's (sets made since 2026-10-28), else the sweep's answer for this scan.
+      ...(await storedSecondOpinion(t.provenance?.secondOpinion, dwiUidOf(scan))) });
     return { sl, named: { tract: Int32Array.from(tract), side: Int8Array.from(side), draws: 0, seconds: 0 }, made };
   }
   // THE MAPS MADE AT IMPORT (Ron, 2026-10-14: "Why not do all proper registrations as part of the import? That would allow
@@ -2474,7 +2490,9 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       shell.row(maps, "Head movement").append(mv);
     }
     const ck = checks.get(scan.browserId), cRow = document.createElement("span"); cRow.style.cssText = "font-size:12px";
-    if (!ck) cRow.textContent = "not yet (runs when the maps are first made)"; else if ("running" in ck) cRow.textContent = "dcm2niix is reading the same files…"; else if ("error" in ck) cRow.textContent = `not checked: ${ck.error}`; else { cRow.textContent = ck.result.agree ? `✓ ${ck.result.said}` : `⚠ ${ck.result.said}`; if (!ck.result.agree) cRow.style.color = "var(--sl-warn)"; }
+    const so = storedState.get(scan.browserId)?.secondOpinion;
+    if (!ck && so) { cRow.textContent = so.error ? `not checked: ${so.error}` : so.agree ? `✓ ${so.said} (checked ${storedState.get(scan.browserId)?.secondOpinionFrom === "record" ? "when the tracts were made" : "after the tracts were made"})` : `⚠ ${so.said}`; if (so.agree === false) cRow.style.color = "var(--sl-warn)"; }
+    else if (!ck) cRow.textContent = "not yet (runs when the maps are first made)"; else if ("running" in ck) cRow.textContent = "dcm2niix is reading the same files…"; else if ("error" in ck) cRow.textContent = `not checked: ${ck.error}`; else { cRow.textContent = ck.result.agree ? `✓ ${ck.result.said}` : `⚠ ${ck.result.said}`; if (!ck.result.agree) cRow.style.color = "var(--sl-warn)"; }
     cRow.title = `Albula reads the scan's diffusion values with its own reader; dcm2niix ${DCM2NIIX_VERSION} reads the same files, and the two are compared.`;
     shell.row(maps, "Checked").append(cRow);
     // DRAWING (Ron, 2026-10-15: "yes, keep them in the module under Advanced too").

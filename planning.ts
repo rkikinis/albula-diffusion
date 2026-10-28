@@ -75,13 +75,15 @@ export interface StageTimes {
   name?: number; distances?: number; draw?: number; total?: number;
   /** The import job's own steps: SynthStrip's brain on the T1, the head's frame, the tracts made into one DICOM object. */
   brain?: number; frame?: number; write?: number;
+  /** dcm2niix's second opinion (second-opinion.ts). */
+  secondOpinion?: number;
 }
 const sec = (ms: number) => `${(ms / 1000).toFixed(ms < 10000 ? 2 : 1)} s`;
 export function stageText(t: StageTimes): string {
   const d = t.trackDetail;
   const parts: string[] = [];
   const add = (label: string, v?: number, extra = "") => { if (v !== undefined) parts.push(`${label} ${sec(v)}${extra}`); };
-  add("read", t.read); add("brain on the T1", t.brain); add("directions checked", t.directions); add("align partner", t.align); add("distortion field", t.field); add("apply field", t.apply); add("head movement", t.motion); add("align to the T1", t.register); add("onto the T1", t.resample); add("mask + tensor", t.fit);
+  add("read", t.read); add("brain on the T1", t.brain); add("dcm2niix", t.secondOpinion); add("directions checked", t.directions); add("align partner", t.align); add("distortion field", t.field); add("apply field", t.apply); add("head movement", t.motion); add("align to the T1", t.register); add("onto the T1", t.resample); add("mask + tensor", t.fit);
   add("seeds", t.seeds);
   add("tracking", t.track, d ? ` (signal ${sec(d.data ?? 0)}, seeds ${sec(d.prepare)}, card ${sec(d.gpu)}, fibers ${sec(d.assemble)}, page ${sec(d.between)})` : "");
   add("naming", t.name); add("head frame", t.frame); add("distances", t.distances); add("drawing", t.draw); add("written as DICOM", t.write);

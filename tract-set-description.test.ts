@@ -34,3 +34,15 @@ Deno.test("the line names the method with its reference and the motor pathway's 
   assert(/second research program, tractline \(M\. Halle, 2026\)/.test(tl.tip) && !/Mike/.test(tl.tip + tl.line + tl.title));
   for (const r of [{}, { cstGate: {}, rules: { tracking: 7 } }]) assert(describeTractSet(r).title.length <= 64);
 });
+
+// Version 3 (2026-10-28): the checks of the scanner's diffusion record are said when not plain, and only then.
+Deno.test("the tooltip says a directions' check or a second reading that was not plain, and nothing when both were", () => {
+  const rules = { tracking: 3, labeler: "rapidparc" }, brain = "SynthStrip's brain mask of the T1";
+  const plain = describeTractSet({ rules, brain, directions: { verdict: "as recorded" }, secondOpinion: { agree: true, said: "dcm2niix agrees" } });
+  assert(!/dcm2niix|directions/.test(plain.tip), plain.tip);
+  assert(/did not match the images, so the directions that do were used/.test(describeTractSet({ rules, brain, directions: { verdict: "corrected" } }).tip));
+  assert(/could not be fully confirmed/.test(describeTractSet({ rules, brain, directions: { verdict: "unconfirmed" } }).tip));
+  assert(/dcm2niix\) reads this scan's diffusion values differently/.test(describeTractSet({ rules, brain, secondOpinion: { agree: false, said: "x" } }).tip));
+  assert(/could not be read a second time/.test(describeTractSet({ rules, brain, secondOpinion: { error: "no files" } }).tip));
+  assert(!/dcm2niix/.test(describeTractSet({ rules, brain }).tip));   // not done: the module's lines say so; the tooltip claims nothing
+});

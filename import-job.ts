@@ -29,6 +29,7 @@ import CODE_EQUIVALENCES from "./code-equivalences.json" with { type: "json" };
 import { CONTEXT as RAPIDPARC_CONTEXT, POINTS as RAPIDPARC_POINTS, type RapidParcModel } from "./rapidparc/rapidparc.ts";
 import { adPath, b0Path, colorFaBrainstemPath, colorFaPath, colorFaTalairachPath, dicomToTracts, faPath, mdPath, rdPath, tractsToDicom, UNNAMED, type TractSetData } from "./tracts-dicom.ts";
 import { alignTemplate, frames, HEAD_FRAME_RULE, TALAIRACH_RISE_DEG, type M4 } from "./head-frame.ts";
+import { besideThisFile, DCM2NIIX_VERSION, secondOpinion } from "./second-opinion.ts";
 import { describeTractSet, DISPLAY_KEYS, DISPLAY_VERSION_KEY, DESCRIPTION_VERSION } from "./tract-set-description.ts";
 import type { Grid3 } from "./registration.ts";
 
@@ -147,6 +148,11 @@ export function motorCounts(sets: { label: string; side: number; streamlines: un
   const c = sets.filter((s) => /cortico-?spinal/i.test(s.label));
   if (!c.length) return undefined;
   return { left: c.filter((s) => s.side === -1).reduce((n, s) => n + s.streamlines.length, 0), right: c.filter((s) => s.side === 1).reduce((n, s) => n + s.streamlines.length, 0) };
+}
+/** A set's record with dcm2niix's answer for its scan, when the record itself has none (a set made before 2026-10-28;
+ *  second-opinion-sweep.ts). The record's own answer always wins. */
+export function withScanChecks(rec: Record<string, unknown>, scanAnswer: Record<string, unknown> | undefined): Record<string, unknown> {
+  return rec.secondOpinion || !scanAnswer ? rec : { ...rec, secondOpinion: scanAnswer };
 }
 /** A tract set's title, line and tooltip written as its series attributes (the DICOM browser shows them). */
 export async function writeDescription(server: string, dbId: string, uid: string, record: Record<string, unknown>, sets: { label: string; side: number; streamlines: unknown[] }[]): Promise<void> {
@@ -287,6 +293,21 @@ export function seriesFromInstances(row: Pick<IndexSeries, "seriesUID" | "studyU
   const derived = (header["00080008"]?.Value ?? []).map((x) => String(x).toUpperCase()).some((v) => COMPUTED_IMAGE_TYPES.has(v));
   return { facts: { uid: row.seriesUID, studyUID: row.studyUID, patientUID: row.patientUID, description: row.description, volumes: frames.length, bValues, directions: dirs.size,
     ...(frames[0] && diffusionOf(frames[0])?.phaseEncoding ? { phaseEncoding: diffusionOf(frames[0])!.phaseEncoding } : {}), ijkToRAS: frames[0]?.ijkToRAS ?? [], derived }, frames, header, instances: refs };
+}
+
+/** dcm2niix's second opinion on a diffusion scan, as a record keeps it: the answer, or why there is none. */
+export type SecondOpinionRecord = { program: "dcm2niix"; version: string } & ({ agree: boolean; said: string; volumes: number; worstDeg: number | null; worstB: number | null } | { error: string });
+/** Run the second opinion on a scan's own files (read again: readSeries keeps volumes, not files). Never throws. */
+export async function secondOpinionOf(dbDir: string, uid: string, dwi: DiffusionSeries): Promise<SecondOpinionRecord> {
+  const base = { program: "dcm2niix" as const, version: DCM2NIIX_VERSION };
+  try {
+    const paths = await seriesFilePaths(dbDir, uid);
+    const files = await Promise.all(paths.map(async (p) => { const b = await Deno.readFile(p); return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) as ArrayBuffer; }));
+    const r = await secondOpinion(files, { ...dwi, volumes: [] }, besideThisFile());
+    // NaN (dcm2niix found another number of volumes) is not JSON: null.
+    const num = (x: number) => Number.isFinite(x) ? +x.toFixed(3) : null;
+    return { ...base, agree: r.agree, said: r.said, volumes: r.volumes, worstDeg: num(r.worstDeg), worstB: num(r.worstB) };
+  } catch (e) { return { ...base, error: (e as Error).message }; }
 }
 
 /** The studies to look at: those with an MR series that is not one of ours, with their MR series (and the patient's). */
@@ -495,6 +516,14 @@ export async function makeTracts(dbDir: string, dbId: string, server: string, pl
   }
   const dwi = fromDicomVolumes(plan.dwi.frames, plan.dwi.facts.description);
   const t1v = plan.t1.frames[0], stages: StageTimes = { brain: brainMs };
+  // THE SECOND OPINION AT IMPORT TOO (Ron, 2026-10-28, "yes, close both gaps"; Lauren O'Donnell: "I hope the user is
+  // informed about the outcome"): dcm2niix reads the same DICOM files and its b-values and directions are compared with
+  // Albula's reading, before any correction, as the module does (second-opinion.ts). Kept in the record and said in the
+  // set's description; it never stops the case (a disagreement is for a person to look at, as in the module).
+  onProgress?.("dcm2niix reading the same files (the second opinion)");
+  const s0 = performance.now();
+  const secondOpinionRec = await secondOpinionOf(dbDir, plan.dwi.facts.uid, dwi);
+  stages.secondOpinion = performance.now() - s0;
   onProgress?.("correcting, aligning and tracking the whole brain");
   let r: Awaited<ReturnType<typeof wholeBrainTracts>>;
   try { r = await wholeBrainTracts({ dwi,
@@ -544,6 +573,7 @@ export async function makeTracts(dbDir: string, dbId: string, server: string, pl
       distortionCorrected: r.distortionCorrected,
     },
     namer: { network: "RapidParc", points: RAPIDPARC_POINTS, context: RAPIDPARC_CONTEXT, minLengthMm: MIN_LENGTH_MM, draws: r.named.draws, seed: NAME_SEED },
+    secondOpinion: secondOpinionRec,
     trackingRuleApplied: r.rule.id, motionRuleApplied: r.prep.motionRule, ...(r.prep.directions ? { directions: { rule: r.prep.directions.rule, verdict: r.prep.directions.verdict, used: r.prep.directions.best.label, Q: r.prep.directions.best.Q, recordOverBest: r.prep.directions.recordOverBest } } : {}), ...(r.alignment ? { alignment: r.alignment } : {}) /* the move, the rule applied, its cost, the mirror test's ratio, the doubt */, brain: r.fit.seedMaskRule ?? r.fit.maskRule };
   // Several objects can follow each other under one scan (remade after a change): numbered from 900 by their time -- one
   // above the highest stored, so a deleted older one never makes the newest share a number (critic 2026-10-06, R2-7).

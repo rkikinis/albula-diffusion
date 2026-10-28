@@ -195,3 +195,24 @@ Deno.test("the code fingerprint covers the files that make the tracts, not the r
   const ASIDE = new Set(["code-equivalences.json", "naming/tractcloud-42.json"]);
   for (const u of deno) if (!ASIDE.has(u.slice(here.href.length))) assert(g.includes(u), `${u.slice(here.href.length)} is in Deno's graph but not ours`);
 });
+
+// THE SECOND OPINION AT IMPORT (2026-10-28, Ron: "yes, close both gaps"): the job's own call, on a real scan's files
+// when the Martinos Prisma database is on this machine (anonymized, public: CLAUDE.md), and never a throw.
+Deno.test("the import job's second opinion: dcm2niix agrees on a real scan; a scan without files is an answer, not a throw", async () => {
+  const { secondOpinionOf, readSeries, withScanChecks } = await import("./import-job.ts");
+  const { fromDicomVolumes } = await import("./dwi.ts");
+  const { setDicomLibrary, dcmjs, indexSeries } = await import("albula/server");
+  await import("./hooks.ts");
+  setDicomLibrary(dcmjs);
+  const none = await secondOpinionOf("/nonexistent", "1.2.3", { bValues: [], gradients: [], volumes: [] } as unknown as DiffusionSeries);
+  assert("error" in none && none.program === "dcm2niix", JSON.stringify(none));
+  // The record's own answer wins over the scan's attribute; the attribute fills a record without one.
+  assertEquals(withScanChecks({ secondOpinion: { agree: true } }, { agree: false }).secondOpinion, { agree: true });
+  assertEquals(withScanChecks({}, { agree: false }).secondOpinion, { agree: false });
+  const dir = `${Deno.env.get("HOME")}/SlicerAlbulaDatabases/Martinos Prisma`;
+  const row = await indexSeries(dir).then((r) => r.find((x) => x.description === "dMRI_dir98_AP")).catch(() => undefined);
+  if (!row) { console.log("Martinos Prisma not on this machine: the real-scan half is skipped"); return; }
+  const s = await readSeries(dir, row);
+  const r = await secondOpinionOf(dir, row.seriesUID, fromDicomVolumes(s.frames, row.description));
+  assert("agree" in r && r.agree && r.volumes === 99 && r.worstDeg === 0, JSON.stringify(r));
+});
