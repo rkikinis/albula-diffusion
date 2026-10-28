@@ -450,7 +450,7 @@ export async function synthstripVersion(server: string, opts: { waitMs?: number;
 
 /** What happened to one diffusion scan; `why` in plain words. */
 export type CaseOutcome =
-  | { state: "made" | "would be made"; seriesUID: string; streamlines: number; stored: number; named: number; seconds: number; said: string }
+  | { state: "made" | "would be made"; seriesUID: string; streamlines: number; stored: number; named: number; seconds: number; said: string; digest?: string }
   | { state: "current"; seriesUID: string }
   | { state: "waiting" | "cannot" | "failed"; why: string };
 
@@ -483,6 +483,18 @@ export function trackSets(sl: Float32Array[], tract: Int32Array, side: Int8Array
  * ONE CASE: the pipeline on the planned scan, its tracts written and indexed through the server -- unless tracts made
  * by the same code, rules and inputs are already stored.
  */
+/** SHA-256 of a result's numbers (the dry run's fingerprint): the streamlines' float32 bytes in order, the names and sides,
+ *  then the JSON of the head frame and the alignment (their times left out). */
+export async function resultDigest(sl: Float32Array[], tract: Int32Array, side: Int8Array, headFrame: unknown, alignment: unknown): Promise<string> {
+  const parts: Uint8Array[] = [];
+  for (const p of sl) parts.push(new Uint8Array(p.buffer, p.byteOffset, p.byteLength));
+  parts.push(new Uint8Array(tract.buffer, tract.byteOffset, tract.byteLength), new Uint8Array(side.buffer, side.byteOffset, side.byteLength));
+  const strip = (o: unknown) => JSON.stringify(o, (k, v) => (k === "ms" || k === "seconds" ? undefined : v));
+  parts.push(new TextEncoder().encode(strip(headFrame) + strip(alignment)));
+  const all = new Uint8Array(parts.reduce((n, x) => n + x.length, 0)); let o = 0; for (const x of parts) { all.set(x, o); o += x.length; }
+  return [...new Uint8Array(await crypto.subtle.digest("SHA-256", all))].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 /** The head frames made in this run, by T1 (one run is one program: the template, the code and the rule are the same). */
 const framesOfT1 = new Map<string, { rule: number; templateToPatient: M4; talairach: M4; brainstem: M4; stages: { name: string; cost: number; costAtStart: number }[]; seconds: number }>();
 
@@ -599,7 +611,9 @@ export async function makeTracts(dbDir: string, dbId: string, server: string, pl
   stages.write = performance.now() - w0;
   // Where the time went, step by step, in the case's report too (a dry run stores nothing, so this is where it is seen).
   const out = { seriesUID: written.seriesInstanceUID, streamlines: r.sl.length, stored: written.tracks, named, seconds, said, stages: stageText(stages) };
-  if (opts.dryRun) return { state: "would be made", ...out };
+  // A DRY RUN'S FINGERPRINT of the result (SPEED-2026-10-28.md: "same numbers" is checked, not assumed): every
+  // streamline's coordinates, every name and side, the head frame and the alignment, as SHA-256. No identifier in it.
+  if (opts.dryRun) return { state: "would be made", ...out, digest: await resultDigest(r.sl, r.named.tract, r.named.side, headFrame ? { ...headFrame, seconds: 0, takenFrom: undefined } : null, r.alignment ?? null) };
   const now = new Date(), d2 = (n: number) => String(n).padStart(2, "0");
   const meta = { sopInstanceUID: written.sopInstanceUID, seriesInstanceUID: written.seriesInstanceUID, studyInstanceUID: plan.dwi.facts.studyUID, modality: "MR",
     seriesNumber, seriesDate: `${now.getFullYear()}${d2(now.getMonth() + 1)}${d2(now.getDate())}`, seriesTime: `${d2(now.getHours())}${d2(now.getMinutes())}${d2(now.getSeconds())}`,

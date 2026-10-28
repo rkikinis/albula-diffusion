@@ -35,7 +35,7 @@ const args = parseArgs(Deno.args, { string: ["server", "db", "series", "assets",
 const quiet = args["counts-only"];
 // In counts-only mode only these fields leave the program.
 // "stages": step names and seconds only.
-const QUIET_KEYS = new Set(["at", "event", "case", "of", "state", "cases", "studies", "streamlines", "stored", "named", "seconds", "wall", "stages", "made", "current", "kept", "waiting", "cannot", "failed", "wouldBeMade", "stopped"]);
+const QUIET_KEYS = new Set(["at", "event", "case", "of", "state", "cases", "studies", "streamlines", "stored", "named", "seconds", "wall", "stages", "made", "current", "kept", "waiting", "cannot", "failed", "wouldBeMade", "stopped", "digest"]);
 const say = (o: Record<string, unknown>) => {
   const line = { at: new Date().toISOString(), ...o };
   console.log(JSON.stringify(quiet ? Object.fromEntries(Object.entries(line).filter(([k]) => QUIET_KEYS.has(k))) : line));
