@@ -1,29 +1,29 @@
 {
- "about": "PAT05 of OpenNeuro ds001226 (CC0), two-tensor UKF named by RapidParc, one of the twelve patients of the fixed cohort (Mike Halle's tractline's; Contents/tools/dmri-cohort.ts wrote it with the commit that adds distortion rule 2, 2026-10-03). The regression test (cases.regression.test.ts) reruns the case and compares; a deliberate change that moves these numbers rewrites this file in the same commit, with the reason. Rule 2 of the distortion correction (distortion.ts): the field estimated together with the PA scan's movement between the two scans, alpha 500 (validation step 4; Ron, 2026-10-03: \"Build\"). Rewritten 2026-10-04: Tracking rule 2 (tracking-rules.ts; Ron, 2026-10-03: 'please follow Mike's lead'): plain two-tensor UKF, the shell nearest b = 3000, every brain voxel a seed, seed FA 0.1, stop at FA 0.08 or mean signal 0.06, a point every 1.8 mm, inside the brain mask -- Mike Halle's tractline's, the ORG atlas's. Rewritten 2026-10-04: Aligned to the T1 (registration.ts, Ron 2026-10-03: 'Number three, go'): the corrected b = 0 aligned rigidly to the case's T1 on normalized gradient fields (as Mike Halle's tractline), and the scan read once onto the T1's axes through the move and the distortion field; tracked by tracking rule 2. Rewritten 2026-10-03: After the critic (qa/2026-10-03-dmri-rule2-registration.md): the T1-aligned grid keeps the scan's voxel volume and covers the brain plus a margin; the scan's edge voxels are kept. Rewritten 2026-10-04: tracking rule 3 is the default (2026-10-04): the brain from SynthStrip on the T1 Rewritten 2026-10-04: rule 3 after the critic's round (2026-10-04): the brain only where the scan has data, a fixed 4-voxel box margin Rewritten 2026-10-04: tracking rule 4 is the default (2026-10-04 evening): rule 3 without the fluid; within6 added Rewritten 2026-10-04: rule 3 with the outside-the-brain naming (outside-brain.ts) and the 6 mm list (2026-10-04 evening) Rewritten 2026-10-04: rule 3, the 6 mm list with the gray band; the outside-the-brain naming built but off (2026-10-04 night) Rewritten 2026-10-04: rule 3, the 6 mm list with the gray band, the outside-the-brain test off (recorded as 0); after the critic's round on the build (2026-10-04 night) Rewritten 2026-10-05: head-movement correction (motion rule 1) became the default, albula-diffusion 78055ef: each image put back where the head was before the fit Rewritten 2026-10-05: head-movement correction (motion rule 1) the default, after the critic's fix of the doubled distortion field in the b = 0 extrapolation (albula-diffusion f518eec) Rewritten 2026-10-26: registration rule 3 (2026-10-25) and alignment check 2, the mirror test (2026-10-26, Ron: '1 yes') are the defaults",
+ "about": "PAT05 of OpenNeuro ds001226 (CC0), two-tensor UKF named by RapidParc, one of the twelve patients of the fixed cohort (Mike Halle's tractline's; Contents/tools/dmri-cohort.ts wrote it with the commit that adds distortion rule 2, 2026-10-03). The regression test (cases.regression.test.ts) reruns the case and compares; a deliberate change that moves these numbers rewrites this file in the same commit, with the reason. Rule 2 of the distortion correction (distortion.ts): the field estimated together with the PA scan's movement between the two scans, alpha 500 (validation step 4; Ron, 2026-10-03: \"Build\"). Rewritten 2026-10-04: Tracking rule 2 (tracking-rules.ts; Ron, 2026-10-03: 'please follow Mike's lead'): plain two-tensor UKF, the shell nearest b = 3000, every brain voxel a seed, seed FA 0.1, stop at FA 0.08 or mean signal 0.06, a point every 1.8 mm, inside the brain mask -- Mike Halle's tractline's, the ORG atlas's. Rewritten 2026-10-04: Aligned to the T1 (registration.ts, Ron 2026-10-03: 'Number three, go'): the corrected b = 0 aligned rigidly to the case's T1 on normalized gradient fields (as Mike Halle's tractline), and the scan read once onto the T1's axes through the move and the distortion field; tracked by tracking rule 2. Rewritten 2026-10-03: After the critic (qa/2026-10-03-dmri-rule2-registration.md): the T1-aligned grid keeps the scan's voxel volume and covers the brain plus a margin; the scan's edge voxels are kept. Rewritten 2026-10-04: tracking rule 3 is the default (2026-10-04): the brain from SynthStrip on the T1 Rewritten 2026-10-04: rule 3 after the critic's round (2026-10-04): the brain only where the scan has data, a fixed 4-voxel box margin Rewritten 2026-10-04: tracking rule 4 is the default (2026-10-04 evening): rule 3 without the fluid; within6 added Rewritten 2026-10-04: rule 3 with the outside-the-brain naming (outside-brain.ts) and the 6 mm list (2026-10-04 evening) Rewritten 2026-10-04: rule 3, the 6 mm list with the gray band; the outside-the-brain naming built but off (2026-10-04 night) Rewritten 2026-10-04: rule 3, the 6 mm list with the gray band, the outside-the-brain test off (recorded as 0); after the critic's round on the build (2026-10-04 night) Rewritten 2026-10-05: head-movement correction (motion rule 1) became the default, albula-diffusion 78055ef: each image put back where the head was before the fit Rewritten 2026-10-05: head-movement correction (motion rule 1) the default, after the critic's fix of the doubled distortion field in the b = 0 extrapolation (albula-diffusion f518eec) Rewritten 2026-10-26: registration rule 3 (2026-10-25) and alignment check 2, the mirror test (2026-10-26, Ron: '1 yes') are the defaults Rewritten 2026-10-28: 2026-10-28: distortion rule 3, the brightness of the two b = 0 images matched before the field fit, the default for every scan (Ron: '2 every scan'). On the true pairs it moves the results slightly (PAT16 47,533 streamlines against 47,719; with rule 2 the stored result reproduces exactly)",
  "id": "PAT05",
  "method": "ukf",
- "streamlines": 46447,
- "named": 14321,
- "other": 15823,
- "short": 16303,
+ "streamlines": 46490,
+ "named": 14372,
+ "other": 15685,
+ "short": 16433,
  "tumorVoxels": 11437,
- "corrected": "corrected with PA (shifts up to 20.3 mm; 15% of the two scans' difference left); movement between the two scans allowed for; head movement corrected (largest 1.2 mm and 0.7°; the images agree with each other 29% better); aligned to the MRI of the anatomy (moved 0.7 mm and 1.2°)",
+ "corrected": "corrected with PA (shifts up to 19.3 mm; 15% of the two scans' difference left); movement between the two scans allowed for; the two scans' brightness matched first; head movement corrected (largest 1.2 mm and 0.7°; the images agree with each other 29% better); aligned to the MRI of the anatomy (moved 0.8 mm and 1.1°)",
  "near8": [
   {
    "tract": "superficial frontal, left",
-   "within8": 497
+   "within8": 525
   },
   {
    "tract": "thalamo-frontal, left",
-   "within8": 442
+   "within8": 452
   },
   {
    "tract": "striato-frontal, left",
-   "within8": 328
+   "within8": 322
   },
   {
    "tract": "arcuate fasciculus, left",
-   "within8": 188
+   "within8": 191
   },
   {
    "tract": "superior longitudinal fasciculus II, left",
@@ -31,133 +31,129 @@
   },
   {
    "tract": "inferior occipito-frontal fasciculus, left",
-   "within8": 153
-  },
-  {
-   "tract": "corpus callosum 2",
-   "within8": 104
+   "within8": 163
   },
   {
    "tract": "corona radiata frontal, left",
-   "within8": 100
+   "within8": 129
+  },
+  {
+   "tract": "corpus callosum 2",
+   "within8": 118
   },
   {
    "tract": "corticospinal tract, left",
-   "within8": 62
+   "within8": 75
   },
   {
    "tract": "external capsule, left",
-   "within8": 52
+   "within8": 68
   },
   {
    "tract": "uncinate fasciculus, left",
-   "within8": 35
-  },
-  {
-   "tract": "middle longitudinal fasciculus, left",
-   "within8": 34
-  },
-  {
-   "tract": "corpus callosum 1",
    "within8": 33
   },
   {
-   "tract": "corpus callosum 6",
-   "within8": 30
+   "tract": "middle longitudinal fasciculus, left",
+   "within8": 32
   },
   {
-   "tract": "corpus callosum 4",
+   "tract": "corpus callosum 1",
+   "within8": 32
+  },
+  {
+   "tract": "corpus callosum 6",
    "within8": 29
   },
   {
-   "tract": "thalamo-parietal, left",
-   "within8": 22
-  },
-  {
-   "tract": "extreme capsule, left",
-   "within8": 22
+   "tract": "corpus callosum 4",
+   "within8": 25
   },
   {
    "tract": "striato-parietal, left",
-   "within8": 18
+   "within8": 21
   },
   {
-   "tract": "cortico-ponto-cerebellar, left",
-   "within8": 10
+   "tract": "extreme capsule, left",
+   "within8": 20
   },
   {
-   "tract": "corpus callosum 3",
-   "within8": 28
-  },
-  {
-   "tract": "superior longitudinal fasciculus III, left",
-   "within8": 56
+   "tract": "thalamo-parietal, left",
+   "within8": 19
   },
   {
    "tract": "posterior limb of internal capsule, left",
-   "within8": 10
+   "within8": 9
   },
   {
-   "tract": "inferior longitudinal fasciculus, left",
-   "within8": 58
+   "tract": "superior longitudinal fasciculus III, left",
+   "within8": 52
   },
   {
-   "tract": "corpus callosum 5",
-   "within8": 5
+   "tract": "corpus callosum 3",
+   "within8": 33
   },
   {
    "tract": "thalamo-temporal, left",
-   "within8": 40
+   "within8": 47
+  },
+  {
+   "tract": "inferior longitudinal fasciculus, left",
+   "within8": 64
   },
   {
    "tract": "superficial temporal, left",
-   "within8": 6
+   "within8": 7
+  },
+  {
+   "tract": "corona radiata parietal, left",
+   "within8": 5
   }
  ],
  "near6": [
   {
    "tract": "superficial frontal, left",
-   "within6": 360
+   "within6": 383
   },
   {
    "tract": "thalamo-frontal, left",
-   "within6": 329
+   "within6": 326
   },
   {
    "tract": "striato-frontal, left",
-   "within6": 279
+   "within6": 259
   },
   {
    "tract": "arcuate fasciculus, left",
-   "within6": 147
+   "within6": 154
   },
   {
    "tract": "superior longitudinal fasciculus II, left",
-   "within6": 147
+   "within6": 143
   },
   {
    "tract": "inferior occipito-frontal fasciculus, left",
-   "within6": 151
-  },
-  {
-   "tract": "corpus callosum 2",
-   "within6": 78
+   "within6": 161
   },
   {
    "tract": "corona radiata frontal, left",
-   "within6": 90
+   "within6": 121
+  },
+  {
+   "tract": "corpus callosum 2",
+   "within6": 91
   },
   {
    "tract": "corticospinal tract, left",
-   "within6": 34
+   "within6": 46
   },
   {
    "tract": "external capsule, left",
-   "within6": 52
+   "within6": 68
   },
   {
    "tract": "uncinate fasciculus, left",
-   "within6": 30
+   "within6": 27
   },
   {
    "tract": "middle longitudinal fasciculus, left",
@@ -165,47 +161,43 @@
   },
   {
    "tract": "corpus callosum 1",
-   "within6": 24
+   "within6": 26
   },
   {
    "tract": "corpus callosum 6",
-   "within6": 24
-  },
-  {
-   "tract": "corpus callosum 4",
-   "within6": 21
-  },
-  {
-   "tract": "thalamo-parietal, left",
    "within6": 16
   },
   {
-   "tract": "extreme capsule, left",
-   "within6": 22
+   "tract": "corpus callosum 4",
+   "within6": 20
   },
   {
    "tract": "striato-parietal, left",
    "within6": 10
   },
   {
-   "tract": "cortico-ponto-cerebellar, left",
-   "within6": 7
+   "tract": "extreme capsule, left",
+   "within6": 20
   },
   {
-   "tract": "corpus callosum 3",
-   "within6": 22
+   "tract": "thalamo-parietal, left",
+   "within6": 10
   },
   {
    "tract": "superior longitudinal fasciculus III, left",
-   "within6": 45
+   "within6": 40
   },
   {
-   "tract": "inferior longitudinal fasciculus, left",
-   "within6": 18
+   "tract": "corpus callosum 3",
+   "within6": 25
   },
   {
    "tract": "thalamo-temporal, left",
-   "within6": 14
+   "within6": 15
+  },
+  {
+   "tract": "inferior longitudinal fasciculus, left",
+   "within6": 19
   }
  ],
  "outsideBrain": 0,
@@ -215,361 +207,350 @@
    "tract": "superficial frontal, left",
    "abbr": "Sup-F",
    "category": "Superficial",
-   "total": 873,
+   "total": 889,
    "closest": 0,
    "within0": 30,
-   "within5": 297,
-   "within6": 360,
-   "within8": 497
+   "within5": 304,
+   "within6": 383,
+   "within8": 525
   },
   {
    "tract": "thalamo-frontal, left",
    "abbr": "TF",
    "category": "Projection",
-   "total": 534,
+   "total": 549,
    "closest": 0,
-   "within0": 10,
-   "within5": 222,
-   "within6": 329,
-   "within8": 442
+   "within0": 11,
+   "within5": 212,
+   "within6": 326,
+   "within8": 452
   },
   {
    "tract": "striato-frontal, left",
    "abbr": "SF",
    "category": "Projection",
-   "total": 364,
+   "total": 350,
    "closest": 0,
    "within0": 77,
-   "within5": 244,
-   "within6": 279,
-   "within8": 328
+   "within5": 232,
+   "within6": 259,
+   "within8": 322
   },
   {
    "tract": "arcuate fasciculus, left",
    "abbr": "AF",
    "category": "Association",
-   "total": 288,
+   "total": 281,
    "closest": 0,
-   "within0": 18,
-   "within5": 126,
-   "within6": 147,
-   "within8": 188
+   "within0": 16,
+   "within5": 133,
+   "within6": 154,
+   "within8": 191
   },
   {
    "tract": "superior longitudinal fasciculus II, left",
    "abbr": "SLF-II",
    "category": "Association",
-   "total": 309,
+   "total": 288,
    "closest": 0,
-   "within0": 6,
-   "within5": 119,
-   "within6": 147,
+   "within0": 4,
+   "within5": 116,
+   "within6": 143,
    "within8": 166
   },
   {
    "tract": "inferior occipito-frontal fasciculus, left",
    "abbr": "IOFF",
    "category": "Association",
-   "total": 154,
+   "total": 164,
    "closest": 0,
-   "within0": 91,
-   "within5": 150,
-   "within6": 151,
-   "within8": 153
-  },
-  {
-   "tract": "corpus callosum 2",
-   "abbr": "CC2",
-   "category": "Commissural",
-   "total": 257,
-   "closest": 0,
-   "within0": 2,
-   "within5": 73,
-   "within6": 78,
-   "within8": 104
+   "within0": 92,
+   "within5": 155,
+   "within6": 161,
+   "within8": 163
   },
   {
    "tract": "corona radiata frontal, left",
    "abbr": "CR-F",
    "category": "Projection",
-   "total": 108,
+   "total": 137,
    "closest": 0,
-   "within0": 2,
-   "within5": 79,
-   "within6": 90,
-   "within8": 100
+   "within0": 1,
+   "within5": 101,
+   "within6": 121,
+   "within8": 129
+  },
+  {
+   "tract": "corpus callosum 2",
+   "abbr": "CC2",
+   "category": "Commissural",
+   "total": 273,
+   "closest": 0,
+   "within0": 14,
+   "within5": 82,
+   "within6": 91,
+   "within8": 118
   },
   {
    "tract": "corticospinal tract, left",
    "abbr": "CST",
    "category": "Projection",
-   "total": 203,
+   "total": 211,
    "closest": 0,
-   "within0": 2,
-   "within5": 17,
-   "within6": 34,
-   "within8": 62
+   "within0": 1,
+   "within5": 27,
+   "within6": 46,
+   "within8": 75
   },
   {
    "tract": "external capsule, left",
    "abbr": "EC",
    "category": "Association",
-   "total": 52,
+   "total": 68,
    "closest": 0,
-   "within0": 39,
-   "within5": 52,
-   "within6": 52,
-   "within8": 52
+   "within0": 48,
+   "within5": 68,
+   "within6": 68,
+   "within8": 68
   },
   {
    "tract": "uncinate fasciculus, left",
    "abbr": "UF",
    "category": "Association",
-   "total": 35,
+   "total": 33,
    "closest": 0,
    "within0": 14,
    "within5": 26,
-   "within6": 30,
-   "within8": 35
+   "within6": 27,
+   "within8": 33
   },
   {
    "tract": "middle longitudinal fasciculus, left",
    "abbr": "MdLF",
    "category": "Association",
-   "total": 334,
+   "total": 327,
    "closest": 0,
    "within0": 1,
-   "within5": 12,
+   "within5": 9,
    "within6": 17,
-   "within8": 34
+   "within8": 32
   },
   {
    "tract": "corpus callosum 1",
    "abbr": "CC1",
    "category": "Commissural",
-   "total": 44,
+   "total": 41,
    "closest": 0,
-   "within0": 5,
-   "within5": 19,
-   "within6": 24,
-   "within8": 33
+   "within0": 9,
+   "within5": 26,
+   "within6": 26,
+   "within8": 32
   },
   {
    "tract": "corpus callosum 6",
    "abbr": "CC6",
    "category": "Commissural",
-   "total": 694,
+   "total": 653,
    "closest": 0,
-   "within0": 5,
-   "within5": 19,
-   "within6": 24,
-   "within8": 30
+   "within0": 2,
+   "within5": 14,
+   "within6": 16,
+   "within8": 29
   },
   {
    "tract": "corpus callosum 4",
    "abbr": "CC4",
    "category": "Commissural",
-   "total": 179,
+   "total": 186,
    "closest": 0,
-   "within0": 3,
-   "within5": 18,
-   "within6": 21,
-   "within8": 29
-  },
-  {
-   "tract": "thalamo-parietal, left",
-   "abbr": "TP",
-   "category": "Projection",
-   "total": 72,
-   "closest": 0,
-   "within0": 6,
-   "within5": 14,
-   "within6": 16,
-   "within8": 22
-  },
-  {
-   "tract": "extreme capsule, left",
-   "abbr": "EmC",
-   "category": "Association",
-   "total": 22,
-   "closest": 0,
-   "within0": 16,
-   "within5": 21,
-   "within6": 22,
-   "within8": 22
+   "within0": 2,
+   "within5": 16,
+   "within6": 20,
+   "within8": 25
   },
   {
    "tract": "striato-parietal, left",
    "abbr": "SP",
    "category": "Projection",
-   "total": 21,
+   "total": 25,
    "closest": 0,
-   "within0": 1,
-   "within5": 6,
+   "within0": 2,
+   "within5": 7,
    "within6": 10,
-   "within8": 18
+   "within8": 21
   },
   {
-   "tract": "cortico-ponto-cerebellar, left",
-   "abbr": "CPC",
-   "category": "Cerebellar",
-   "total": 24,
-   "closest": 1.73,
-   "within0": 0,
-   "within5": 4,
-   "within6": 7,
-   "within8": 10
+   "tract": "extreme capsule, left",
+   "abbr": "EmC",
+   "category": "Association",
+   "total": 20,
+   "closest": 0,
+   "within0": 13,
+   "within5": 20,
+   "within6": 20,
+   "within8": 20
   },
   {
-   "tract": "corpus callosum 3",
-   "abbr": "CC3",
-   "category": "Commissural",
-   "total": 79,
-   "closest": 2,
+   "tract": "thalamo-parietal, left",
+   "abbr": "TP",
+   "category": "Projection",
+   "total": 76,
+   "closest": 0,
+   "within0": 3,
+   "within5": 9,
+   "within6": 10,
+   "within8": 19
+  },
+  {
+   "tract": "posterior limb of internal capsule, left",
+   "abbr": "PLIC",
+   "category": "Projection",
+   "total": 45,
+   "closest": 1,
    "within0": 0,
-   "within5": 16,
-   "within6": 22,
-   "within8": 28
+   "within5": 2,
+   "within6": 2,
+   "within8": 9
   },
   {
    "tract": "superior longitudinal fasciculus III, left",
    "abbr": "SLF-III",
    "category": "Association",
    "total": 63,
-   "closest": 2.24,
+   "closest": 1.41,
    "within0": 0,
-   "within5": 32,
-   "within6": 45,
-   "within8": 56
+   "within5": 30,
+   "within6": 40,
+   "within8": 52
   },
   {
-   "tract": "superficial parietal, left",
-   "abbr": "Sup-P",
-   "category": "Superficial",
-   "total": 429,
-   "closest": 2.24,
-   "within0": 0,
-   "within5": 1,
-   "within6": 1,
-   "within8": 2
-  },
-  {
-   "tract": "posterior limb of internal capsule, left",
-   "abbr": "PLIC",
-   "category": "Projection",
-   "total": 60,
-   "closest": 3.16,
-   "within0": 0,
-   "within5": 2,
-   "within6": 2,
-   "within8": 10
-  },
-  {
-   "tract": "inferior longitudinal fasciculus, left",
-   "abbr": "ILF",
-   "category": "Association",
-   "total": 287,
-   "closest": 3.32,
-   "within0": 0,
-   "within5": 8,
-   "within6": 18,
-   "within8": 58
-  },
-  {
-   "tract": "corpus callosum 5",
-   "abbr": "CC5",
+   "tract": "corpus callosum 3",
+   "abbr": "CC3",
    "category": "Commissural",
-   "total": 161,
-   "closest": 3.46,
+   "total": 80,
+   "closest": 1.41,
    "within0": 0,
-   "within5": 2,
-   "within6": 2,
-   "within8": 5
+   "within5": 20,
+   "within6": 25,
+   "within8": 33
   },
   {
    "tract": "thalamo-temporal, left",
    "abbr": "TT",
    "category": "Projection",
-   "total": 168,
-   "closest": 3.74,
+   "total": 170,
+   "closest": 2.24,
    "within0": 0,
-   "within5": 4,
-   "within6": 14,
-   "within8": 40
-  },
-  {
-   "tract": "cingulum bundle, left",
-   "abbr": "CB",
-   "category": "Association",
-   "total": 192,
-   "closest": 5.1,
-   "within0": 0,
-   "within5": 0,
-   "within6": 1,
-   "within8": 2
-  },
-  {
-   "tract": "superficial temporal, left",
-   "abbr": "Sup-T",
-   "category": "Superficial",
-   "total": 119,
-   "closest": 5.39,
-   "within0": 0,
-   "within5": 0,
-   "within6": 2,
-   "within8": 6
-  },
-  {
-   "tract": "striato-occipital, left",
-   "abbr": "SO",
-   "category": "Projection",
-   "total": 42,
-   "closest": 5.39,
-   "within0": 0,
-   "within5": 0,
-   "within6": 2,
-   "within8": 2
+   "within5": 6,
+   "within6": 15,
+   "within8": 47
   },
   {
    "tract": "cortico-ponto-cerebellar, right",
    "abbr": "CPC",
    "category": "Cerebellar",
-   "total": 44,
-   "closest": 5.48,
+   "total": 33,
+   "closest": 2.24,
+   "within0": 0,
+   "within5": 1,
+   "within6": 1,
+   "within8": 3
+  },
+  {
+   "tract": "inferior longitudinal fasciculus, left",
+   "abbr": "ILF",
+   "category": "Association",
+   "total": 298,
+   "closest": 3.32,
+   "within0": 0,
+   "within5": 6,
+   "within6": 19,
+   "within8": 64
+  },
+  {
+   "tract": "cortico-ponto-cerebellar, left",
+   "abbr": "CPC",
+   "category": "Cerebellar",
+   "total": 16,
+   "closest": 3.74,
+   "within0": 0,
+   "within5": 2,
+   "within6": 2,
+   "within8": 3
+  },
+  {
+   "tract": "corpus callosum 5",
+   "abbr": "CC5",
+   "category": "Commissural",
+   "total": 171,
+   "closest": 4.12,
+   "within0": 0,
+   "within5": 1,
+   "within6": 1,
+   "within8": 4
+  },
+  {
+   "tract": "superficial parietal, left",
+   "abbr": "Sup-P",
+   "category": "Superficial",
+   "total": 436,
+   "closest": 4.24,
+   "within0": 0,
+   "within5": 3,
+   "within6": 3,
+   "within8": 4
+  },
+  {
+   "tract": "superficial temporal, left",
+   "abbr": "Sup-T",
+   "category": "Superficial",
+   "total": 133,
+   "closest": 6.16,
    "within0": 0,
    "within5": 0,
-   "within6": 2,
-   "within8": 2
+   "within6": 0,
+   "within8": 7
   },
   {
    "tract": "corona radiata parietal, left",
    "abbr": "CR-P",
    "category": "Projection",
-   "total": 74,
-   "closest": 6.16,
+   "total": 65,
+   "closest": 7.07,
    "within0": 0,
    "within5": 0,
    "within6": 0,
-   "within8": 3
+   "within8": 5
   },
   {
    "tract": "superior longitudinal fasciculus I, left",
    "abbr": "SLF-I",
    "category": "Association",
-   "total": 145,
-   "closest": 6.32,
+   "total": 135,
+   "closest": 7.14,
    "within0": 0,
    "within5": 0,
    "within6": 0,
-   "within8": 2
+   "within8": 1
+  },
+  {
+   "tract": "striato-occipital, left",
+   "abbr": "SO",
+   "category": "Projection",
+   "total": 39,
+   "closest": 7.21,
+   "within0": 0,
+   "within5": 0,
+   "within6": 0,
+   "within8": 1
   }
  ],
  "seconds": {
-  "read_correct_fit": 77,
+  "read_correct_fit": 73.2,
   "csd": 0,
-  "track": 37.4,
+  "track": 36.6,
   "name": 1.3,
-  "total": 116
+  "total": 111.3
  },
  "trackingRule": 3,
  "brain": "SynthStrip's brain mask of the T1",
@@ -578,47 +559,47 @@
  "alignment": {
   "T": {
    "R": [
-    0.9998819783756246,
-    0.015362085126572162,
-    0.00018883911409190118,
-    -0.015358042491797877,
-    0.9997877035116283,
-    -0.01373602700071814,
-    -0.00039981304029703806,
-    0.013731505653360714,
-    0.9999056384989659
+    0.9999067990187953,
+    0.013592927643541265,
+    0.0012749878681296235,
+    -0.01357379596823524,
+    0.9998102174586754,
+    -0.013974302424415112,
+    -0.0014646975794158899,
+    0.01395569358053354,
+    0.9999015417918342
    ],
    "t": [
-    0.07501138923215049,
-    0.3709164109521644,
-    0.6473913011546025
+    0.048801950047541315,
+    0.3656738041317332,
+    0.6928085212161265
    ],
    "c": [
-    3.303390573371344,
-    -1.5209932725793847,
-    7.563760050456392
+    3.360795783827558,
+    -1.5701483815450867,
+    7.481495384677981
    ]
   },
   "rule": 3,
   "candidates": [
    {
     "start": "scanner",
-    "cost": 0.32269,
+    "cost": 0.32629,
     "apartMm": 0
    }
   ],
-  "cost": 0.32268811891934296,
-  "mirrorRatio": 0.657946150321603
+  "cost": 0.3262937049639225,
+  "mirrorRatio": 0.6640025300042337
  },
  "motionRule": 1,
  "motion": {
   "largest": {
-   "mm": 1.213,
-   "degrees": 0.679
+   "mm": 1.24,
+   "degrees": 0.682
   },
   "residual": {
-   "before": 0.121,
-   "after": 0.0862
+   "before": 0.1208,
+   "after": 0.0855
   }
  }
 }
