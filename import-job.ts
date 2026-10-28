@@ -30,7 +30,8 @@ import { CONTEXT as RAPIDPARC_CONTEXT, POINTS as RAPIDPARC_POINTS, type RapidPar
 import { preparedJson } from "./prepared.ts";
 import { adPath, b0Path, colorFaBrainstemPath, colorFaPath, colorFaTalairachPath, dicomToTracts, faPath, mdPath, rdPath, preparedPath, tractsToDicom, UNNAMED, type TractSetData } from "./tracts-dicom.ts";
 import { alignTemplate, frames, HEAD_FRAME_RULE, TALAIRACH_RISE_DEG, type M4 } from "./head-frame.ts";
-import { besideThisFile, DCM2NIIX_VERSION, secondOpinion } from "./second-opinion.ts";
+import { DCM2NIIX_VERSION, secondOpinion } from "./second-opinion.ts";
+import { besideThisFile } from "./second-opinion-job.ts";
 import { describeTractSet, DISPLAY_KEYS, DISPLAY_VERSION_KEY, DESCRIPTION_VERSION } from "./tract-set-description.ts";
 import type { Grid3 } from "./registration.ts";
 
