@@ -5,8 +5,8 @@
 // (registration.ts) -- all three applied in ONE resampling, so the data are interpolated once.
 import type { DiffusionSeries } from "./dwi.ts";
 import { applyField, type FieldFit } from "./distortion.ts";
-import { applyMotion, estimateMotion, MOTION_RULE, type MotionResult, type MotionRuleId } from "./motion.ts";
-import { alignToT1, type AlignmentCheckId, type Candidate, type GivenAlignment, type Grid3, type RegistrationRuleId, type Rigid } from "./registration.ts";
+import { applyMotion, estimateMotion, MOTION_RULE, type Move, type MotionResult, type MotionRuleId } from "./motion.ts";
+import { alignToT1, scanBrain, type AlignmentCheckId, type Candidate, type GivenAlignment, type Grid3, type RegistrationRuleId, type Rigid } from "./registration.ts";
 import { checkGradientTable, withCheckedDirections, type GradientCheck } from "./gradient-check.ts";
 import type { StageTimes } from "./planning.ts";
 

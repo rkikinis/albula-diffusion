@@ -47,11 +47,13 @@ import { prepareScan } from "./prepare.ts";
 import { ALIGNMENT_CHECK, REGISTRATION_RULE, type GivenAlignment } from "./registration.ts";
 import type { GradientCheck } from "./gradient-check.ts";
 import { MOTION_RULE, type MotionRuleId } from "./motion.ts";
+import { DIRECTION_CHECK_RULE } from "./gradient-check.ts";
+import { readPrepared } from "./prepared.ts";
 /** "Stop below FA"'s default under Advanced (the single-tensor tracker's; the UKF's comes from the tracking rule). */
 const ADV_MIN_FA = 0.15;
 import { DCM2NIIX_VERSION, SECOND_OPINION_KEY, secondOpinion, type SecondOpinion, type StoredSecondOpinion } from "./second-opinion.ts";
 import { databaseSeries, openDatabaseId } from "albula";
-import { adPath, b0Path, colorFaPath, dicomToTracts, faPath, mdPath, rdPath, UNNAMED as UNNAMED_SET } from "./tracts-dicom.ts";
+import { adPath, b0Path, colorFaPath, dicomToTracts, faPath, mdPath, preparedPath, rdPath, UNNAMED as UNNAMED_SET } from "./tracts-dicom.ts";
 import { howMade, notAligned } from "./methods.ts";
 import { byName, laterality, measure, MEASURE_RULE, openingWay, throughBox, throughVoxels, toCsv, voxelsOf, type ExportRow, type Maps, type Measures, type Way } from "./selection.ts";
 import { databaseFileUrl, nrrdDecode, nrrdGeometry, nrrdSplitHeader } from "albula";
@@ -515,6 +517,18 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       if (!storedState.get(scan.browserId)?.alignment?.T) await loadStored(scan, await tractTable()).catch(() => null);
       given = importAlignment(scan, anatOk, partner);
     }
+    // WHAT THE IMPORT DID TO THE SCAN, TAKEN TOO (prepared.ts; SPEED-2026-10-28.md, A5): with the import's alignment, its
+    // distortion field, per-image movements and direction check, when made under today's rules for the same reversed
+    // scan -- not done again in the window. A set made before 2026-10-28 has no such file: the steps are done here.
+    let taken: ReturnType<typeof readPrepared>;
+    const stNow = storedState.get(scan.browserId);
+    if (given && stNow?.seriesUID) {
+      const url = await databaseFileUrl(preparedPath(stNow.seriesUID)).catch(() => null);
+      const r = url ? await fetch(url).catch(() => null) : null;
+      const partnerUid = partner ? ((live.nodes.get(partner.frameIds[0])?.origin as Record<string, unknown> | undefined)?.seriesInstanceUID as string | undefined) ?? null : null;
+      if (r?.ok) taken = readPrepared(await r.text(), { rules: { distortion: DISTORTION_RULE, motion: MOTION_RULE, directions: DIRECTION_CHECK_RULE }, partner: partnerUid });
+      else await r?.body?.cancel();
+    }
     say(`Reading ${scan.frameIds.length} diffusion volumes…`);
     const t0 = performance.now();
     const vols: Volume[] = [];
@@ -529,8 +543,9 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
     // not directions); it compares b-values and directions only.
     check(scan, { ...dwi, volumes: [] });
     const times: StageTimes = { read: performance.now() - t0 };
-    const field: { fit?: FieldFit; sign?: 1 | -1 } = {};
-    let corrected = partner ? await correctDistortion(dwi, partner, times, scan.phaseEncoding, field) : correct ? "not corrected (no reversed phase-encoding scan of this study is loaded)" : "not corrected (switched off)";
+    const field: { fit?: FieldFit; sign?: 1 | -1 } = taken?.field ? { fit: taken.field.fit, sign: taken.field.sign } : {};
+    let corrected = taken && partner ? (stNow?.corrected ?? "corrected as the import did") : partner ? await correctDistortion(dwi, partner, times, scan.phaseEncoding, field) : correct ? "not corrected (no reversed phase-encoding scan of this study is loaded)" : "not corrected (switched off)";
+    if (taken?.directions && !directionsChecked.has(scan.browserId)) directionsChecked.set(scan.browserId, taken.directions);
     // Head movement, the field and the alignment to the MRI of the anatomy in one resampling (prepare.ts, the case runs'
     // path too). A doubtful alignment is not used (until aligning by hand is built): the scanner's placement stands.
     const z = anatOk ? await fetchZarrVolumeNative(live.blobBase(), anatOk.zarr as ZarrDesc) : undefined;
@@ -549,6 +564,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
       ...(anatOk && z ? { t1: { dims: anatOk.dims as [number, number, number], ijkToRAS: anatOk.ijkToRAS as number[], data: z.data as ArrayLike<number> } } : {}),
       ...(brainT1 ? { brainT1 } : {}), ...(given ? { givenAlignment: given } : {}),
       motionRule, ...(scan.phaseEncoding ? { phaseEncoding: scan.phaseEncoding } : {}), times, say,
+      ...(taken ? { givenMotion: { moves: taken.moves, rule: taken.motionRule, ...(taken.movementSaid ? { said: taken.movementSaid } : {}) } } : {}),
       ...(directionsChecked.has(scan.browserId) ? { directions: directionsChecked.get(scan.browserId) } : {}) });
     if (prep.directions) directionsChecked.set(scan.browserId, prep.directions);
     dwi = prep.dwi;
