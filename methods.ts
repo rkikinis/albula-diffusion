@@ -9,6 +9,8 @@
 
 /** The record a stored set of tracts carries (DICOM Tractography Results, the private block's provenance). */
 export interface HowMadeRecord { rules?: Record<string, unknown>; inputs?: { partner?: string | null; t1?: string | null };
+  /** The job's own sentence on the distortion and movement corrections ("corrected with …" / "not corrected …"). */
+  corrected?: string;
   /** Whether the alignment was used, and its doubt when it was not (critic 2026-10-26, mirror test, finding 1). */
   alignedToT1?: boolean; alignment?: { doubt?: string } }
 
@@ -36,6 +38,21 @@ export function notAligned(rec: HowMadeRecord | undefined): string | undefined {
 }
 
 /** The steps, in the order they were done, each one line. */
+/** THE WORDS' VERSION (Ron, 2026-10-28: "Are you keeping track of the proper versioning?"). 1, until 2026-10-28: the
+ *  distortion line said "corrected with the reversed scan (Andersson, Skare and Ashburner 2003)" whenever a partner was
+ *  given -- also for the 4 ds005123 sets whose partner was refused -- and named a paper the code does not implement.
+ *  2: the line follows the record's own `corrected` sentence, and names the papers distortion.ts is written from. */
+export const METHODS_VERSION = 2;
+
+/** The distortion step in words, from what the record says was done (never from the partner's presence alone). */
+export function distortionLine(rec: HowMadeRecord): string {
+  const c = rec.corrected ?? "", partner = rec.inputs?.partner;
+  if (/^corrected/i.test(c)) return "Scanner distortion corrected with the scan taken in the opposite direction (Chang and Fitzpatrick 1992; Ruthotto et al. 2012)";
+  if (/^not corrected/i.test(c) && partner) return "Scanner distortion: not corrected (the scan taken in the opposite direction could not be used)";
+  if (!partner) return "Scanner distortion: not corrected (no reversed scan)";
+  return "Scanner distortion: whether it was corrected is not in this record";
+}
+
 export function howMade(rec: HowMadeRecord | undefined): string[] {
   const r = rec?.rules ?? {}, i = rec?.inputs ?? {};
   const num = (k: string) => (r[k] === undefined ? undefined : Number(r[k]));
@@ -43,7 +60,7 @@ export function howMade(rec: HowMadeRecord | undefined): string[] {
   const out: string[] = [];
   const m = num("motion"), d = num("distortion"), g = num("registration"), t = num("tracking");
   if (m !== undefined) out.push(MOTION[m] ?? unknown("Head movement", m));
-  if (d !== undefined) out.push(i.partner ? "Scanner distortion corrected with the reversed scan (Andersson, Skare and Ashburner 2003)" : "Scanner distortion: not corrected (no reversed scan)");
+  if (d !== undefined) out.push(distortionLine(rec!));
   if (g !== undefined) out.push(!i.t1 ? "Not aligned to a T1 (none in the study)" : notAligned(rec) ?? REGISTRATION[g] ?? unknown("Aligned to the T1", g));
   if (t !== undefined) out.push(TRACKING[t] ?? unknown("Whole-brain tractography", t));
   if (r.labeler !== undefined) out.push("Tracts named by RapidParc (Bisten et al. 2026) on the fiber-cluster atlas of Zhang, O'Donnell et al. (2018)");

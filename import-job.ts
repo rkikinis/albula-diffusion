@@ -29,7 +29,7 @@ import CODE_EQUIVALENCES from "./code-equivalences.json" with { type: "json" };
 import { CONTEXT as RAPIDPARC_CONTEXT, POINTS as RAPIDPARC_POINTS, type RapidParcModel } from "./rapidparc/rapidparc.ts";
 import { adPath, b0Path, colorFaBrainstemPath, colorFaPath, colorFaTalairachPath, dicomToTracts, faPath, mdPath, rdPath, tractsToDicom, UNNAMED, type TractSetData } from "./tracts-dicom.ts";
 import { alignTemplate, frames, HEAD_FRAME_RULE, TALAIRACH_RISE_DEG, type M4 } from "./head-frame.ts";
-import { describeTractSet, DISPLAY_KEYS } from "./tract-set-description.ts";
+import { describeTractSet, DISPLAY_KEYS, DISPLAY_VERSION_KEY, DESCRIPTION_VERSION } from "./tract-set-description.ts";
 import type { Grid3 } from "./registration.ts";
 
 /** The description every stored tracts object carries: how the job finds its own objects in the index. */
@@ -157,6 +157,10 @@ export async function writeDescription(server: string, dbId: string, uid: string
     await r.body?.cancel();
     if (!r.ok) throw new Error(`the attribute ${key} was not stored (${r.status})`);
   }
+  const v = await fetch(`${server.replace(/\/+$/, "")}/_db/${encodeURIComponent(dbId)}/_attribute`, { method: "PUT", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ uid, key: DISPLAY_VERSION_KEY, value: String(DESCRIPTION_VERSION), source: "albula-diffusion" }) });
+  await v.body?.cancel();
+  if (!v.ok) throw new Error(`the attribute ${DISPLAY_VERSION_KEY} was not stored (${v.status})`);
 }
 
 /** The shells of a scan: b-values grouped within 50 of each other, with their volume counts (b = 0 as 0). */

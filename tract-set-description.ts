@@ -8,6 +8,11 @@
 // pathway's count each side; a TOOLTIP that says what one sees first and stands on its own (MODULE-DESIGN-RULES, Words:
 // "Say what was done"). The DICOM browser shows them; this module is the one place that reads a record's meaning.
 
+/** THE DESCRIPTIONS' VERSION, stored beside them as `display_version` (Ron, 2026-10-28: "Are you keeping track of the
+ *  proper versioning?"). 1, 2026-10-27: the tooltip said "Corrected for the scanner's distortion and for head movement"
+ *  for every set Albula made. 2, 2026-10-28: what was done is read from the record (`preparation`). */
+export const DESCRIPTION_VERSION = 2;
+
 export interface TractSetDescription { title: string; line: string; tip: string }
 
 /** The motor pathway's streamline counts, left and right, when the set has one. */
@@ -82,3 +87,5 @@ export function preparation(rec: Rec, brainFromT1: boolean): string {
 
 /** The attribute keys the DICOM browser reads (core's load-panel.ts). */
 export const DISPLAY_KEYS = { title: "display_title", line: "display_line", tip: "display_tip" } as const;
+/** The key the descriptions' version is stored under. */
+export const DISPLAY_VERSION_KEY = "display_version";
