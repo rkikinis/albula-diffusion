@@ -6,5 +6,9 @@
  "df3a48d8f0fd": {
   "same": "3aea33bc12ec",
   "why": "2026-10-22: the naming moved into naming/ (the table loaded alone, TractCloud's network only when asked), the record's naming field reworded, staleness without the commits. The same tracts: PAT16 run through the case runner at f307711 and after the change gave identical results -- every one of the 38 tracts' counts on each side, the streamline totals, named and unnamed, the corrections and the alignment (compared byte for byte, timings left out)."
+ },
+ "e47953f7c611": {
+  "same": "9212644e4cf9",
+  "why": "2026-10-28: albula-diffusion 86290aa -> a526db1, the speed work without the graphics card (SPEED-2026-10-28.md in the workspace, part A: threads, the head frame once per T1, the replaced mask not made, the prepared file) and the job's dcm2niix loader moved (1fcd08f). The import job's dry run on Martinos Prisma dMRI_dir98_AP, with the distortion field and the mirror test, gives the same result fingerprint on both (2ead1614fbd1791a...: every streamline, name and side, the fit's FA, MD and masks, the head frame, the alignment), 524 s against 387 s."
  }
 }
