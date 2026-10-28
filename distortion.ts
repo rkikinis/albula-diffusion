@@ -64,6 +64,11 @@ export interface EpiPair {
   axis: 0 | 1 | 2;
   /** Voxel size along i, j, k in mm, for the movement between the scans (rule 2); default 1. */
   voxel?: [number, number, number];
+  /** ONE-SIDED (2026-10-28, SYNTHETIC-B0.md in the workspace): `plus` is an image with NO distortion -- a b = 0 made from
+   *  the T1 (Synb0-DisCo, Schilling et al. 2019) -- not one taken the opposite way. The residual is then
+   *  r(b) = I₋(x − Ab)⊙(1 − D₁b) − S(x), topup's pairing with an image of "infinite bandwidth"; the field b means the same
+   *  as in the pair (applyField(fit, minus, -1) undistorts the scan), and the solver is unchanged but for r's two terms. */
+  oneSided?: boolean;
 }
 
 export interface FieldFit {
@@ -104,7 +109,7 @@ const phi1 = (t: number) => (4 * t ** 3 - 2 * t ** 5) / (1 - t * t) ** 2;
 const phi2 = (t: number) => (2 * t * t * (t ** 4 - 3 * t * t + 6)) / (1 - t * t) ** 3;
 
 /** Fit b on one level, starting from b0 (or zero). */
-function fitLevel(g: Grid, plus: Float32Array, minus: Float32Array, b0: Float32Array | null, alpha: number, beta: number): { b: Float32Array; iterations: number; residual: number } {
+function fitLevel(g: Grid, plus: Float32Array, minus: Float32Array, b0: Float32Array | null, alpha: number, beta: number, oneSided = false): { b: Float32Array; iterations: number; residual: number } {
   const { m, lines, start, stride, u, w } = g, F = m + 1, nb = lines * F, gamma = 1e-3;
   // Lines of both images and their centered derivatives along the axis.
   const L1: Float32Array[] = [], L2: Float32Array[] = [], G1: Float32Array[] = [], G2: Float32Array[] = [];
@@ -130,14 +135,17 @@ function fitLevel(g: Grid, plus: Float32Array, minus: Float32Array, b0: Float32A
         const j = bb[o + q + 1] - bb[o + q];
         if (!(j > -1 && j < 1)) return Infinity;
         const s = 0.5 * (bb[o + q] + bb[o + q + 1]);
-        const i1 = lerp(L1[l], q + s), i2 = lerp(L2[l], q - s);
-        const rr = i1 * (1 + j) - i2 * (1 - j);
+        const i2 = lerp(L2[l], q - s);
+        // Two-sided: r = I₊(q + s)(1 + j) − I₋(q − s)(1 − j). One-sided: r = I₋(q − s)(1 − j) − S(q), so ∂r/∂s = −I₋'(1 − j)
+        // and ∂r/∂j = −I₋ (U and W below; the rows of Jᵣ on faces q, q+1 are 0.5U ∓ W in both).
+        const i1 = oneSided ? L1[l][q] : lerp(L1[l], q + s);
+        const rr = oneSided ? i2 * (1 - j) - i1 : i1 * (1 + j) - i2 * (1 - j);
         E += rr * rr; S += j * j; P += phi(j);
         if (keep) {
           const k = l * m + q;
           r[k] = rr;
-          U[k] = lerp(G1[l], q + s) * (1 + j) + lerp(G2[l], q - s) * (1 - j);
-          W[k] = i1 + i2;
+          U[k] = oneSided ? -lerp(G2[l], q - s) * (1 - j) : lerp(G1[l], q + s) * (1 + j) + lerp(G2[l], q - s) * (1 - j);
+          W[k] = oneSided ? -i2 : i1 + i2;
         }
       }
     }
@@ -320,7 +328,7 @@ export function estimateField(pair: EpiPair, opts: { alpha?: number; beta?: numb
   for (let lv = pyr.length - 1; lv >= 0; lv--) {
     const L = pyr[lv], g = grid(L.dims, pair.axis);
     const start = b && gPrev ? prolong(b, gPrev, g) : opts.start ?? null;
-    const fit = fitLevel(g, L.plus, L.minus, start, alpha, beta);
+    const fit = fitLevel(g, L.plus, L.minus, start, alpha, beta, !!pair.oneSided);
     levels.push({ dims: L.dims, iterations: fit.iterations, residual: fit.residual });
     b = fit.b; gPrev = g;
   }
@@ -415,7 +423,8 @@ export function fitMotion(fit: FieldFit, pair: EpiPair, voxel: [number, number, 
     .concat([0, 1, 2].filter((a) => opts.rotations !== "about-axis" || a === pair.axis).map((a) => ({ kind: "r" as const, a, h: 1e-3 })));
   const blur = opts.blur ?? MOTION_BLUR;
   const corrMinus = applyField(fit, blur > 0 ? gaussSmooth(pair.minus, pair.dims, blur) : pair.minus, -1), plusB = blur > 0 ? gaussSmooth(pair.plus, pair.dims, blur) : Float32Array.from(pair.plus);
-  const resid = (mo: Motion) => { const c = applyField(fit, moveRigid(plusB, pair.dims, voxel, mo), 1); for (let v = 0; v < c.length; v++) c[v] -= corrMinus[v]; return c; };
+  // One-sided: the image with no distortion is only moved, never warped by the field.
+  const resid = (mo: Motion) => { const moved = moveRigid(plusB, pair.dims, voxel, mo), c = pair.oneSided ? moved : applyField(fit, moved, 1); for (let v = 0; v < c.length; v++) c[v] -= corrMinus[v]; return c; };
   const ssd = (r: Float32Array) => { let s = 0; for (const x of r) s += x * x; return s; };
   const with_ = (mo: Motion, d: number[]) => { const n: Motion = { t: [...mo.t], r: [...mo.r] }; free.forEach((f, k) => { n[f.kind][f.a] += d[k]; }); return n; };
   let mo: Motion = { t: [...start.t], r: [...start.r] }, r0 = resid(mo), E = ssd(r0), lambda = 1e-3;

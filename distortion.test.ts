@@ -53,6 +53,30 @@ Deno.test("a phantom distorted both ways by a known field is put back: field wit
   assert(after < 0.25 * before, `image error ${Math.sqrt(before / cnt)} -> ${Math.sqrt(after / cnt)}`);
 });
 
+// One-sided (2026-10-28): the scan against an image with NO distortion (a synthetic b = 0 from the T1, Synb0-DisCo).
+Deno.test("one-sided: a phantom distorted one way is put back against the undistorted image: field within 0.3 voxel", () => {
+  const dims: [number, number, number] = [24, 48, 12], [nx, ny, nz] = dims, n = nx * ny * nz;
+  const img = new Float32Array(n), b = new Float32Array(n);
+  for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+    const v = (k * ny + j) * nx + i;
+    const e = ((i - 12) / 10) ** 2 + ((j - 24) / 20) ** 2 + ((k - 6) / 5) ** 2;
+    img[v] = e < 1 ? 100 + 60 * Math.sin(j / 2.2) * Math.cos(i / 3) : 0;
+    b[v] = 2.5 * Math.exp(-(((j - 34) / 8) ** 2 + ((i - 12) / 9) ** 2 + ((k - 6) / 6) ** 2));
+  }
+  const minus = distort(img, b, dims, -1);
+  const fit = estimateField({ dims, plus: img, minus, axis: 1, oneSided: true });
+  const est = fieldAtCenters(fit), cm = applyField(fit, minus, -1);
+  let sumErr = 0, cnt = 0, before = 0, after = 0;
+  for (let v = 0; v < n; v++) {
+    if (img[v] <= 0) continue;
+    sumErr += Math.abs(est[v] - b[v]); cnt++;
+    before += (minus[v] - img[v]) ** 2; after += (cm[v] - img[v]) ** 2;
+  }
+  console.log(`one-sided phantom: field error mean ${(sumErr / cnt).toFixed(3)} voxel; image error ${Math.sqrt(before / cnt).toFixed(1)} -> ${Math.sqrt(after / cnt).toFixed(1)}`);
+  assert(sumErr / cnt < 0.3, `mean field error ${sumErr / cnt}`);
+  assert(after < 0.25 * before, `image error ${Math.sqrt(before / cnt)} -> ${Math.sqrt(after / cnt)}`);
+});
+
 /** Mutual information of two images over voxels where both are non-zero (32 bins each). */
 function mutualInformation(a: Float32Array, c: Float32Array): number {
   const B = 32, h = new Float64Array(B * B);
