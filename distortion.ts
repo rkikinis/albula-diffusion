@@ -30,8 +30,29 @@
 // does not model it (the field absorbs it); rule 2 (2026-10-03, the default) estimates it with the field -- see "Motion
 // between the two scans" below.
 
-/** 1: the field alone, α = 200 (2026-09-29). 2: the field with the reversed scan's movement, α = 500 (2026-10-03). */
-export const DISTORTION_RULE = 2;
+/** 1: the field alone, α = 200 (2026-09-29). 2: the field with the reversed scan's movement, α = 500 (2026-10-03).
+ *  3: rule 2 with the two images' brightness matched before the fit (2026-10-28; `matchBrightness`). Rule 2 compares the
+ *  two images' brightness directly; on OpenNeuro ds005123 the diffusion scan is brightness-normalized by the scanner
+ *  (ImageType NORM) and its b = 0 field maps are not -- the scan's b = 0 runs from 1.0 of the field map's brightness at
+ *  the bottom of the head to 0.58 at the top (sub-10317) -- and the fit bent the field to explain it: the corrected scan
+ *  agreed WORSE with the T1 than the uncorrected one in 21 of 22 (Contents/docs/fieldmap-check-2026-10-28.md in the
+ *  workspace, and its critic). Matched first, all 28 were corrected and all 28 agreed better (Ron, 2026-10-28: yes). */
+export const DISTORTION_RULE = 3;
+
+/** RULE 3'S BRIGHTNESS MATCH: the scan's b = 0 divided by the smooth ratio of its brightness to the partner's (Gaussian,
+ *  σ = 8 voxels, the ratio held within 0.3-3), where the smoothed partner is above a tenth of its 99th percentile, and 1
+ *  elsewhere. Smooth on purpose: it takes up a brightness that varies over the head (a normalization, a coil), not the
+ *  sharp, opposite displacements the field is fitted to. For the fit only; the field is applied to the scan as acquired. */
+export function matchBrightness(scan: Float32Array, partner: Float32Array, dims: [number, number, number], sigma = 8): Float32Array {
+  const ss = gaussSmooth(scan, dims, sigma), sp = gaussSmooth(partner, dims, sigma);
+  const sample: number[] = []; for (let v = 0; v < sp.length; v += 7) sample.push(sp[v]); sample.sort((a, b) => a - b);
+  const floor = 0.1 * (sample[Math.floor(sample.length * 0.99)] || 0), out = new Float32Array(scan.length);
+  for (let v = 0; v < scan.length; v++) {
+    const r = sp[v] > floor && ss[v] > 0 ? Math.min(3, Math.max(0.3, ss[v] / sp[v])) : 1;
+    out[v] = scan[v] / r;
+  }
+  return out;
+}
 
 export interface EpiPair {
   dims: [number, number, number];

@@ -2,7 +2,7 @@
 // case-library run (Contents/tools/dmri-cases.ts in the workspace; Ron's rules for tools: "a case library with 10 or
 // more cases", half for development, half for testing) call the same code, so what is measured is what the app does.
 import type { DiffusionSeries } from "./dwi.ts";
-import { applyField, estimateField, estimateFieldWithMotion, fieldAtCenters, type FieldFit } from "./distortion.ts";
+import { applyField, DISTORTION_RULE, estimateField, estimateFieldWithMotion, fieldAtCenters, matchBrightness, type FieldFit } from "./distortion.ts";
 import type { TensorFit } from "./tensor.ts";
 import { rng } from "./random.ts";
 import type { TractTable } from "./naming/table.ts";
@@ -105,7 +105,7 @@ export function stageText(t: StageTimes): string {
  * let PAT03 through (47% of the difference left, under the 50% refusal) while a true pair, CON01, leaves 40% -- the
  * residual cannot tell them apart.
  */
-export async function correctWithReversed(dwi: DiffusionSeries, reversed: ArrayLike<number>[], name: string, progress?: (s: string) => void, opts: { partnerGrid?: Grid; times?: StageTimes; /** distortion.ts DISTORTION_RULE; default 2. */ rule?: 1 | 2; /** The recorded phase-encoding directions, BIDS style ("j-"), when known. */ phaseEncoding?: { scan?: string; partner?: string }; /** false: the field is found but not applied; it is handed back in `field` (registration.ts resampleOntoT1 applies it with the move to the T1, in one resampling). */ apply?: boolean; field?: { fit?: FieldFit; sign?: 1 | -1 } } = {}): Promise<string> {
+export async function correctWithReversed(dwi: DiffusionSeries, reversed: ArrayLike<number>[], name: string, progress?: (s: string) => void, opts: { partnerGrid?: Grid; times?: StageTimes; /** distortion.ts DISTORTION_RULE (the default). */ rule?: 1 | 2 | 3; /** The recorded phase-encoding directions, BIDS style ("j-"), when known. */ phaseEncoding?: { scan?: string; partner?: string }; /** false: the field is found but not applied; it is handed back in `field` (registration.ts resampleOntoT1 applies it with the move to the T1, in one resampling). */ apply?: boolean; field?: { fit?: FieldFit; sign?: 1 | -1 } } = {}): Promise<string> {
   // Either form: BIDS's signed voxel axis ("j-"), or DICOM's In-plane Phase Encoding Direction (ROW = the voxel axis i,
   // COL = j; no sign -- then only the axis is checked). diffusion-vendors.ts phaseEncodingOf reads both from a file.
   // COMPARED IN THE PATIENT, NOT BY NAME (critic, 2026-10-03, finding 2): each record names an axis of ITS OWN grid; the
@@ -139,8 +139,10 @@ export async function correctWithReversed(dwi: DiffusionSeries, reversed: ArrayL
     aligned = `; ${name} was placed differently by the scanner (${shift.toFixed(1)} mm, ${(Math.acos(Math.min(1, cos)) * 180 / Math.PI).toFixed(1)}°) and was aligned by the scanner's coordinates first`;
     if (opts.times) opts.times.align = performance.now() - ta;
   }
-  const minus = meanOf(dwi.volumes.filter((_, i) => dwi.bValues[i] < 50).map((v) => v.data));
-  const dims = grid.dims as [number, number, number];
+  const rule = opts.rule ?? DISTORTION_RULE, dims = grid.dims as [number, number, number];
+  const acquired = meanOf(dwi.volumes.filter((_, i) => dwi.bValues[i] < 50).map((v) => v.data));
+  // Rule 3: the scan's brightness matched to the partner's, for the fit only (distortion.ts matchBrightness).
+  const minus = rule === 3 ? matchBrightness(acquired, plus, dims) : acquired;
   const tf = performance.now();
   let best: FieldFit | undefined, bestLeft = Infinity;
   for (const axis of (recordedAxis !== undefined ? [recordedAxis] : [0, 1]) as (0 | 1 | 2)[]) {
@@ -151,7 +153,7 @@ export async function correctWithReversed(dwi: DiffusionSeries, reversed: ArrayL
     if (left < bestLeft) { best = f; bestLeft = left; }
   }
   let moved = "";
-  if (best && bestLeft <= 0.5 && (opts.rule ?? 2) === 2) {
+  if (best && bestLeft <= 0.5 && rule >= 2) {
     progress?.(`Correcting distortion with ${name}: allowing for movement between the two scans…`);
     await yieldNow();
     const M0 = grid.ijkToRAS, voxel = [0, 1, 2].map((c) => Math.hypot(M0[c], M0[4 + c], M0[8 + c])) as [number, number, number];
@@ -169,7 +171,7 @@ export async function correctWithReversed(dwi: DiffusionSeries, reversed: ArrayL
   if (opts.times) opts.times.apply = performance.now() - tp;
   const M = dwi.volumes[0].ijkToRAS, col = best.axis, mmPerVox = Math.hypot(M[col], M[4 + col], M[8 + col]);
   let mx = 0; for (const x of fieldAtCenters(best)) mx = Math.max(mx, Math.abs(x));
-  return `corrected with ${name} (shifts up to ${(mx * mmPerVox).toFixed(1)} mm; ${Math.round(bestLeft * 100)}% of the two scans' difference left)${moved}${aligned}`;
+  return `corrected with ${name} (shifts up to ${(mx * mmPerVox).toFixed(1)} mm; ${Math.round(bestLeft * 100)}% of the two scans' difference left)${moved}${rule === 3 ? "; the two scans' brightness matched first" : ""}${aligned}`;
 }
 
 /** WHOLE-BRAIN TRACKING for naming: TractCloud learned from about 10,000 streamlines a brain. Seeded in the brain only
