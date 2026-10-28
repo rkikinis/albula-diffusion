@@ -483,6 +483,9 @@ export function trackSets(sl: Float32Array[], tract: Int32Array, side: Int8Array
  * ONE CASE: the pipeline on the planned scan, its tracts written and indexed through the server -- unless tracts made
  * by the same code, rules and inputs are already stored.
  */
+/** The head frames made in this run, by T1 (one run is one program: the template, the code and the rule are the same). */
+const framesOfT1 = new Map<string, { rule: number; templateToPatient: M4; talairach: M4; brainstem: M4; stages: { name: string; cost: number; costAtStart: number }[]; seconds: number }>();
+
 export async function makeTracts(dbDir: string, dbId: string, server: string, plan: { dwi: ReadSeries; partner?: ReadSeries; t1?: ReadSeries; partnerRefusals?: { uid: string; description: string; why: string }[] }, device: GPUDevice, model: TractTable,
   labeler: RapidParcModel, versions: { code: string; labeler: string; synthstrip: string; headTemplate?: string; core?: string; extension?: string }, onProgress?: (line: string) => void, opts: { force?: boolean; dryRun?: boolean;
     /** The reversed scan was chosen by the caller, not by partnerOf: when it is refused (its record says it is not a reversed
@@ -530,7 +533,7 @@ export async function makeTracts(dbDir: string, dbId: string, server: string, pl
     ...(plan.partner ? { partner: { b0s: plan.partner.frames.filter((v) => Number(diffusionOf(v)?.bValue ?? 0) < 50).map((v) => v.data as ArrayLike<number>), grid: { dims: plan.partner.frames[0].dims, ijkToRAS: plan.partner.frames[0].ijkToRAS }, name: "the reversed scan" } } : {}),
     phaseEncoding: { scan: plan.dwi.facts.phaseEncoding, partner: plan.partner?.facts.phaseEncoding },
     t1: { dims: t1v.dims as [number, number, number], ijkToRAS: t1v.ijkToRAS, data: t1v.data as ArrayLike<number> },
-    brainT1: brain.mask }, device, model, { labeler, ...(opts.requirePartner ? { stopWithoutField: true } : {}) }, stages); }
+    brainT1: brain.mask }, device, model, { labeler, threads: { rigid: new URL("./rigid-worker.ts", import.meta.url), motion: new URL("./motion-worker.ts", import.meta.url) }, ...(opts.requirePartner ? { stopWithoutField: true } : {}) }, stages); }
   catch (e) {
     if ((e as { noField?: boolean }).noField) return { state: "cannot", why: `the reversed scan ${plan.partner!.facts.description} was given but not used, so nothing was made: ${(e as Error).message}` };
     throw e;
@@ -543,7 +546,7 @@ export async function makeTracts(dbDir: string, dbId: string, server: string, pl
   // THE HEAD'S OWN FRAME (head-frame.ts; Ron, 2026-10-06: "You must use anatomic orientation, not scanner orientation"):
   // the template aligned to the T1, weighted to the diencephalon and the midbrain; the two frames go into the record, and
   // the direction-colored maps are colored in them.
-  let headFrame: { rule: number; templateToPatient: M4; talairach: M4; brainstem: M4; stages: { name: string; cost: number; costAtStart: number }[]; seconds: number } | undefined;
+  let headFrame: { rule: number; templateToPatient: M4; talairach: M4; brainstem: M4; stages: { name: string; cost: number; costAtStart: number }[]; seconds: number; takenFrom?: string } | undefined;
   // Only when the tracts are on the T1's axes (the frame is the T1's), and never at the cost of the case: a frame that
   // cannot be found leaves the case without one, said (critic 2026-10-07, finding 8).
   let frameNote = "";
@@ -551,9 +554,16 @@ export async function makeTracts(dbDir: string, dbId: string, server: string, pl
     onProgress?.("finding the head's own frame (the template on the T1, deep structures first)");
     try {
       const h0 = performance.now(), t1g = { dims: t1v.dims as [number, number, number], ijkToRAS: t1v.ijkToRAS, data: t1v.data as ArrayLike<number> };
-      const fit = await alignTemplate(t1g, opts.template.t1, opts.template.brain), fr = frames(fit, TALAIRACH_RISE_DEG);
-      headFrame = { rule: HEAD_FRAME_RULE, templateToPatient: fit.templateToPatient, talairach: fr.talairach.toPatient, brainstem: fr.brainstem.toPatient,
-        stages: fit.stages.map((x) => ({ name: x.name, cost: +x.cost.toFixed(4), costAtStart: +x.costAtStart.toFixed(4) })), seconds: +((performance.now() - h0) / 1000).toFixed(1) };
+      // ONCE PER T1 IN A RUN (SPEED-2026-10-28.md, A1): the frame is the template on the T1 alone, so a second diffusion
+      // scan of the same T1 (the Prisma study has two) takes the first one's; the record says it was taken.
+      const had = framesOfT1.get(plan.t1.facts.uid);
+      if (had) headFrame = { ...had, seconds: 0, takenFrom: "the same T1's frame, made earlier in this run" };
+      else {
+        const fit = await alignTemplate(t1g, opts.template.t1, opts.template.brain, undefined, { workerUrl: new URL("./rigid-worker.ts", import.meta.url) }), fr = frames(fit, TALAIRACH_RISE_DEG);
+        headFrame = { rule: HEAD_FRAME_RULE, templateToPatient: fit.templateToPatient, talairach: fr.talairach.toPatient, brainstem: fr.brainstem.toPatient,
+          stages: fit.stages.map((x) => ({ name: x.name, cost: +x.cost.toFixed(4), costAtStart: +x.costAtStart.toFixed(4) })), seconds: +((performance.now() - h0) / 1000).toFixed(1) };
+        framesOfT1.set(plan.t1.facts.uid, headFrame);
+      }
       stages.frame = performance.now() - h0;
     } catch (e) { frameNote = `; the head's own frame could not be found (${(e as Error).message})`; }
   } else if (opts.template) frameNote = "; no head frame (the scan is not on the T1's axes)";

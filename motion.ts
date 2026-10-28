@@ -116,7 +116,7 @@ function solve(A: Float64Array, b: Float64Array, n: number): Float64Array | unde
 // ── Points of the reference, and reading an image at them through a move ───────────────────────
 
 /** Points of the reference (RAS), each with the field's shift there (mm, along the phase-encoding axis) and its stretch. */
-interface Points { n: number; x: Float64Array; shift: Float32Array; w: Float32Array }
+export interface Points { n: number; x: Float64Array; shift: Float32Array; w: Float32Array }
 
 function pointsAt(ras: Float64Array, grid: { dims: [number, number, number]; ijkToRAS: number[] }, fd: { b: Float32Array; slope: Float32Array; axis: number; sign: 1 | -1 } | undefined): Points {
   const n = ras.length / 3, shift = new Float32Array(3 * n), w = new Float32Array(n).fill(1);
@@ -145,7 +145,7 @@ function voxelsRas(grid: { dims: [number, number, number]; ijkToRAS: number[] },
 }
 
 /** An image (on the scan's grid) read at the reference points through a move: w · V(m(x) + shift + eddy shift). */
-function readMoved(data: ArrayLike<number>, dims: [number, number, number], Si: number[], P: Points, m: Move): Float32Array {
+export function readMoved(data: ArrayLike<number>, dims: [number, number, number], Si: number[], P: Points, m: Move): Float32Array {
   const out = new Float32Array(P.n), one = new Float64Array(1), R = m.R, c = m.c, t = m.t;
   const g = m.ec?.g ?? [0, 0, 0], e = m.ec?.e ?? [0, 0, 0], stretch = 1 + (g[0] * e[0] + g[1] * e[1] + g[2] * e[2]) / 100;
   for (let p = 0; p < P.n; p++) {
@@ -159,9 +159,16 @@ function readMoved(data: ArrayLike<number>, dims: [number, number, number], Si: 
   return out;
 }
 
+/** Values at the region's points spread onto the whole grid (zeros elsewhere). */
+export function scatterTo(idx: Int32Array, nv: number, vals: Float32Array): Float32Array { const o = new Float32Array(nv); for (let p = 0; p < idx.length; p++) o[idx[p]] = vals[p]; return o; }
+/** An image on the scan's grid, at each level's points (block means on the coarse level). */
+export function targetsAt(levels: Level[], full: { dims: [number, number, number]; ijkToRAS: number[] }, img: Float32Array): Float32Array[] {
+  return levels.map((L) => { const g = L.mm > 0 ? coarsen({ ...full, data: img }, L.mm) : { ...full, data: img }; const o = new Float32Array(L.idx.length); for (let p = 0; p < o.length; p++) o[p] = Number(g.data[L.idx[p]]); return o; });
+}
+
 // ── One image to its target: rigid + gain + offset, Gauss-Newton with damping ───────────────────
 
-interface Level { grid: { dims: [number, number, number]; ijkToRAS: number[] }; Si: number[]; mm: number; P: Points; idx: Int32Array; iterations: number }
+export interface Level { grid: { dims: [number, number, number]; ijkToRAS: number[] }; Si: number[]; mm: number; P: Points; idx: Int32Array; iterations: number }
 
 /** The image and its gradient (RAS mm) interleaved, 4 values a voxel, on a level's grid. */
 function packed(g: Grid3): Float32Array {
@@ -225,7 +232,7 @@ function normalEq(L: Level, img: Float32Array, F: Float32Array, q: Params, c: nu
 
 /** Align one image (scan grid) to its target (values at each level's points), from `start`; with `e`, its eddy-current
  *  slopes along e too. */
-function alignOne(data: ArrayLike<number>, full: { dims: [number, number, number]; ijkToRAS: number[] }, levels: Level[], targets: Float32Array[], start: Move, e?: [number, number, number], ecHeld = false): Move {
+export function alignOne(data: ArrayLike<number>, full: { dims: [number, number, number]; ijkToRAS: number[] }, levels: Level[], targets: Float32Array[], start: Move, e?: [number, number, number], ecHeld = false): Move {
   // ecHeld: start.ec's slopes are applied, not estimated; only the movement (and gain, offset) is.
   if (ecHeld && start.ec) e = start.ec.e;
   const held = ecHeld && !!e, c = start.c, np = e && !held ? 11 : 8, H = new Float64Array(np * np), gr = new Float64Array(np);
@@ -371,7 +378,8 @@ const fromVec = (v: number[], c: [number, number, number]): Rigid => ({ R: rotVe
  * one. Returns each image's move from the reference, the corrected b = 0 mean and brain, and how much better the images
  * agree with their predictions afterwards.
  */
-export async function estimateMotion(dwi: DiffusionSeries, field?: Field, opts: { rounds?: number; /** 1: movement; 2: and eddy currents. */ rule?: 1 | 2 | 3; /** The phase-encoding axis of the scan's voxels (0 i, 1 j, 2 k) when no field gives it. */ peAxis?: 0 | 1 | 2 } = {}): Promise<MotionResult> {
+export async function estimateMotion(dwi: DiffusionSeries, field?: Field, opts: { rounds?: number; /** 1: movement; 2: and eddy currents. */ rule?: 1 | 2 | 3; /** The phase-encoding axis of the scan's voxels (0 i, 1 j, 2 k) when no field gives it. */ peAxis?: 0 | 1 | 2;
+  /** The per-image pieces in a pool of threads (motion-worker.ts): the import job's; the module runs them in turn. */ threads?: { workerUrl: URL } } = {}): Promise<MotionResult> {
   const t0 = performance.now(), src = dwi.volumes[0], full = { dims: src.dims as [number, number, number], ijkToRAS: src.ijkToRAS };
   const Si = inv4(full.ijkToRAS), N = dwi.volumes.length, [nx, ny, nz] = full.dims, nv = nx * ny * nz;
   const b0i = dwi.bValues.map((b, i) => (b < 50 ? i : -1)).filter((i) => i >= 0), shells = shellsOf(dwi);
@@ -405,7 +413,7 @@ export async function estimateMotion(dwi: DiffusionSeries, field?: Field, opts: 
     region[(k * ny + j) * nx + i] = on;
   }
   const reg = voxelsRas(full, (v) => region[v] === 1), regP = pointsAt(reg.ras, full, fd);
-  const scatter = (vals: Float32Array) => { const o = new Float32Array(nv); for (let p = 0; p < reg.idx.length; p++) o[reg.idx[p]] = vals[p]; return o; };
+  const scatter = (vals: Float32Array) => scatterTo(reg.idx, nv, vals);
   // The levels: twice the scan's smallest spacing (block means), then the scan's own grid at every second voxel.
   const sp = spacingOf(full.ijkToRAS), coarseMm = 2 * Math.min(...sp);
   const cMask = coarsen({ ...full, data: mask }, coarseMm), cGrid = { dims: cMask.dims, ijkToRAS: cMask.ijkToRAS };
@@ -423,19 +431,29 @@ export async function estimateMotion(dwi: DiffusionSeries, field?: Field, opts: 
   // through the field again moved every diffusion-weighted image by it (critic, 2026-10-05, finding 1: 2.2 mm on a still
   // synthetic head, 0.37 mm on PAT16).
   const levelsInReference: Level[] = levels.map((L) => ({ ...L, P: pointsAt(L.P.x, full, undefined) }));
-  const targetsOf = (img: Float32Array) => levels.map((L) => { const g = L.mm > 0 ? coarsen({ ...full, data: img }, L.mm) : { ...full, data: img }; const o = new Float32Array(L.idx.length); for (let p = 0; p < o.length; p++) o[p] = Number(g.data[L.idx[p]]); return o; });
+  const targetsOf = (img: Float32Array) => targetsAt(levels, full, img);
+  // SIDE BY SIDE (SPEED-2026-10-28.md, A3): the per-image pieces -- read an image back, align it -- in a pool of threads
+  // (motion-worker.ts), the same functions on the same numbers; without threads, in turn, as before.
+  const pool = opts.threads ? await motionPool(opts.threads.workerUrl, { full, Si, levels, regP, regIdx: reg.idx, nv, volumes: dwi.volumes.map((v) => v.data as ArrayLike<number>) }) : undefined;
 
   // Each image put back, at each level's points (block means on the coarse level).
   const atLevels = (i: number, m: Move) => targetsOf(scatter(readMoved(data(i), full.dims, Si, regP, m)));
+  const allAtLevels = async (mv: Move[]) => pool ? await Promise.all(mv.map((m, i) => pool.run<Float32Array[]>({ kind: "atLevels", i, m }))) : mv.map((m, i) => atLevels(i, m));
+  const alignAll = async (list: number[], targets: (i: number) => Float32Array[], e2?: [number, number, number], hold = false) => {
+    if (pool) { const got = await Promise.all(list.map((i) => pool.run<Move>({ kind: "align", i, targets: targets(i), start: moves[i], e: e2, hold }))); list.forEach((i, k) => { moves[i] = got[k]; }); return; }
+    for (const i of list) { moves[i] = alignOne(data(i), full, levels, targets(i), moves[i], e2, hold); await yieldNow(); }
+  };
+  let before = NaN, after = NaN;
+  try {
   // The predictions of every diffusion-weighted image at each level, and how well the images agree with them (relative
   // root mean square at the fine level's points).
-  const predictAll = (mv: Move[]) => {
+  const predictAll = async (mv: Move[]) => {
     let se = 0, sy = 0;
     const pred = new Map<number, Float32Array[]>();
     const dirs = dwi.gradients.map((g, i) => { const m = mv[i].R; return [m[0] * g[0] + m[3] * g[1] + m[6] * g[2], m[1] * g[0] + m[4] * g[1] + m[7] * g[2], m[2] * g[0] + m[5] * g[1] + m[8] * g[2]]; });
     const predict = scanPredictor(dwi.bValues, dirs);
     if (!predict) return { pred, rel: NaN };
-    const Y = dwi.volumes.map((_, i) => atLevels(i, mv[i]));
+    const Y = await allAtLevels(mv);
     const per = levels.map((_, li) => predict(Y.map((y) => y[li])));
     for (const i of shells.flat()) {
       pred.set(i, levels.map((_, li) => per[li][i]));
@@ -444,7 +462,7 @@ export async function estimateMotion(dwi: DiffusionSeries, field?: Field, opts: 
     }
     return { pred, rel: sy > 0 ? Math.sqrt(se / sy) : NaN };
   };
-  const before = predictAll(moves).rel;
+  before = (await predictAll(moves)).rel;
 
   // Moves between the b = 0 images, at any image's place in the scan (linear in the six numbers).
   const atTime = (i: number, vecs: Map<number, number[]>) => {
@@ -464,19 +482,17 @@ export async function estimateMotion(dwi: DiffusionSeries, field?: Field, opts: 
       const mean = new Float32Array(reg.idx.length);
       for (const i of b0i) { const r = readMoved(data(i), full.dims, Si, regP, moves[i]); for (let p = 0; p < r.length; p++) mean[p] += r[p] / b0i.length; }
       const T = targetsOf(scatter(mean));
-      for (const i of b0i) { moves[i] = alignOne(data(i), full, levels, T, moves[i]); await yieldNow(); }
+      await alignAll(b0i, () => T);
     }
     const b0Vecs = new Map(b0i.map((i) => [i, toVec(moves[i])]));
     // 2. Every other image starts, in the first round, where the b = 0 images say the head was.
     if (round === 0) for (let i = 0; i < N; i++) if (!b0Vecs.has(i)) moves[i] = fromVec(atTime(i, b0Vecs), c);
     // 3. Each diffusion-weighted image to its prediction from the rest of its shell.
-    const { pred } = predictAll(moves);
-    for (const s of shells) {
-      if (!pred.has(s[0])) continue;
-      // Rule 3's last round: the slopes held at the fit over all images, only the movement estimated again.
-      const hold = rule === 3 && !!e && round === rounds - 1;
-      for (const i of s) { moves[i] = alignOne(data(i), full, levels, pred.get(i)!, moves[i], e, hold); if (i % 4 === 0) await yieldNow(); }
-    }
+    const { pred } = await predictAll(moves);
+    // Rule 3's last round: the slopes held at the fit over all images, only the movement estimated again. Every image's
+    // alignment depends only on its own start and its prediction, made above: the shells' order does not matter.
+    const hold = rule === 3 && !!e && round === rounds - 1;
+    await alignAll(shells.filter((s) => pred.has(s[0])).flat(), (i) => pred.get(i)!, e, hold);
     // Rule 3: the slopes tied to the gradient, g = K (√(b/1000) · direction) + g₀, fitted over all diffusion-weighted images
     // after each free round.
     if (rule === 3 && e && round < rounds - 1) {
@@ -516,7 +532,8 @@ export async function estimateMotion(dwi: DiffusionSeries, field?: Field, opts: 
       for (const i of s) { const h = toVec(moves[i]); moves[i] = { ...moves[i], ...fromVec(h.map((x, q) => x + want[q] - have[q]), c) }; }
     }
   }
-  const after = predictAll(moves).rel;
+  after = (await predictAll(moves)).rel;
+  } finally { pool?.close(); }
 
   // The corrected b = 0 mean on the whole grid (the alignment to the T1 reads it), field and movement both.
   const all = voxelsRas(full, () => true), allP = pointsAt(all.ras, full, fd), b0 = new Float32Array(nv);
@@ -535,6 +552,34 @@ export async function estimateMotion(dwi: DiffusionSeries, field?: Field, opts: 
   const eddySaid = e ? `; eddy-current stretch up to ${eddyMm!.toFixed(1)} mm` : rule >= 2 ? "; eddy currents not corrected (the phase-encoding direction is not known)" : "";
   return { rule: e ? (rule === 3 ? 3 : 2) : 1, moves, b0, mask, sizes, largest, ...(eddyMm !== undefined ? { eddyMm } : {}), residual: { before, after }, ms,
     said: `head movement corrected (largest ${largest.mm.toFixed(1)} mm and ${largest.degrees.toFixed(1)}°${eddySaid}; the images agree with each other ${(100 * (1 - after / before)).toFixed(0)}% better)` };
+}
+
+/** A POOL OF THREADS for the per-image pieces (motion-worker.ts). The images go into shared memory once (exact copies,
+ *  their own number type), every thread reads them there; a task names the image by its index. */
+export async function motionPool(url: URL, init: { full: { dims: [number, number, number]; ijkToRAS: number[] }; Si: number[]; levels: Level[]; regP: Points; regIdx: Int32Array; nv: number; volumes: ArrayLike<number>[] }, size = Math.max(1, Math.min(8, ((globalThis.navigator as { hardwareConcurrency?: number } | undefined)?.hardwareConcurrency ?? 4) - 2))) {
+  const shared = init.volumes.map((v) => {
+    const C = (ArrayBuffer.isView(v) ? (v as unknown as { constructor: new (b: SharedArrayBuffer) => ArrayLike<number> & { set(a: ArrayLike<number>): void } }).constructor : Float64Array) as new (b: SharedArrayBuffer) => ArrayLike<number> & { set(a: ArrayLike<number>): void };
+    const bytes = (ArrayBuffer.isView(v) ? (v as unknown as { BYTES_PER_ELEMENT: number }).BYTES_PER_ELEMENT : 8) * v.length;
+    const a = new C(new SharedArrayBuffer(bytes)); a.set(v); return a;
+  });
+  const workers = Array.from({ length: size }, () => new Worker(url, { type: "module" }));
+  await Promise.all(workers.map((w) => new Promise<void>((ok, fail) => {
+    w.onmessage = () => ok(); w.onerror = (e) => { e.preventDefault?.(); fail(new Error(e.message)); };
+    w.postMessage({ init: { ...init, volumes: shared } });
+  })));
+  const idle = [...workers], waiting: (() => void)[] = [];
+  const run = async <T>(task: Record<string, unknown>): Promise<T> => {
+    while (!idle.length) await new Promise<void>((r) => waiting.push(r));
+    const w = idle.pop()!;
+    try {
+      return await new Promise<T>((ok, fail) => {
+        w.onmessage = (e) => { const d = e.data as { ok?: T; error?: string }; if (d.error !== undefined) fail(new Error(d.error)); else ok(d.ok as T); };
+        w.onerror = (e) => { e.preventDefault?.(); fail(new Error(e.message)); };
+        w.postMessage(task);
+      });
+    } finally { idle.push(w); waiting.shift()?.(); }
+  };
+  return { run, close: () => workers.forEach((w) => w.terminate()) };
 }
 
 /** The scan with each image put back (field and movement, one interpolation) on its own grid: for a case without a T1. */

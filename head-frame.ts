@@ -104,7 +104,11 @@ export interface HeadFrameFit {
  * origin need not be near the head's), then aligned on its whole brain, then on the deep box alone. `exclude` (on the
  * template's grid) leaves voxels out of both -- a tumor carried into template space, when known.
  */
-export async function alignTemplate(t1: Grid3, template: Grid3, templateBrain: Uint8Array, exclude?: Uint8Array): Promise<HeadFrameFit> {
+export async function alignTemplate(t1: Grid3, template: Grid3, templateBrain: Uint8Array, exclude?: Uint8Array,
+  /** SIDE BY SIDE (SPEED-2026-10-28.md, A1): the starting tilts' alignments in threads of their own (rigid-worker.ts),
+   *  bit-identical to one after the other; the best is chosen in the same order. Given by the import job; the default
+   *  runs them in turn. */
+  par?: { workerUrl: URL }): Promise<HeadFrameFit> {
   const keep = (m: Uint8Array) => exclude ? m.map((x, v) => (x && !exclude[v] ? 1 : 0)) : m;
   const tc = brightCenter(template, templateBrain), pc = brightCenter(t1);
   const moved = (M: M4): Grid3 => ({ ...template, ijkToRAS: mul4(M, template.ijkToRAS) });
@@ -112,10 +116,14 @@ export async function alignTemplate(t1: Grid3, template: Grid3, templateBrain: U
   // heads lie pitched 4-33 degrees in the scanner on these cases): the template, centered on the T1's bright center, is
   // tipped by each start about its own center; the coarse whole-brain stage runs from each, and the best cost wins.
   let best: { cost: number; M: M4; s: Awaited<ReturnType<typeof rigidToT1>> } | undefined;
-  for (const tilt of PITCH_STARTS) {
-    const start = mul4(translate4(pc), mul4(pitch4(tilt), translate4(tc.map((x) => -x))));
-    const s = await rigidToT1(moved(start), t1, keep(templateBrain), { fwhmMm: [12, 8, 4], fixedMm: 2 });
-    if (!best || s.cost < best.cost) best = { cost: s.cost, M: mul4(rigidM4(s.T), start), s };
+  const starts = PITCH_STARTS.map((tilt) => mul4(translate4(pc), mul4(pitch4(tilt), translate4(tc.map((x) => -x)))));
+  const wholeOpts = { fwhmMm: [12, 8, 4], fixedMm: 2 }, wholeMask = keep(templateBrain);
+  const results = par
+    ? await Promise.all(starts.map((start) => inThread(par.workerUrl, moved(start), t1, wholeMask, wholeOpts)))
+    : [];
+  for (let i = 0; i < starts.length; i++) {
+    const s = par ? results[i] : await rigidToT1(moved(starts[i]), t1, wholeMask, wholeOpts);
+    if (!best || s.cost < best.cost) best = { cost: s.cost, M: mul4(rigidM4(s.T), starts[i]), s };
   }
   const s1 = best!.s, after1 = best!.M;
   const s2 = await rigidToT1(moved(after1), t1, keep(deepMask(template, templateBrain)), { fwhmMm: [6, 4, 3], fixedMm: 1.5, samples: 60000 });
@@ -123,6 +131,18 @@ export async function alignTemplate(t1: Grid3, template: Grid3, templateBrain: U
     templateToPatient: mul4(rigidM4(s2.T), after1),
     stages: [{ name: "whole brain", cost: s1.cost, costAtStart: s1.costAtStart, ms: s1.ms }, { name: "diencephalon and midbrain", cost: s2.cost, costAtStart: s2.costAtStart, ms: s2.ms }],
   };
+}
+
+/** One rigidToT1 in a thread of its own (rigid-worker.ts): the same function on exact copies of the same numbers. */
+export async function inThread(url: URL, moving: Grid3, fixed: Grid3, mask: Uint8Array, opts: Parameters<typeof rigidToT1>[3], wide?: { brainT1?: Grid3 }): Promise<Awaited<ReturnType<typeof rigidToT1>>> {
+  const w = new Worker(url, { type: "module" });
+  try {
+    return await new Promise((ok, fail) => {
+      w.onmessage = (e) => { const d = e.data as { ok?: Awaited<ReturnType<typeof rigidToT1>>; error?: string }; if (d.ok) ok(d.ok); else fail(new Error(d.error ?? "the alignment thread gave no answer")); };
+      w.onerror = (e) => { e.preventDefault?.(); fail(new Error(e.message)); };
+      w.postMessage({ moving, fixed, mask, opts, ...(wide ? { wide: true, brainT1: wide.brainT1 } : {}) });
+    });
+  } finally { w.terminate(); }
 }
 
 /** A frame: its origin and its three axes (the patient's left-right, back-front, down-up; unit vectors in the patient's

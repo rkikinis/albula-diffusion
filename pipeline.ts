@@ -48,6 +48,8 @@ export interface PipelineOptions {
   distortionRule?: 1 | 2 | 3; trackingRule?: TrackingRuleId; motionRule?: MotionRuleId; motionRounds?: number;
   /** registration.ts REGISTRATION_RULE (rules 2 and 3 use SynthStrip's brain on the T1, `brainT1`: rule 2 for its start, rule 3 also as the T1 it aligns to). */
   registrationRule?: RegistrationRuleId;
+  /** Independent pieces of the preparation in threads of their own (SPEED-2026-10-28.md): the import job gives them. */
+  threads?: { rigid: URL; motion: URL };
   /** registration.ts ALIGNMENT_CHECK. */
   alignmentCheck?: AlignmentCheckId;
   /** How the brain mask is made when not from the T1 (tensor.ts), and seeds anywhere in the head (false). */
@@ -103,16 +105,19 @@ export async function wholeBrainTracts(input: PipelineInput, device: GPUDevice, 
     ...(opts.registrationRule ? { registrationRule: opts.registrationRule } : {}), ...(opts.alignmentCheck ? { alignmentCheck: opts.alignmentCheck } : {}),
     ...(input.brainT1 ? { brainT1: { dims: input.brainT1.dims as [number, number, number], ijkToRAS: input.brainT1.ijkToRAS, data: input.brainT1.data } } : {}),
     motionRule: opts.motionRule ?? MOTION_RULE, ...(opts.motionRounds ? { motionRounds: opts.motionRounds } : {}),
-    ...(input.phaseEncoding?.scan ? { phaseEncoding: input.phaseEncoding.scan } : {}), times: stages });
+    ...(input.phaseEncoding?.scan ? { phaseEncoding: input.phaseEncoding.scan } : {}), ...(opts.threads ? { threads: opts.threads } : {}), times: stages });
   dwi = prep.dwi;
   if (prep.said) corrected += `; ${prep.said}`;
   const alignment = prep.alignment;
   const tFit = performance.now();
-  let fit = fitTensors(dwi, { maxB: PIPELINE_MAX_B, maskMethod: opts.maskMethod, seedMask: opts.seedMask });
+  // THE BRAIN MASK THAT WOULD BE REPLACED is not made (SPEED-2026-10-28.md, A4): with the T1's brain on an aligned scan,
+  // withBrainFromT1 below replaces the fit's seed mask (DIPY's median_otsu on the scan's b = 0), which nothing else reads.
+  const brainFromT1Follows = !!(input.brainT1 && alignment && !alignment.doubt);
+  let fit = fitTensors(dwi, { maxB: PIPELINE_MAX_B, maskMethod: opts.maskMethod, seedMask: brainFromT1Follows ? false : opts.seedMask });
   // On the T1-aligned grid only: a doubtful alignment left the scan in the scanner's place, where a T1 mask does not fit,
   // and the case is then tracked under rule 2 and recorded so (critic, 2026-10-04, finding 10).
   let rule = TRACKING_RULES[opts.trackingRule ?? TRACKING_RULE], outsideGridMl: number | undefined;
-  if (input.brainT1 && alignment && !alignment.doubt) ({ fit, outsideGridMl } = withBrainFromT1(fit, input.brainT1, undefined, rule.fluidMdMax, rule.fluidShellVoxels));
+  if (brainFromT1Follows) ({ fit, outsideGridMl } = withBrainFromT1(fit, input.brainT1!, undefined, rule.fluidMdMax, rule.fluidShellVoxels));
   else if (rule.brain === "t1-synthstrip") rule = TRACKING_RULES[2];
   const t1 = performance.now();
   stages.fit = t1 - tFit;

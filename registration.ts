@@ -497,7 +497,10 @@ export async function alignToT1(dwi: DiffusionSeries, t1: Grid3, field?: { fit: 
   opts: { rule?: RegistrationRuleId; brainT1?: Grid3; /** ALIGNMENT_CHECK by default. */ check?: AlignmentCheckId;
     /** THE IMPORT'S ALIGNMENT, taken instead of aligning again (Ron, 2026-10-26: the module "waits for the import"): the
      *  move, its rule, its check's ratio and its doubt as the import job recorded them for this scan and this T1. */
-    given?: GivenAlignment } = {}): Promise<{ dwi: DiffusionSeries; T: Rigid; result: RigidResult & { candidates?: Candidate[] }; said: string; doubt?: string; rule: RegistrationRuleId; /** Check 2: cost / mirrored cost. */ mirrorRatio?: number }> {
+    given?: GivenAlignment;
+    /** SIDE BY SIDE (SPEED-2026-10-28.md, A2): the mirror test's alignment in a thread of its own (rigid-worker.ts) while
+     *  the main one runs, bit-identical; given by the import job, the module runs them in turn. */
+    threads?: { workerUrl: URL } } = {}): Promise<{ dwi: DiffusionSeries; T: Rigid; result: RigidResult & { candidates?: Candidate[] }; said: string; doubt?: string; rule: RegistrationRuleId; /** Check 2: cost / mirrored cost. */ mirrorRatio?: number }> {
   const t0 = performance.now(), src = dwi.volumes[0];
   let b0: Float32Array, mask: Uint8Array;
   if (motion) ({ b0, mask } = motion);
@@ -516,10 +519,12 @@ export async function alignToT1(dwi: DiffusionSeries, t1: Grid3, field?: { fit: 
   const asked = opts.rule ?? REGISTRATION_RULE, rule: RegistrationRuleId = asked === 3 && !opts.brainT1 ? 2 : asked;
   const moving: Grid3 = { dims: src.dims as [number, number, number], ijkToRAS: src.ijkToRAS, data: b0 };
   const target = rule === 3 ? brainOnlyT1(t1, opts.brainT1!) : t1;
+  // Check 2, the mirror test: the same alignment of the same b = 0 mirrored left to right -- an alignment of its own,
+  // started beside the main one when threads are given.
+  const check = opts.check ?? ALIGNMENT_CHECK, mirrored = rule !== 1 && check === 2;
+  const mirrorRun = mirrored && opts.threads ? (await import("./head-frame.ts")).inThread(opts.threads.workerUrl, mirroredLeftRight(moving, mask), target, mask, {}, { brainT1: opts.brainT1 }) : undefined;
   const result = rule === 1 ? await rigidToT1(moving, t1, mask) : await rigidToT1Wide(moving, target, mask, opts.brainT1);
-  // Check 2, the mirror test: the same alignment of the same b = 0 mirrored left to right.
-  const check = opts.check ?? ALIGNMENT_CHECK;
-  const mirrorRatio = rule !== 1 && check === 2 ? result.cost / (await rigidToT1Wide(mirroredLeftRight(moving, mask), target, mask, opts.brainT1)).cost : undefined;
+  const mirrorRatio = mirrored ? result.cost / (mirrorRun ? await mirrorRun : await rigidToT1Wide(mirroredLeftRight(moving, mask), target, mask, opts.brainT1)).cost : undefined;
   const t1Done = performance.now();
   if (times) times.register = t1Done - t0;
   const out = await resampleOntoT1(dwi, result.T, t1, field, { cover: mask, rule, ...(motion ? { motion: motion.moves } : {}) });
