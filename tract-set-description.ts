@@ -53,12 +53,31 @@ export function describeTractSet(rec: Rec, motor?: MotorCounts): TractSetDescrip
   if (t.otherProgram) tip.push(t.brainFromT1
     ? "Traced with a second research program, tractline (M. Halle, 2026), inside the brain found on the T1 scan."
     : "Traced with a second research program, tractline (M. Halle, 2026), which finds the brain on the diffusion scan itself; that can leave out part of the brainstem, so fibers may stop at the internal capsule.");
-  else tip.push("Corrected for the scanner's distortion and for head movement, aligned to the T1 scan, and traced inside the brain found on the T1.");
+  else tip.push(preparation(rec, t.brainFromT1));
   if (t.stopsAtCortex) tip.push("Each fiber is stopped where it reaches the cortex, so fewer end outside the brain.");
   if (t.secondNamer) tip.push("The fibers are named by a second naming program, to show how much the names depend on the program.");
   if (t.motorChecked) tip.push("Fibers named motor pathway are kept only if they avoid the thalamus and putamen, pass the crus of the cerebral peduncle and end in the motor cortex.");
   if (t.motorByAnatomy) tip.push("The motor pathway is every fiber that runs through the front of the cerebral peduncle to the motor cortex, whatever the atlas called it; fibers called motor pathway that run elsewhere are not counted.");
   return { title, line, tip: tip.join(" ") };
+}
+
+/** What was done to the scan before tracing, from the record's own words (the job's `corrected` sentence and
+ *  `alignedToT1`), never assumed: on 2026-10-28 the tooltip said "Corrected for the scanner's distortion" for all of
+ *  them, and 26 of the 96 stored sets were not (no reversed scan, or one that did not match). */
+export function preparation(rec: Rec, brainFromT1: boolean): string {
+  const c = str(rec.corrected);
+  const distortion = /^corrected/i.test(c) ? "Corrected for the scanner's distortion"
+    : /^not corrected/i.test(c) ? "Not corrected for the scanner's distortion (no usable second scan taken in the opposite direction), so fibers may be shifted, most near the skull base and the sinuses"
+    : "";
+  const movement = /head movement corrected/i.test(c) ? "corrected for head movement"
+    : /head movement not corrected/i.test(c) ? "not corrected for head movement (the correction did not improve the images)" : "";
+  const aligned = rec.alignedToT1 === true ? "aligned to the T1 scan" : rec.alignedToT1 === false ? "not aligned to the T1 scan" : "";
+  const where = brainFromT1 ? "traced inside the brain found on the T1" : "traced inside the brain found on the diffusion scan";
+  if (/^Corrected/.test(distortion) && /^corrected/.test(movement) && rec.alignedToT1 === true && brainFromT1)
+    return "Corrected for the scanner's distortion and for head movement, aligned to the T1 scan, and traced inside the brain found on the T1.";
+  const parts = [distortion, movement, aligned, where].filter(Boolean);
+  const s = parts.length > 1 ? `${parts.slice(0, -1).join("; ")}; ${parts.at(-1)}` : parts[0];
+  return s[0].toUpperCase() + s.slice(1) + ".";
 }
 
 /** The attribute keys the DICOM browser reads (core's load-panel.ts). */
