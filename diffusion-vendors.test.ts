@@ -279,6 +279,8 @@ Deno.test("Siemens' phase-encoding sign: XA enhanced (per frame), XA single-fram
   assertEquals(phaseEncodingOf("COL", {}), "COL");
 });
 
+// Looks in diffusion-vendors.ts only, by the form of its calls: a private-tag reader in another file of this extension,
+// or written another way, needs its own line here (core's critic 2026-10-29, finding 12).
 Deno.test("private-reads.json covers every vendor lookup in diffusion-vendors.ts", async () => {
   const DIFFUSION_PRIVATE_READS = (JSON.parse(await Deno.readTextFile(new URL("./private-reads.json", import.meta.url))) as { reads: { group: string; creator: string; elements: string[] }[] }).reads;
   const src = await Deno.readTextFile(new URL("./diffusion-vendors.ts", import.meta.url));
