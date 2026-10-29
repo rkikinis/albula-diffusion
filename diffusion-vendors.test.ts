@@ -278,3 +278,23 @@ Deno.test("Siemens' phase-encoding sign: XA enhanced (per frame), XA single-fram
   assertEquals(phaseEncodingOf("ROW", {}, 1), "i");
   assertEquals(phaseEncodingOf("COL", {}), "COL");
 });
+
+Deno.test("private-reads.json covers every vendor lookup in diffusion-vendors.ts", async () => {
+  const DIFFUSION_PRIVATE_READS = (JSON.parse(await Deno.readTextFile(new URL("./private-reads.json", import.meta.url))) as { reads: { group: string; creator: string; elements: string[] }[] }).reads;
+  const src = await Deno.readTextFile(new URL("./diffusion-vendors.ts", import.meta.url));
+  const consts = new Map([...src.matchAll(/const ([A-Z_]+) = "([^"]+)";/g)].map((m) => [m[1], m[2]]));
+  const used: string[] = [];
+  for (const line of src.split("\n")) {
+    if (/^\s*(\*|\/\/)/.test(line)) continue;
+    for (const m of line.matchAll(/(?:\bat|privateTag)\(\w+, "([0-9A-F]{4})", (?:"([^"]+)"|([A-Z_]+)), (?:"([0-9A-F]{2})"|e)\)/g)) {
+      const creator = m[2] ?? consts.get(m[3]!) ?? `?${m[3]}`;
+      // An element in a loop: the list it loops over, on the same line.
+      const elements = m[4] ? [m[4]] : [...(/\[((?:"[0-9A-F]{2}",?\s*)+)\]\.map\(\(e\)/.exec(line)?.[1] ?? "").matchAll(/"([0-9A-F]{2})"/g)].map((x) => x[1]);
+      assert(elements.length, `a lookup whose elements this test cannot read: ${line.trim()}`);
+      for (const e of elements) used.push(`${m[1]}|${creator}|${e}`);
+    }
+  }
+  const declared = new Set(DIFFUSION_PRIVATE_READS.flatMap((r) => r.elements.map((e) => `${r.group}|${r.creator}|${e}`)));
+  assert(used.length >= 12, `found ${used.length} lookups`);
+  assertEquals(used.filter((u) => !declared.has(u)), []);
+});

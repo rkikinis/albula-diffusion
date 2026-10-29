@@ -1,0 +1,14 @@
+{
+  "about": "THE VENDOR PRIVATE ELEMENTS THE DIFFUSION RULES READ (diffusion-vendors.ts), declared for core's private-fields check (logic/readers/private-survey.ts): the Databases window compares them with what a database's series hold, so a private block no rule reads is shown as a gap rather than passed over in silence. Data, not code: no code fingerprint covers it, so declaring changes no working copy and no tract set. diffusion-vendors.test.ts checks this list against every lookup in diffusion-vendors.ts. 'part': only some of what the element holds is read.",
+  "version": 1,
+  "reads": [
+    { "group": "0029", "creator": "SIEMENS CSA HEADER", "elements": ["10"], "what": "b-value, gradient direction and the sign of the phase encoding (Siemens' CSA image header)", "part": true },
+    { "group": "0019", "creator": "SIEMENS MR HEADER", "elements": ["0C", "0E"], "what": "b-value and gradient direction (Siemens)" },
+    { "group": "0021", "creator": "SIEMENS MR SDI 02", "elements": ["1C", "FE"], "what": "the sign of the phase encoding (Siemens XA)", "part": true },
+    { "group": "0043", "creator": "GEMS_PARM_01", "elements": ["39"], "what": "b-value (GE)" },
+    { "group": "0019", "creator": "GEMS_ACQU_01", "elements": ["BB", "BC", "BD"], "what": "gradient direction (GE)" },
+    { "group": "2001", "creator": "Philips Imaging DD 001", "elements": ["03"], "what": "b-value (Philips)" },
+    { "group": "2005", "creator": "Philips MR Imaging DD 001", "elements": ["B0", "B1", "B2"], "what": "gradient direction (Philips)" },
+    { "group": "0077", "creator": "SlicerAlbula provenance 1", "elements": ["02"], "what": "the phase-encoding direction kept from a BIDS import" }
+  ]
+}

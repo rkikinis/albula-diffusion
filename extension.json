@@ -10,6 +10,7 @@
     "job": "import-job-main.ts"
   },
   "jobLabel": "Preparing fiber tracts",
+  "privateReads": "private-reads.json",
   "assets": {
     "naming": [
       "naming/tractcloud-42.json",
