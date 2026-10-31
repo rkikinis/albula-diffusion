@@ -28,7 +28,7 @@
 // This file belongs to the diffusion extension and registers through core's queue (render/demos/extension-modules.ts);
 // core never imports it. Critic round 2026-09-29 (qa/2026-09-29-diffusion-module.md) answered in this version.
 import type { ModuleContext } from "albula";
-import { askDerived, askedDerived, forgetAskedDerivedFor, onAskedDerived, MAJOR_TRACTS, queueModule, registerAfterLoad, registerSceneState } from "albula";
+import { askDerived, askedDerived, eyeSvg, forgetAskedDerivedFor, onAskedDerived, MAJOR_TRACTS, queueModule, registerAfterLoad, registerSceneState } from "albula";
 import type { MrsonNode } from "albula";
 import { fetchZarrVolumeNative, type ZarrDesc } from "albula";
 import { packRGB24 } from "albula";
@@ -2005,7 +2005,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
   function allEye(scan: Scan): HTMLButtonElement {
     const mineAll = groups.filter((g) => g.scan === scan.browserId);
     const allOn = mineAll.some((g) => g.visible);
-    const he = document.createElement("button"); he.textContent = allOn ? "👁" : "🚫";
+    const he = document.createElement("button"); he.innerHTML = eyeSvg(allOn ? "shown" : "hidden");   // open / closed eye (SDK 22)
     he.style.cssText = "background:none;border:none;padding:0;cursor:pointer;color:inherit;font-size:14px;min-width:0;width:18px;height:18px";
     he.title = allOn ? "Hide every tract" : "Show the tracts again"; he.setAttribute("aria-label", he.title);
     he.disabled = !mineAll.length;
@@ -2383,7 +2383,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
         const row = document.createElement("div");
         row.style.cssText = `display:grid;grid-template-columns:${cols};gap:4px;align-items:center;padding:1px 0`;
         const all = gs(r), anyOn = all.some((g) => g.visible);
-        const eye = document.createElement("button"); eye.textContent = anyOn ? "👁" : "🚫";
+        const eye = document.createElement("button"); eye.innerHTML = eyeSvg(anyOn ? "shown" : "hidden");
         eye.style.cssText = "background:none;border:none;padding:0;cursor:pointer;color:inherit;font-size:14px;min-width:0;width:18px;height:18px";   // a glyph button: not the 64 px of a button with words (PALETTE.md)
         eye.onclick = () => { for (const g of all) g.visible = !anyOn; redraw3d(); render(); };
         // ITS COLOR, AND THE CHOICE OF ANOTHER (Ron, 2026-10-16: "How do I give it a solid color?"): the square shows the
@@ -2415,7 +2415,7 @@ export function registerDiffusionPanel(ctx: ModuleContext): void {
           a.style.cssText = b.style.cssText = "font-size:12px;text-align:right;font-variant-numeric:tabular-nums";
           a.style.cssText += ";display:flex;align-items:center;justify-content:flex-end;gap:2px";
           if (g) {
-            const se = document.createElement("button"); se.textContent = g.visible ? "👁" : "🚫";
+            const se = document.createElement("button"); se.innerHTML = eyeSvg(g.visible ? "shown" : "hidden");
             se.style.cssText = "background:none;border:none;padding:0;cursor:pointer;color:inherit;font-size:12px;min-width:0;width:16px;height:16px";
             se.title = `${g.visible ? "Hide" : "Show"} the ${side} side`; se.setAttribute("aria-label", se.title);
             se.onclick = (e) => { e.stopPropagation(); g.visible = !g.visible; redraw3d(); render(); };
