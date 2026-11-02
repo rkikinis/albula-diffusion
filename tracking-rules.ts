@@ -28,6 +28,12 @@
 // trigeminus nerve"; "I prefer tight, if we don't lose too much"). Voxels whose mean diffusivity says fluid
 // (fluidMdMax) are left out of the brain: the cisterns and the nerves lying in them, the ventricles, the sulci; edema,
 // whose diffusivity is lower, stays.
+//
+// RULE 6 (2026-11-01; Ron: "Use his for import use ours for points", "Go"): rule 3 -- the same scan cut to the same
+// shell, the same brain, the same thresholds -- tracked by Michael Halle's tractline (tractline-track.ts), every voxel of
+// the brain a seed by his own seeding, on the graphics card. About three times faster on a whole brain. Only the import
+// uses it; the module's own tracking (a click, Add lines, Make tracts in the window) stays Albula's under rule 3's
+// settings, since the window cannot start his program.
 import type { DiffusionSeries } from "./dwi.ts";
 import type { TensorFit } from "./tensor.ts";
 import { prepareUkfData, type UkfData, type UkfOptions } from "./ukf.ts";
@@ -35,7 +41,9 @@ import { wholeBrainSeeds } from "./planning.ts";
 import { rng } from "./random.ts";
 
 export interface TrackingRule {
-  id: 1 | 2 | 3;
+  id: TrackingRuleId;
+  /** Who tracks: Albula's own UKF (ukf-gpu.ts), or Michael Halle's tractline (tractline-track.ts; the import only). */
+  tracker?: "albula" | "tractline";
   /** The tracker's settings (ukf.ts UkfOptions); stoppingFA is also the module's "Stop below FA" default. */
   ukf: Required<Pick<UkfOptions, "freeWater" | "seedingThreshold" | "stoppingFA" | "stoppingThreshold" | "recordLength">>;
   /** One shell: the b-value it is nearest to (the b = 0 images are always kept); undefined: every shell. */
@@ -55,13 +63,14 @@ export interface TrackingRule {
   fluidShellVoxels?: number;
 }
 
-export type TrackingRuleId = 1 | 2 | 3 | 4 | 5;
+export type TrackingRuleId = 1 | 2 | 3 | 4 | 5 | 6;
 export const TRACKING_RULES: Record<TrackingRuleId, TrackingRule> = {
   1: { id: 1, ukf: { freeWater: true, seedingThreshold: 0.18, stoppingFA: 0.15, stoppingThreshold: 0.1, recordLength: 0.9 }, seeding: "sample", trackIn: "head", brain: "median-otsu" },
   2: { id: 2, ukf: { freeWater: false, seedingThreshold: 0.1, stoppingFA: 0.08, stoppingThreshold: 0.06, recordLength: 1.8 }, shellNear: 3000, seeding: "every-voxel", trackIn: "brain", brain: "median-otsu" },
   3: { id: 3, ukf: { freeWater: false, seedingThreshold: 0.1, stoppingFA: 0.08, stoppingThreshold: 0.06, recordLength: 1.8 }, shellNear: 3000, seeding: "every-voxel", trackIn: "brain", brain: "t1-synthstrip" },
   4: { id: 4, ukf: { freeWater: false, seedingThreshold: 0.1, stoppingFA: 0.08, stoppingThreshold: 0.06, recordLength: 1.8 }, shellNear: 3000, seeding: "every-voxel", trackIn: "brain", brain: "t1-synthstrip", fluidMdMax: 2.5e-3 },
   5: { id: 5, ukf: { freeWater: false, seedingThreshold: 0.1, stoppingFA: 0.08, stoppingThreshold: 0.06, recordLength: 1.8 }, shellNear: 3000, seeding: "every-voxel", trackIn: "brain", brain: "t1-synthstrip", fluidMdMax: 2.5e-3, fluidShellVoxels: 3 },
+  6: { id: 6, tracker: "tractline", ukf: { freeWater: false, seedingThreshold: 0.1, stoppingFA: 0.08, stoppingThreshold: 0.06, recordLength: 1.8 }, shellNear: 3000, seeding: "every-voxel", trackIn: "brain", brain: "t1-synthstrip" },
 };
 /** The default: 3 (Ron, 2026-10-04: "yes, make rule 3 the default"). Rules 4 and 5 -- the fluid left out of the mask --
  *  were tried that evening and set aside: rule 4 took about a quarter of the corpus callosum's streamlines and cut into
@@ -79,15 +88,28 @@ export function shellNearest(bValues: number[], near: number): number | undefine
   return shells.sort((a, b) => Math.abs(a - near) - Math.abs(b - near) || b - a)[0];
 }
 
+/** The series cut to the rule's shell (the one nearest shellNear, with the b = 0 images); the whole series without one. */
+export function shellSeriesFor(dwi: DiffusionSeries, rule: TrackingRule): { series: DiffusionSeries; shell?: number } {
+  if (rule.shellNear === undefined) return { series: dwi };
+  const shell = shellNearest(dwi.bValues, rule.shellNear);
+  if (shell === undefined) return { series: dwi };
+  const keep = dwi.bValues.map((b, i) => (b <= 50 || Math.abs(b - shell) < 50 ? i : -1)).filter((i) => i >= 0);
+  return { series: { ...dwi, volumes: keep.map((i) => dwi.volumes[i]), bValues: keep.map((i) => dwi.bValues[i]), gradients: keep.map((i) => dwi.gradients[i]) }, shell };
+}
+
 /** The tracker's input for a rule: the series cut to the rule's shell (with the b = 0 images), inside the rule's mask. */
 export function ukfDataFor(dwi: DiffusionSeries, fit: TensorFit, rule: TrackingRule): UkfData & { shell?: number } {
   const mask = rule.trackIn === "brain" ? fit.seedMask ?? fit.mask : fit.mask;
-  if (rule.shellNear === undefined) return prepareUkfData(dwi, mask);
-  const shell = shellNearest(dwi.bValues, rule.shellNear);
-  if (shell === undefined) return prepareUkfData(dwi, mask);
-  const keep = dwi.bValues.map((b, i) => (b <= 50 || Math.abs(b - shell) < 50 ? i : -1)).filter((i) => i >= 0);
-  const sub: DiffusionSeries = { ...dwi, volumes: keep.map((i) => dwi.volumes[i]), bValues: keep.map((i) => dwi.bValues[i]), gradients: keep.map((i) => dwi.gradients[i]) };
-  return { ...prepareUkfData(sub, mask), shell };
+  const { series, shell } = shellSeriesFor(dwi, rule);
+  return { ...prepareUkfData(series, mask), ...(shell !== undefined ? { shell } : {}) };
+}
+
+/** The brain a rule seeds and tracks in, on the fit's grid (k, j, i), 1 inside: the brain mask where the scan has data
+ *  (everyBrainVoxel's voxels), or the head mask for a rule that tracks in the head. */
+export function trackingMaskFor(fit: TensorFit, rule: TrackingRule): Uint8Array {
+  const sm = rule.trackIn === "brain" ? fit.seedMask ?? fit.mask : fit.mask, out = new Uint8Array(fit.mask.length);
+  for (let v = 0; v < out.length; v++) out[v] = sm[v] && fit.mask[v] ? 1 : 0;
+  return out;
 }
 
 /** Every voxel of the brain mask that the tracking mask also holds, at its center, RAS mm. With `draw`, each point is

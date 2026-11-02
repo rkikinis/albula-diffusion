@@ -10,7 +10,8 @@
 import type { DiffusionSeries } from "./dwi.ts";
 import { fitTensors, type TensorFit } from "./tensor.ts";
 import { correctWithReversed, trackUkfSeeds, wholeBrainSeeds, type StageTimes, type TrackTiming } from "./planning.ts";
-import { everyBrainVoxel, seedsFor, TRACKING_RULE, TRACKING_RULES, ukfDataFor, withBrainFromT1, type MaskGrid, type TrackingRuleId } from "./tracking-rules.ts";
+import { everyBrainVoxel, seedsFor, shellSeriesFor, trackingMaskFor, TRACKING_RULE, TRACKING_RULES, ukfDataFor, withBrainFromT1, type MaskGrid, type TrackingRuleId } from "./tracking-rules.ts";
+import { trackWithTractline } from "./tractline-track.ts";
 import type { AlignmentCheckId, Grid3, RegistrationRuleId, Rigid } from "./registration.ts";
 import type { FieldFit } from "./distortion.ts";
 import { prepareScan, type Prepared } from "./prepare.ts";
@@ -134,6 +135,15 @@ export async function wholeBrainTracts(input: PipelineInput, device: GPUDevice, 
     const fod = await csdVolume(dwi, fit.mask, k, opts.csdWorkerUrl ? { workerUrl: opts.csdWorkerUrl } : {});
     csdSeconds = fod.seconds;
     sl = await trackPttParallel(fod, wholeBrainSeeds(fit, opts.seeds, opts.seedDraw), opts.pttWorkerUrl ? { workerUrl: opts.pttWorkerUrl } : {});
+  } else if (rule.tracker === "tractline" && !opts.seedEveryVoxel && opts.seeds === undefined && opts.seedDraw === undefined) {
+    // RULE 6: the same shell, brain and thresholds, tracked by Michael Halle's tractline (tractline-track.ts), his own
+    // seeding of every brain voxel. The options that change the seeds (validation runs) stay with Albula's tracker.
+    const { series, shell: sh } = shellSeriesFor(dwi, rule);
+    shell = sh;
+    const ukf = { ...rule.ukf, ...(opts.ukf ?? {}) };
+    const r = await trackWithTractline(series, trackingMaskFor(fit, rule), ukf);
+    sl = r.sl;
+    stages.tractline = { version: r.version, device: r.device, load: r.seconds.load, track: r.seconds.track, total: r.seconds.total };
   } else {
     // THE TRACKING RULE (tracking-rules.ts): its shell, mask, seeds and thresholds; opts.ukf overrides single settings.
     const tData = performance.now(), data = ukfDataFor(dwi, fit, rule), ts = performance.now();

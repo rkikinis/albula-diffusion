@@ -4,6 +4,13 @@
 //
 //   deno run -A --unstable-webgpu --config Contents/src/SlicerLive/deno.jsonc Contents/extensions/diffusion/import-job-main.ts \
 //     --server http://127.0.0.1:<port> --db <database id> [--series <SeriesInstanceUID>] [--dry-run] [--force] [--counts-only] [--only-missing] [--parent <pid>] [--assets <dir>]
+//     [--tracking-rule <n>] [--keep <prefix>] [--method ptt]
+//
+// `--tracking-rule <n>`: another tracking rule than the default (tracking-rules.ts), recorded as the one applied; for
+// validation runs. `--keep <prefix>` (with --dry-run): the streamlines and their names written to <prefix>.pos.f32 (x, y, z
+// RAS mm, every streamline's points one after another), .off.u32 (where each starts, and the end) and .tract.i32 (its
+// tract in TractCloud's 42-tract table, -1 none) -- the arrays Contents/tools/tract-review/cst-by-anatomy.ts --raw reads.
+// `--method ptt` (with --dry-run): CSD and parallel transport tracking in place of UKF, for comparing the two.
 //
 // `--only-missing` (how Albula's server runs it since 2026-10-14, desktop/extension-jobs.ts): tracts are made only for a
 // diffusion scan that has none made FROM ITS PRESENT INPUTS with its maps. Tracts an earlier version made are KEPT, never
@@ -28,10 +35,11 @@ import { codeFingerprint } from "./code-fingerprint.ts";
 import { loadRapidParc } from "./rapidparc/rapidparc.ts";
 import { importGraph, jobRules, makeMaps, makeTracts, MAP_PATHS, planStudy, studiesOf, synthstripVersion } from "./import-job.ts";
 import { appendRunLog } from "./run-log.ts";
+import type { TrackingRuleId } from "./tracking-rules.ts";
 import { dicomToTracts } from "./tracts-dicom.ts";
 import { indexSeries, provenanceEdges, provenancePathFor, seriesFilePaths } from "albula/server";
 
-const args = parseArgs(Deno.args, { string: ["server", "db", "series", "assets", "parent", "core-version"], boolean: ["dry-run", "force", "counts-only", "only-missing"] });
+const args = parseArgs(Deno.args, { string: ["server", "db", "series", "assets", "parent", "core-version", "tracking-rule", "keep", "method"], boolean: ["dry-run", "force", "counts-only", "only-missing"] });
 const quiet = args["counts-only"];
 // In counts-only mode only these fields leave the program.
 // "stages": step names and seconds only.
@@ -210,7 +218,18 @@ try {
         const progress = (line: string) => say({ event: "progress", case: k, series: plan.dwi.facts.uid, said: line });
         const out = mapsFor && !args["dry-run"]
           ? await makeMaps(db.path, server, plan, mapsFor.uid, m.device, m.model, m.labeler, progress, mapsFor.made)
-          : await makeTracts(db.path, db.id, server, plan, m.device, m.model, m.labeler, m.versions, progress, { force: args.force, dryRun: args["dry-run"], template: m.template });
+          : await makeTracts(db.path, db.id, server, plan, m.device, m.model, m.labeler, m.versions, progress, { force: args.force, dryRun: args["dry-run"], template: m.template,
+              ...(args["tracking-rule"] ? { trackingRule: Number(args["tracking-rule"]) as TrackingRuleId } : {}), ...(args.keep && args["dry-run"] ? { keep: true } : {}),
+              ...(args.method === "ptt" && args["dry-run"] ? { method: "ptt" as const } : {}) });
+        const kept = (out as { kept?: { sl: Float32Array[]; named: { tract: Int32Array } } }).kept;
+        if (kept && args.keep) {
+          const n = kept.sl.reduce((a, f) => a + f.length, 0), pos = new Float32Array(n), off = new Uint32Array(kept.sl.length + 1);
+          let at = 0; kept.sl.forEach((f, i) => { off[i] = at / 3; pos.set(f, at); at += f.length; }); off[kept.sl.length] = at / 3;
+          const pre = `${args.keep}${args.series ? "" : `-${k}`}`;
+          await Deno.writeFile(`${pre}.pos.f32`, new Uint8Array(pos.buffer)); await Deno.writeFile(`${pre}.off.u32`, new Uint8Array(off.buffer));
+          await Deno.writeFile(`${pre}.tract.i32`, new Uint8Array(new Int32Array(kept.named.tract).buffer));
+          delete (out as { kept?: unknown }).kept;
+        }
         if (out.state === "made") n.made++; else if (out.state === "would be made") n.wouldBeMade++; else if (out.state === "current") n.current++; else n[out.state]++;
         if (out.state === "failed") exitCode = 1;
         await logCase(plan, { ...out, wall: +((performance.now() - t0) / 1000).toFixed(1) });

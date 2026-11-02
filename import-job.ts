@@ -18,7 +18,8 @@ import { wholeBrainTracts, PIPELINE_MAX_B } from "./pipeline.ts";
 import { DISTORTION_RULE } from "./distortion.ts";
 import { MOTION_RULE } from "./motion.ts";
 import { ALIGNMENT_CHECK, REGISTRATION_RULE, type AlignmentCheckId, type RegistrationRuleId } from "./registration.ts";
-import { TRACKING_RULE } from "./tracking-rules.ts";
+import { TRACKING_RULE, type TrackingRuleId } from "./tracking-rules.ts";
+import { TRACTLINE } from "./tractline-track.ts";
 import { OUTSIDE_RULE } from "./outside-brain.ts";
 import { recordedReversed, stageText, type StageTimes } from "./planning.ts";
 import { colorFA, type TensorFit } from "./tensor.ts";
@@ -510,8 +511,15 @@ export async function makeTracts(dbDir: string, dbId: string, server: string, pl
     /** The reversed scan was chosen by the caller, not by partnerOf: when it is refused (its record says it is not a reversed
      *  pair, or no field could be made) nothing is stored and the case ends "cannot", said (Ron, 2026-10-27: a run given
      *  dMRI_dir99_PA, which is not reversed, stored two sets without distortion correction and said so only inside them). */
-    requirePartner?: boolean; template?: { t1: Grid3; brain: Uint8Array } } = {}): Promise<CaseOutcome> {
+    requirePartner?: boolean; template?: { t1: Grid3; brain: Uint8Array };
+    /** Another tracking rule than the default (tracking-rules.ts), recorded as the one applied (validation runs). */
+    trackingRule?: TrackingRuleId;
+    /** "ptt": CSD and parallel transport tracking instead of UKF (pipeline.ts; validation runs, never stored as the default). */
+    method?: "ukf" | "ptt";
+    /** With dryRun: hand back the streamlines and their names (validation runs; nothing is stored either way). */
+    keep?: boolean } = {}): Promise<CaseOutcome> {
   let rules = jobRules(versions);
+  if (opts.trackingRule) rules = { ...rules, tracking: opts.trackingRule };
   const inputs: CaseInputs = { diffusion: plan.dwi.facts.uid, partner: plan.partner?.facts.uid ?? null, t1: plan.t1?.facts.uid ?? null };
   const stored = await storedTracts(dbDir, plan.dwi.facts.uid);
   // CURRENT = the same code, rules and inputs AND its Color FA beside it (critic 2026-10-06, finding 16: a job stopped
@@ -534,7 +542,7 @@ export async function makeTracts(dbDir: string, dbId: string, server: string, pl
   // this case and every later one record the real version (and the next run does not remake them all).
   if (/not yet installed/.test(versions.synthstrip)) {
     const v = await synthstripVersion(server, { waitMs: 0, start: false });
-    if (v) { versions.synthstrip = v; rules = jobRules(versions); }
+    if (v) { versions.synthstrip = v; rules = { ...jobRules(versions), ...(opts.trackingRule ? { tracking: opts.trackingRule } : {}) }; }
   }
   const dwi = fromDicomVolumes(plan.dwi.frames, plan.dwi.facts.description);
   const t1v = plan.t1.frames[0], stages: StageTimes = { brain: brainMs };
@@ -552,7 +560,7 @@ export async function makeTracts(dbDir: string, dbId: string, server: string, pl
     ...(plan.partner ? { partner: { b0s: plan.partner.frames.filter((v) => Number(diffusionOf(v)?.bValue ?? 0) < 50).map((v) => v.data as ArrayLike<number>), grid: { dims: plan.partner.frames[0].dims, ijkToRAS: plan.partner.frames[0].ijkToRAS }, name: "the reversed scan" } } : {}),
     phaseEncoding: { scan: plan.dwi.facts.phaseEncoding, partner: plan.partner?.facts.phaseEncoding },
     t1: { dims: t1v.dims as [number, number, number], ijkToRAS: t1v.ijkToRAS, data: t1v.data as ArrayLike<number> },
-    brainT1: brain.mask }, device, model, { labeler, threads: { rigid: new URL("./rigid-worker.ts", import.meta.url), motion: new URL("./motion-worker.ts", import.meta.url) }, ...(opts.requirePartner ? { stopWithoutField: true } : {}) }, stages); }
+    brainT1: brain.mask }, device, model, { labeler, threads: { rigid: new URL("./rigid-worker.ts", import.meta.url), motion: new URL("./motion-worker.ts", import.meta.url) }, ...(opts.requirePartner ? { stopWithoutField: true } : {}), ...(opts.trackingRule ? { trackingRule: opts.trackingRule } : {}), ...(opts.method ? { method: opts.method } : {}) }, stages); }
   catch (e) {
     if ((e as { noField?: boolean }).noField) return { state: "cannot", why: `the reversed scan ${plan.partner!.facts.description} was given but not used, so nothing was made: ${(e as Error).message}` };
     throw e;
@@ -610,7 +618,7 @@ export async function makeTracts(dbDir: string, dbId: string, server: string, pl
   const w0 = performance.now();
   const written = await tractsToDicom(sets, { patientStudy: patientStudyOf(plan.dwi.header), frameOfReferenceUID: forUID, seriesInstanceUID: plan.dwi.facts.uid, instances: plan.dwi.instances,
     alsoReferenced: [...(aligned ? [{ seriesInstanceUID: plan.t1.facts.uid, instances: plan.t1.instances }] : []), ...(plan.partner ? [{ seriesInstanceUID: plan.partner.facts.uid, instances: plan.partner.instances }] : [])] },
-    { algorithmName: "UKF two-tensor (Albula's port of UKFTractography)", algorithmVersion: `tracking rule ${r.rule.id}`, algorithmParameters: JSON.stringify(r.rule.ukf).slice(0, 10240),
+    { algorithmName: r.rule.tracker === "tractline" ? `UKF two-tensor (Michael Halle's tractline ${TRACTLINE.version}, ${TRACTLINE.commit.slice(0, 7)})` : "UKF two-tensor (Albula's port of UKFTractography)", algorithmVersion: `tracking rule ${r.rule.id}`, algorithmParameters: JSON.stringify(r.rule.ukf).slice(0, 10240),
       model: "multi", provenance, seriesDescription: TRACTS_DESCRIPTION, seriesNumber });
   // A streamline of one point (a seed that stopped at once) has no line to store; the writer leaves it out, and says so.
   const onePoint = r.sl.length - written.tracks;
@@ -620,7 +628,7 @@ export async function makeTracts(dbDir: string, dbId: string, server: string, pl
   const out = { seriesUID: written.seriesInstanceUID, streamlines: r.sl.length, stored: written.tracks, named, seconds, said, stages: stageText(stages) };
   // A DRY RUN'S FINGERPRINT of the result (SPEED-2026-10-28.md: "same numbers" is checked, not assumed): every
   // streamline's coordinates, every name and side, the head frame and the alignment, as SHA-256. No identifier in it.
-  if (opts.dryRun) return { state: "would be made", ...out, digest: await resultDigest(r.sl, r.named.tract, r.named.side, headFrame ? { ...headFrame, seconds: 0, takenFrom: undefined } : null, r.alignment ?? null, [r.fit.fa, r.fit.md, r.fit.mask, ...(r.fit.seedMask ? [r.fit.seedMask] : [])]) };
+  if (opts.dryRun) return { state: "would be made", ...out, ...(opts.keep ? { kept: { sl: r.sl, named: r.named } } : {}), digest: await resultDigest(r.sl, r.named.tract, r.named.side, headFrame ? { ...headFrame, seconds: 0, takenFrom: undefined } : null, r.alignment ?? null, [r.fit.fa, r.fit.md, r.fit.mask, ...(r.fit.seedMask ? [r.fit.seedMask] : [])]) };
   const now = new Date(), d2 = (n: number) => String(n).padStart(2, "0");
   const meta = { sopInstanceUID: written.sopInstanceUID, seriesInstanceUID: written.seriesInstanceUID, studyInstanceUID: plan.dwi.facts.studyUID, modality: "MR",
     seriesNumber, seriesDate: `${now.getFullYear()}${d2(now.getMonth() + 1)}${d2(now.getDate())}`, seriesTime: `${d2(now.getHours())}${d2(now.getMinutes())}${d2(now.getSeconds())}`,

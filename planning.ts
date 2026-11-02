@@ -77,6 +77,8 @@ export interface StageTimes {
   brain?: number; frame?: number; write?: number;
   /** dcm2niix's second opinion (second-opinion.ts). */
   secondOpinion?: number;
+  /** Tracking rule 6: tractline's version, where it ran, and its own reading and tracking times (seconds). */
+  tractline?: { version: string; device: string; load: number; track: number; total: number };
 }
 const sec = (ms: number) => `${(ms / 1000).toFixed(ms < 10000 ? 2 : 1)} s`;
 export function stageText(t: StageTimes): string {
@@ -85,7 +87,9 @@ export function stageText(t: StageTimes): string {
   const add = (label: string, v?: number, extra = "") => { if (v !== undefined) parts.push(`${label} ${sec(v)}${extra}`); };
   add("read", t.read); add("brain on the T1", t.brain); add("dcm2niix", t.secondOpinion); add("directions checked", t.directions); add("align partner", t.align); add("distortion field", t.field); add("apply field", t.apply); add("head movement", t.motion); add("align to the T1", t.register); add("onto the T1", t.resample); add("mask + tensor", t.fit);
   add("seeds", t.seeds);
-  add("tracking", t.track, d ? ` (signal ${sec(d.data ?? 0)}, seeds ${sec(d.prepare)}, card ${sec(d.gpu)}, fibers ${sec(d.assemble)}, page ${sec(d.between)})` : "");
+  const tl = t.tractline;
+  add("tracking", t.track, d ? ` (signal ${sec(d.data ?? 0)}, seeds ${sec(d.prepare)}, card ${sec(d.gpu)}, fibers ${sec(d.assemble)}, page ${sec(d.between)})`
+    : tl ? ` (tractline ${tl.version} on ${tl.device === "mps" ? "the graphics card" : "the processor"}: reading ${sec(tl.load * 1000)}, tracking ${sec(tl.track * 1000)})` : "");
   add("naming", t.name); add("head frame", t.frame); add("distances", t.distances); add("drawing", t.draw); add("written as DICOM", t.write);
   return parts.join(" · ") + (t.total !== undefined ? ` — ${sec(t.total)} in all` : "");
 }
